@@ -48,6 +48,10 @@ LOGIN_URL = "https://www.tbbstock.com.tw/tbb/index/home.jsp"
 # 以最後一次的值為準；送出登入前也再等同樣的時間，避免驗證碼還沒套用就按下登入。
 VERIFY_SETTLE_MS = 200
 
+# 送出登入後最多等多久（毫秒）讓頁面換完。逾時不算失敗，只代表網站沒有換頁
+# （例如驗證碼錯誤被擋在原頁），程式照樣往下印出目前網址讓使用者自己判斷。
+LOGIN_NAV_TIMEOUT_MS = 10000
+
 
 def pause(message):
     """等使用者按 Enter；沒有可用的標準輸入時（例如被程式呼叫）直接略過。"""
@@ -241,8 +245,15 @@ def do_login(context, tbb_id, tbb_password, page=None):
 
     # 送出登入前再等一下，避免驗證碼還沒套用就按下登入。
     page.wait_for_timeout(VERIFY_SETTLE_MS)
-    page.locator("#Image22").click()
-    page.wait_for_timeout(3000)
+
+    # 等待要在按下登入「之前」就開始，否則換頁太快會來不及攔到。
+    # 換頁一完成就往下走，不用固定乾等；沒換頁時（登入被擋在原頁）逾時當作正常情況吞掉。
+    try:
+        with page.expect_navigation(wait_until="load", timeout=LOGIN_NAV_TIMEOUT_MS):
+            page.locator("#Image22").click()
+    except PlaywrightTimeoutError:
+        print(f"[{tbb_id}] 送出後頁面沒有跳轉，請確認是否登入失敗。")
+
     print(f"[{tbb_id}] 已送出登入，目前頁面網址: {page.url}")
 
     return page
