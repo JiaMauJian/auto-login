@@ -61,6 +61,25 @@ if ($LASTEXITCODE -ne 0) { throw "打包失敗" }
 # 把 .env.example 一併放到 dist，方便直接改成 .env 使用。
 Copy-Item -Force ".env.example" "dist\.env.example"
 
+# setup-profile.ps1 也要跟著走：新電腦上必須用它建立帶 Google 登入狀態的使用者資料夾
+# （該資料夾不能從別台電腦複製，見 .env 註解）。
+Copy-Item -Force "setup-profile.ps1" "dist\setup-profile.ps1"
+
+# migrate-cert.ps1 同理：新電腦上要把 tbbstock 的網頁版憑證從日常 Chrome profile
+# 複製到自動登入用的 profile，否則登入後會被「瀏覽器查無有效數位憑證」擋下來。
+Copy-Item -Force "migrate-cert.ps1" "dist\migrate-cert.ps1"
+
+# 說明文件也一起帶走，dist 整包複製到別台電腦時就有完整的設定步驟可以照做。
+Copy-Item -Force "詳細說明.md" "dist\詳細說明.md"
+Copy-Item -Force "簡易說明.md" "dist\簡易說明.md"
+
+# 另外產一份 HTML：那台電腦不一定有 Markdown 編輯器，.md 被記事本開啟時表格會糊掉。
+# HTML 樣式內嵌、不連外部資源，雙擊用瀏覽器就能讀。
+python -m pip install --quiet markdown
+if ($LASTEXITCODE -ne 0) { throw "安裝 markdown 失敗" }
+python build_docs.py
+if ($LASTEXITCODE -ne 0) { throw "產生 HTML 說明文件失敗" }
+
 Write-Host ""
 Write-Host "完成。執行檔在 dist 資料夾。"
 Write-Host "把 .env 複製到 exe 旁邊（同一層資料夾）再執行。"

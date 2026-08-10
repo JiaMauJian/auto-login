@@ -1,16 +1,16 @@
 """
 自動登入 tbbstock.com.tw（支援多組帳號）
-流程：自動開啟瀏覽器 -> 依 .env 內的每組帳號各開一個分頁 -> 自動填入身分證、密碼與驗證碼
-     -> 依 .env 的 AUTO_SUBMIT 決定要直接送出登入，還是等使用者確認後才一次送出。
-
-AUTO_SUBMIT=true（預設）：填完就直接按下登入。
-AUTO_SUBMIT=false：全部填完後停在終端機等按 Enter，方便先人工核對內容，再一次送出所有帳號。
+流程：自動開啟瀏覽器 -> 依 .env 內的每組帳號各開一個分頁 -> 自動填入身分證、密碼與驗證碼 -> 送出登入。
 
 多組帳號設定：.env 用 TBB_ID_1/TBB_PASSWORD_1、TBB_ID_2/TBB_PASSWORD_2... 依序編號（見 .env.example）。
 每組帳號開在同一個瀏覽器視窗的不同分頁（共用同一個 browser context，因此也共用同一組 cookie/session）。
 注意：這個網站是 Java/Servlet 架構，登入狀態通常是用 JSESSIONID 這類 cookie 辨識；
 共用 context 代表多帳號同時登入時，有可能其中一個分頁登入後把另一個分頁的 session 頂掉。
 如果實測發現會互踢，需要改回每組帳號各自獨立 context（browser.new_context()）。
+
+瀏覽器設定：預設用 Playwright 自己下載的 Chromium、每次都是全新的空白 profile（沒有任何登入狀態）。
+想改用電腦上已安裝的 Chrome，在 .env 設 BROWSER_CHANNEL=chrome；
+想保留登入狀態（Google 帳號、Cookie），再加上 USER_DATA_DIR 指定使用者資料夾（見 .env.example）。
 
 驗證碼取得方式：頁面載入過程中瀏覽器會呼叫 VerifyNumberServlet，
 該次請求的回應內容本身就是明文數字（例如 "86176"），網站再用這組數字畫成 canvas 圖案顯示。
@@ -94,24 +94,80 @@ def install_chromium():
     subprocess.run([node, cli, "install", "chromium"], env=get_driver_env(), check=True)
 
 
-def launch_browser(p):
-    """開啟 Chromium；第一次在新電腦上執行、瀏覽器還沒下載時自動補裝。"""
+def launch_options():
+    """
+    依 .env 決定要開哪一個瀏覽器。
+
+    BROWSER_CHANNEL：chrome / msedge / chrome-beta ...，用電腦上已安裝的正式版瀏覽器；
+                     留空則用 Playwright 自己下載的 Chromium。
+    BROWSER_PATH：直接指定執行檔完整路徑（例如某些綠色版 Chrome），會蓋過 BROWSER_CHANNEL。
+    BROWSER_PROFILE_DIR：Chrome 使用者資料夾底下的哪一個設定檔（Default、Profile 1...），
+                         只有搭配 USER_DATA_DIR 才有意義。
+    """
+    options = {"headless": False}
+
+    executable_path = os.getenv("BROWSER_PATH", "").strip()
+    channel = os.getenv("BROWSER_CHANNEL", "").strip()
+    if executable_path:
+        options["executable_path"] = executable_path
+    elif channel:
+        options["channel"] = channel
+
+    profile_dir = os.getenv("BROWSER_PROFILE_DIR", "").strip()
+    if profile_dir:
+        options["args"] = [f"--profile-directory={profile_dir}"]
+
+    return options
+
+
+def user_data_dir():
+    """
+    回傳 .env 的 USER_DATA_DIR（使用者資料夾）；留空代表每次都用全新的暫時 profile。
+
+    指定資料夾後，Cookie、Google 登入狀態等都會保存在這個資料夾，下次執行就不用再登入一次。
+    可以用相對路徑（相對於 .env 所在資料夾），也支援 %LOCALAPPDATA% 這類環境變數寫法。
+    """
+    raw = os.getenv("USER_DATA_DIR", "").strip().strip('"')
+    if not raw:
+        return None
+    path = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if not path.is_absolute():
+        path = app_dir() / path
+    return path
+
+
+def open_context(p):
+    """
+    開啟瀏覽器並回傳 (context, browser)。
+
+    有指定 USER_DATA_DIR 時用 launch_persistent_context（登入狀態會留在該資料夾，
+    此時沒有獨立的 browser 物件，回傳的 browser 為 None）；
+    沒指定時維持原本行為：開全新的暫時 profile。
+    第一次在新電腦上執行、Playwright 的 Chromium 還沒下載時會自動補裝。
+    """
+    options = launch_options()
+    profile_path = user_data_dir()
+
+    def launch():
+        if profile_path is None:
+            browser = p.chromium.launch(**options)
+            return browser.new_context(), browser
+        profile_path.mkdir(parents=True, exist_ok=True)
+        return p.chromium.launch_persistent_context(str(profile_path), **options), None
+
     try:
-        return p.chromium.launch(headless=False)
+        return launch()
     except PlaywrightError as exc:
-        if "Executable doesn't exist" not in str(exc):
-            raise
-        print("找不到 Chromium，第一次執行需要下載（約 150MB，只需一次）...")
-        install_chromium()
-        return p.chromium.launch(headless=False)
-
-
-def env_flag(name, default=True):
-    """讀取 .env 的布林設定，接受 true/1/yes/y/on 這類寫法（不分大小寫）。"""
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+        message = str(exc)
+        if "Executable doesn't exist" in message and "channel" not in options and "executable_path" not in options:
+            print("找不到 Chromium，第一次執行需要下載（約 150MB，只需一次）...")
+            install_chromium()
+            return launch()
+        if profile_path is not None:
+            print(f"開啟瀏覽器失敗，使用者資料夾: {profile_path}")
+            print("如果這是你平常在用的 Chrome 資料夾，請先把所有 Chrome 視窗完全關掉再執行一次")
+            print("（同一個資料夾不能同時被兩個 Chrome 開著）。")
+        raise
 
 
 def load_accounts():
@@ -127,16 +183,13 @@ def load_accounts():
     return accounts
 
 
-def submit_login(tbb_id, page):
-    page.wait_for_timeout(VERIFY_SETTLE_MS)
-    page.locator("#Image22").click()
-    page.wait_for_timeout(3000)
-    print(f"[{tbb_id}] 已送出登入，目前頁面網址: {page.url}")
-
-
-def do_login(context, tbb_id, tbb_password, auto_submit=True):
-    """開一個新分頁並填入帳密與驗證碼；auto_submit 為 True 時直接送出登入。回傳該分頁物件。"""
-    page = context.new_page()
+def do_login(context, tbb_id, tbb_password, page=None):
+    """
+    開一個新分頁，填入帳密與驗證碼後送出登入。回傳該分頁物件。
+    傳入 page 可以沿用既有分頁（persistent context 啟動時會自帶一個空白分頁）。
+    """
+    if page is None:
+        page = context.new_page()
 
     verify_number = {}
 
@@ -186,8 +239,11 @@ def do_login(context, tbb_id, tbb_password, auto_submit=True):
         page.locator("#NumberLabel").fill(verify_number["value"])
         print(f"[{tbb_id}] 已自動取得並填入驗證碼: {verify_number['value']}")
 
-    if auto_submit:
-        submit_login(tbb_id, page)
+    # 送出登入前再等一下，避免驗證碼還沒套用就按下登入。
+    page.wait_for_timeout(VERIFY_SETTLE_MS)
+    page.locator("#Image22").click()
+    page.wait_for_timeout(3000)
+    print(f"[{tbb_id}] 已送出登入，目前頁面網址: {page.url}")
 
     return page
 
@@ -199,37 +255,36 @@ def main():
         print("並依 TBB_ID_1/TBB_PASSWORD_1、TBB_ID_2/TBB_PASSWORD_2... 填入至少一組帳號。")
         sys.exit(1)
 
-    auto_submit = env_flag("AUTO_SUBMIT", default=True)
     configure_browsers_path()
 
     with sync_playwright() as p:
-        browser = launch_browser(p)
-        context = browser.new_context()
+        context, browser = open_context(p)
 
-        pages = []
+        def close_browser():
+            context.close()
+            if browser is not None:
+                browser.close()
+
+        # persistent context 啟動時會自帶一個空白分頁，第一組帳號直接沿用，避免多留一個空白分頁。
+        spare_page = context.pages[0] if context.pages else None
+
+        count = 0
         try:
             for account in accounts:
-                page = do_login(context, account["id"], account["password"], auto_submit)
-                pages.append((account["id"], page))
+                do_login(context, account["id"], account["password"], spare_page)
+                spare_page = None
+                count += 1
         except PlaywrightTimeoutError:
             print("找不到登入欄位，網站版面可能已變更，請檢查 login.py 中的選擇器。")
-            browser.close()
+            close_browser()
             sys.exit(1)
 
         print("=" * 60)
-        if auto_submit:
-            print(f"共 {len(pages)} 組帳號已自動送出登入。")
-        else:
-            print(f"共 {len(pages)} 組帳號已自動填入身分證、密碼與驗證碼（AUTO_SUBMIT=false，尚未送出）。")
-            print("請切換到瀏覽器視窗逐一確認內容無誤，再回到終端機按 Enter，會一次把所有帳號送出登入。")
-            print("=" * 60)
-            pause("按 Enter 送出登入...")
-            for tbb_id, page in pages:
-                submit_login(tbb_id, page)
+        print(f"共 {count} 組帳號已自動送出登入。")
         print("=" * 60)
         pause("按 Enter 結束並關閉瀏覽器...")
 
-        browser.close()
+        close_browser()
 
 
 if __name__ == "__main__":
