@@ -107,8 +107,11 @@ def launch_options():
     BROWSER_PATH：直接指定執行檔完整路徑（例如某些綠色版 Chrome），會蓋過 BROWSER_CHANNEL。
     BROWSER_PROFILE_DIR：Chrome 使用者資料夾底下的哪一個設定檔（Default、Profile 1...），
                          只有搭配 USER_DATA_DIR 才有意義。
+
+    --start-maximized：讓視窗一開起來就最大化（要搭配 no_viewport 才有效，見 open_context）。
     """
     options = {"headless": False}
+    args = ["--start-maximized"]
 
     executable_path = os.getenv("BROWSER_PATH", "").strip()
     channel = os.getenv("BROWSER_CHANNEL", "").strip()
@@ -119,7 +122,9 @@ def launch_options():
 
     profile_dir = os.getenv("BROWSER_PROFILE_DIR", "").strip()
     if profile_dir:
-        options["args"] = [f"--profile-directory={profile_dir}"]
+        args.append(f"--profile-directory={profile_dir}")
+
+    options["args"] = args
 
     return options
 
@@ -148,6 +153,12 @@ def open_context(p):
     此時沒有獨立的 browser 物件，回傳的 browser 為 None）；
     沒指定時維持原本行為：開全新的暫時 profile。
     第一次在新電腦上執行、Playwright 的 Chromium 還沒下載時會自動補裝。
+
+    no_viewport=True：Playwright 預設會把網頁鎖在 1280x720 的模擬 viewport，
+    視窗再大網頁也只畫在左上角一小塊、右邊下面留白，而且拉大視窗也不會跟著變。
+    設 True 之後 viewport 就跟著實際視窗大小走（配合 --start-maximized 開起來就是滿版）。
+    注意這是 context 選項：launch() 不吃，只能放在 new_context()；
+    launch_persistent_context() 則是 launch 與 context 選項合併，可以直接帶。
     """
     options = launch_options()
     profile_path = user_data_dir()
@@ -155,9 +166,9 @@ def open_context(p):
     def launch():
         if profile_path is None:
             browser = p.chromium.launch(**options)
-            return browser.new_context(), browser
+            return browser.new_context(no_viewport=True), browser
         profile_path.mkdir(parents=True, exist_ok=True)
-        return p.chromium.launch_persistent_context(str(profile_path), **options), None
+        return p.chromium.launch_persistent_context(str(profile_path), no_viewport=True, **options), None
 
     try:
         return launch()
