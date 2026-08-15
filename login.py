@@ -10,7 +10,7 @@
 
 瀏覽器設定：預設用 Playwright 自己下載的 Chromium、每次都是全新的空白 profile（沒有任何登入狀態）。
 想改用電腦上已安裝的 Chrome，在 .env 設 BROWSER_CHANNEL=chrome；
-想保留登入狀態（Google 帳號、Cookie），再加上 USER_DATA_DIR 指定使用者資料夾（見 .env.example）。
+想保留狀態（Cookie、tbbstock 數位憑證），再加上 USER_DATA_DIR 指定使用者資料夾（見 .env.example）。
 
 驗證碼取得方式：頁面載入過程中瀏覽器會呼叫 VerifyNumberServlet，
 該次請求的回應內容本身就是明文數字（例如 "86176"），網站再用這組數字畫成 canvas 圖案顯示。
@@ -59,6 +59,62 @@ def pause(message):
         input(message)
     except EOFError:
         pass
+
+
+def _enter_pressed():
+    """
+    有沒有按下 Enter（不阻塞）。回傳 None 代表這個環境讀不到鍵盤，只能改用別的方式結束。
+
+    不能用 input()，那會整個卡住 —— 卡住的後果見 wait_until_finished 的說明。
+    """
+    if not sys.stdin or not sys.stdin.isatty():
+        return None
+    try:
+        import msvcrt
+    except ImportError:
+        return None
+    try:
+        pressed = False
+        while msvcrt.kbhit():
+            if msvcrt.getwch() in ("\r", "\n"):
+                pressed = True
+        return pressed
+    except OSError:
+        return None
+
+
+def wait_until_finished(context):
+    """
+    登入完成後停在這裡，直到使用者按 Enter 或自己把瀏覽器關掉。
+
+    這段等待「必須持續呼叫 Playwright」，也就是下面那個 wait_for_timeout。
+    Playwright 的同步 API 只有在程式進入 Playwright 呼叫時才會去處理瀏覽器送來的事件，
+    而網站用 window.open 開出來的新視窗要等 Playwright 接手初始化之後才會開始載入。
+
+    原本這裡是 input()，一卡住就整個停擺，於是使用者在網站上點「簡易看盤下單」
+    （<a href="javascript:fastQuoteUtil.openWinURL('../FastQuote/index.jsp')">，
+    內部是 window.open）跳出來的視窗會一直停在 about:blank 空白，
+    按了 Enter 又會直接連瀏覽器一起關掉，永遠看不到它載入。
+    """
+    print("按 Enter 結束並關閉瀏覽器（也可以直接把瀏覽器視窗關掉）...", flush=True)
+
+    while True:
+        pressed = _enter_pressed()
+        if pressed is None:
+            return          # 讀不到鍵盤（例如被別的程式呼叫），維持原本「不等待」的行為
+        if pressed:
+            return
+
+        # 分頁全關掉 = 使用者自己關了瀏覽器，不要再等下去。
+        try:
+            pages = [pg for pg in context.pages if not pg.is_closed()]
+            if not pages:
+                print("瀏覽器已關閉。")
+                return
+            pages[0].wait_for_timeout(150)   # 這行同時是「驅動 Playwright」的關鍵
+        except PlaywrightError:
+            print("瀏覽器已關閉。")
+            return
 
 
 def configure_browsers_path():
@@ -133,7 +189,7 @@ def user_data_dir():
     """
     回傳 .env 的 USER_DATA_DIR（使用者資料夾）；留空代表每次都用全新的暫時 profile。
 
-    指定資料夾後，Cookie、Google 登入狀態等都會保存在這個資料夾，下次執行就不用再登入一次。
+    指定資料夾後，Cookie 與 tbbstock 的數位憑證都保存在這個資料夾，下次執行就直接沿用。
     可以用相對路徑（相對於 .env 所在資料夾），也支援 %LOCALAPPDATA% 這類環境變數寫法。
     """
     raw = os.getenv("USER_DATA_DIR", "").strip().strip('"')
@@ -304,9 +360,12 @@ def main():
         print("=" * 60)
         print(f"共 {count} 組帳號已自動送出登入。")
         print("=" * 60)
-        pause("按 Enter 結束並關閉瀏覽器...")
+        wait_until_finished(context)
 
-        close_browser()
+        try:
+            close_browser()
+        except PlaywrightError:
+            pass    # 使用者已經自己關掉瀏覽器了
 
 
 if __name__ == "__main__":
