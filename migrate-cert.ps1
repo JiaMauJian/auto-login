@@ -195,7 +195,7 @@ if ($sourceProfile -eq $targetProfile) {
 if (-not (Test-Path $targetProfile)) {
     Write-Host ""
     Write-Host "目標 profile 還不存在：$targetProfile" -ForegroundColor Red
-    Write-Host "請先執行 .\setup-profile.ps1 建立資料夾（順便完成 Google 登入）再跑本腳本。"
+    Write-Host "請先執行 .\setup-profile.ps1 把資料夾建出來（開起來的視窗直接關掉就好）再跑本腳本。"
     exit 1
 }
 

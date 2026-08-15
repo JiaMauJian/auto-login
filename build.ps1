@@ -61,8 +61,8 @@ if ($LASTEXITCODE -ne 0) { throw "打包失敗" }
 # 把 .env.example 一併放到 dist，方便直接改成 .env 使用。
 Copy-Item -Force ".env.example" "dist\.env.example"
 
-# setup-profile.ps1 也要跟著走：新電腦上必須用它建立帶 Google 登入狀態的使用者資料夾
-# （該資料夾不能從別台電腦複製，見 .env 註解）。
+# setup-profile.ps1 也要跟著走：新電腦上必須用它把自動登入專用的使用者資料夾建出來，
+# migrate-cert.ps1 才有地方把憑證複製進去（該資料夾不能從別台電腦複製，見 .env 註解）。
 Copy-Item -Force "setup-profile.ps1" "dist\setup-profile.ps1"
 
 # migrate-cert.ps1 同理：新電腦上要把 tbbstock 的網頁版憑證從日常 Chrome profile
