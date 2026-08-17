@@ -179,8 +179,10 @@ class SyncApp:
 
         buttons = ttk.Frame(frame)
         buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Button(buttons, text="全選", command=lambda: self._check_all(True)).pack(side="left")
-        ttk.Button(buttons, text="全不選", command=lambda: self._check_all(False)).pack(side="left", padx=(6, 0))
+        self.check_all_button = ttk.Button(buttons, text="全選", command=lambda: self._check_all(True))
+        self.check_all_button.pack(side="left")
+        self.uncheck_all_button = ttk.Button(buttons, text="全不選", command=lambda: self._check_all(False))
+        self.uncheck_all_button.pack(side="left", padx=(6, 0))
         self.takeback_button = ttk.Button(buttons, text="交還給程式", command=self.takeback, state="disabled")
         self.takeback_button.pack(side="left", padx=(16, 0))
         self.write_button = ttk.Button(buttons, text="寫入", style="Big.TButton",
@@ -559,6 +561,8 @@ class SyncApp:
                 text.append(f"• {warning}")
         for problem in self.problems:
             text.append(f"⚠ {problem}")
+        if self.proposals and not any(item["will_write"] for _name, item in self.row_map.values()):
+            text.append("目前沒有任何格子需要寫入 —— Excel 上的數字跟網頁已經一致。")
         if not text and self.proposals:
             text.append("沒有需要注意的事。")
 
@@ -602,6 +606,13 @@ class SyncApp:
             text=f"寫入勾選的 {count} 項" if count else "寫入",
             state="normal" if (count and not self.busy) else "disabled",
         )
+
+        # 沒有任何可勾的格子時，全選/全不選按了也不會有反應，那就不要亮著。
+        # 一顆按得下去卻什麼都不發生的按鈕，只會讓人以為程式壞了。
+        checkable = any(item["will_write"] for _name, item in self.row_map.values())
+        state = "normal" if (checkable and not self.busy) else "disabled"
+        self.check_all_button.configure(state=state)
+        self.uncheck_all_button.configure(state=state)
 
         selected = self.tree.selection()
         item = self.row_map.get(selected[0]) if selected else None
