@@ -43,7 +43,7 @@ from util import show
 
 SOURCE_NAMES = {"program": "程式", "human": "人工", "adopt": "交接", "backfill": "補登"}
 
-CHECKED, UNCHECKED = "☑", "☐"
+BOX_SIZE = 22          # 勾選框邊長（像素）。列高會跟著調。
 
 
 def pick_font():
@@ -53,6 +53,53 @@ def pick_font():
         if name in families:
             return name
     return "TkDefaultFont"
+
+
+def make_box_image(size, checked):
+    """
+    畫一個勾選框。
+
+    Treeview 沒有內建的 checkbox，原本是拿「☑」這個字當方框，大小完全被字型
+    綁死、想放大就得連整列的字一起放大。改成自己畫的小圖之後，尺寸就獨立了。
+    """
+    image = tk.PhotoImage(width=size, height=size)
+    image.put("#ffffff", to=(0, 0, size, size))
+
+    edge = max(1, size // 10)
+    for area in ((0, 0, size, edge), (0, size - edge, size, size),
+                 (0, 0, edge, size), (size - edge, 0, size, size)):
+        image.put("#5f6368", to=area)
+
+    if checked:
+        width = max(2, size // 6)
+        stroke(image, "#1a7f37", (size * 0.26, size * 0.48), (size * 0.44, size * 0.66), width)
+        stroke(image, "#1a7f37", (size * 0.44, size * 0.66), (size * 0.76, size * 0.26), width)
+    return image
+
+
+def stroke(image, color, start, end, width):
+    """在 PhotoImage 上畫一條粗線。沒有 PIL 可用，只能自己一格一格 put。"""
+    (x1, y1), (x2, y2) = start, end
+    steps = max(1, int(max(abs(x2 - x1), abs(y2 - y1))))
+    limit = image.width()
+    for i in range(steps + 1):
+        x = max(0, round(x1 + (x2 - x1) * i / steps))
+        y = max(0, round(y1 + (y2 - y1) * i / steps))
+        image.put(color, to=(x, y, min(x + width, limit), min(y + width, limit)))
+
+
+def center_on(win, parent):
+    """
+    把對話框擺在主視窗中間偏上。
+
+    不設位置的話由視窗管理員決定，常常跑到螢幕角落或蓋住主視窗的邊，
+    使用者得先找它在哪。偏上是因為對話框通常比主視窗矮，正中間會顯得偏低。
+    """
+    win.update_idletasks()
+    width, height = win.winfo_width(), win.winfo_height()
+    x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+    y = parent.winfo_rooty() + (parent.winfo_height() - height) // 3
+    win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
 
 
 class SyncApp:
@@ -103,7 +150,7 @@ class SyncApp:
         self.root.minsize(900, 560)
 
         style = ttk.Style()
-        style.configure("Treeview", font=(family, 10), rowheight=26)
+        style.configure("Treeview", font=(family, 10), rowheight=max(28, BOX_SIZE + 8))
         style.configure("Treeview.Heading", font=(family, 10, "bold"))
         style.configure("TButton", font=(family, 10))
         style.configure("TLabel", font=(family, 10))
@@ -143,6 +190,9 @@ class SyncApp:
     def _build_sync_tab(self):
         frame = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(frame, text="  同步  ")
+
+        # 圖片一定要自己留參考，Tk 只存指標，被 Python 回收掉就變成空白。
+        self.box_images = {True: make_box_image(BOX_SIZE, True), False: make_box_image(BOX_SIZE, False)}
 
         columns = ("cell", "label", "current", "web", "proposed", "status", "note")
         self.tree = ttk.Treeview(frame, columns=columns, show="tree headings", selectmode="browse")
@@ -543,7 +593,7 @@ class SyncApp:
 
                 iid = self.tree.insert(
                     parent, "end",
-                    text=self._box(name, item),
+                    text="", image=self._box(name, item),
                     values=(
                         item["cell"], item["label"],
                         show(item["current"]), show(item["web"]),
@@ -574,9 +624,10 @@ class SyncApp:
         self._sync_buttons()
 
     def _box(self, name, item):
+        """這一列的勾選框圖片。不能寫的格子就不給框 —— 沒得選就不要看起來像可以選。"""
         if not item["will_write"]:
             return ""
-        return CHECKED if self.checked.get((name, item["cell"]), False) else UNCHECKED
+        return self.box_images[self.checked.get((name, item["cell"]), False)]
 
     def _on_tree_click(self, event):
         """點第一欄的方框就切換勾選。Treeview 沒有內建 checkbox，只能自己畫。"""
@@ -590,14 +641,14 @@ class SyncApp:
             return
         key = (name, item["cell"])
         self.checked[key] = not self.checked.get(key, False)
-        self.tree.item(iid, text=self._box(name, item))
+        self.tree.item(iid, image=self._box(name, item))
         self._sync_buttons()
 
     def _check_all(self, value):
         for iid, (name, item) in self.row_map.items():
             if item["will_write"]:
                 self.checked[(name, item["cell"])] = value
-                self.tree.item(iid, text=self._box(name, item))
+                self.tree.item(iid, image=self._box(name, item))
         self._sync_buttons()
 
     def _sync_buttons(self):
@@ -874,6 +925,7 @@ def ask_calibration(parent, family, item, today):
     ttk.Button(buttons, text="取消", command=win.destroy).pack(side="right")
     ttk.Button(buttons, text="確定校正", command=confirm).pack(side="right", padx=(0, 8))
 
+    center_on(win, parent)
     win.grab_set()
     parent.wait_window(win)
     return result.get("value")
@@ -928,6 +980,7 @@ def ask_backfill(parent, family, today):
     ttk.Button(buttons, text="取消", command=win.destroy).pack(side="right")
     ttk.Button(buttons, text="補登", command=confirm).pack(side="right", padx=(0, 8))
 
+    center_on(win, parent)
     win.grab_set()
     amount_entry.focus_set()
     parent.wait_window(win)
