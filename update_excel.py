@@ -158,8 +158,10 @@ def run(path, records, today, write, adopt, today_included):
     excel, workbook, attached = excel_io.open_workbook(path, write)
 
     pending = []
+    adopt_events = []
     blocked = False
     needs_today = False
+    at = datetime.datetime.now().isoformat(timespec="seconds")
 
     try:
         for record in records:
@@ -191,8 +193,11 @@ def run(path, records, today, write, adopt, today_included):
             proposals, warnings = planner.plan(sheet_data, record, book, today)
 
             if adopt:
-                messages, missing = planner.adopt(proposals, book, today, today_included)
+                messages, events, missing = planner.adopt(
+                    proposals, book, record["sheet_name"], today, today_included, at
+                )
                 needs_today = needs_today or missing
+                adopt_events.extend(events)
                 for message in messages:
                     print(f"  [交接] {message}")
                 if messages:
@@ -221,7 +226,7 @@ def run(path, records, today, write, adopt, today_included):
             print("有分頁沒過檢查，整份都不寫入。請先處理上面的 [中止] 項目。")
             return
 
-        write_all(path, book_ledger, pending, today, attached)
+        write_all(path, book_ledger, pending, adopt_events, today, at, attached)
 
     finally:
         excel_io.close_workbook(excel, workbook, attached)
@@ -242,7 +247,7 @@ def show_table(proposals):
             print(f"  {' ' * 6}{item['note']}")
 
 
-def write_all(path, book_ledger, pending, today, attached):
+def write_all(path, book_ledger, pending, adopt_events, today, at, attached):
     """真的寫入：先備份，再寫 Excel，最後才更新紀錄檔與歷程。"""
     writes = [
         (sheet, [(item["row"], item["col"], item["proposed"]) for item in proposals if item["will_write"]])
@@ -262,8 +267,7 @@ def write_all(path, book_ledger, pending, today, attached):
     # 接上使用者開著的 Excel 時仍然會更新紀錄檔，即使他最後選擇不存檔。
     # 這不是漏洞：下次執行時 Excel 上的數字跟紀錄檔對不起來，那幾格會被判成手動、
     # 程式停手等人確認 —— 剛好就是「你自己撤銷了程式的修改」該有的結果。
-    at = datetime.datetime.now().isoformat(timespec="seconds")
-    events = []
+    events = list(adopt_events)
     for _, proposals, book, sheet_name in pending:
         events.extend(planner.commit(proposals, book, sheet_name, today, at))
 

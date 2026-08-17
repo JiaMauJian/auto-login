@@ -174,7 +174,7 @@ def record_net(cash, day, net):
     cash.setdefault("applied", {})[day.isoformat()] = round(net, 2)
 
 
-def calibrate(cash, balance, day, net, today_included):
+def calibrate(cash, balance, day, net, today_included, at):
     """
     以 Excel 現在的數字為新基準，從 day 起重新起算。
 
@@ -189,6 +189,8 @@ def calibrate(cash, balance, day, net, today_included):
     cash["applied"] = {day.isoformat(): round(net, 2)}
     cash["mode"] = AUTO
     cash["last_written"] = round(balance, 2)
+    cash["last_written_at"] = at
+    cash.pop("since", None)
 
 
 def missing_dates(cash, today):

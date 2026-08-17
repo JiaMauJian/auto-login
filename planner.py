@@ -214,15 +214,18 @@ def _cash(sheet_data, record, book, today, warnings):
     return proposal
 
 
-def adopt(proposals, book, today, today_included):
+def adopt(proposals, book, sheet_name, today, today_included, at):
     """
-    把「未接管 / 手動」的格子交還給程式管理。回傳 (訊息清單, 還缺什麼的說明)。
+    把「未接管 / 手動」的格子交還給程式管理。回傳 (訊息清單, 歷程項目, 還缺什麼)。
 
     持股沒有副作用：網頁庫存就是唯一真相，交還就是下次以網頁值重抄一次。
     現金不一樣 —— 程式無法從一個數字看出它含不含今天的淨收付，猜錯就是多扣或
     少扣一次，所以一定要 today_included 明講，沒講就不動現金那一格。
+
+    交接本身也要進歷程。它是唯一一種「人決定、程式照做」的異動，
+    日後回頭查帳最需要看到的就是這種：餘額為什麼從這天開始不一樣了。
     """
-    messages = []
+    messages, events = [], []
     needs_today = False
 
     for item in proposals:
@@ -236,21 +239,30 @@ def adopt(proposals, book, today, today_included):
             if today_included is None:
                 needs_today = True
                 continue
-            ledger.calibrate(book["cash"], item["current"], today, item["net"], today_included)
-            messages.append(
-                f"現金基準改為 {item['current']:g}"
-                f"（{'已含' if today_included else '尚未含'}今日淨收付 {item['net']:g}），"
+
+            cash = book["cash"]
+            was = cash.get("last_written")
+            ledger.calibrate(cash, item["current"], today, item["net"], today_included, at)
+            message = (
+                f"現金基準改為 {cash['baseline_value']:g}"
+                f"（Excel 上的 {item['current']:g} "
+                f"{'已含' if today_included else '尚未含'}今日淨收付 {item['net']:g}），"
                 f"從 {today:%Y/%m/%d} 起重新起算"
             )
+            messages.append(message)
+            events.append(_event(at, sheet_name, item, "adopt", was, item["current"], message))
             continue
 
         state = book["holdings"].setdefault(item["key"], {}).setdefault(item["which"], ledger.new_field())
+        was = state.get("last_written")
         state["mode"] = ledger.AUTO
         state["last_written"] = item["current"]
+        state["last_written_at"] = at
         state.pop("since", None)
         messages.append(f"{item['cell']} {item['label']} 交還給程式管理")
+        events.append(_event(at, sheet_name, item, "adopt", was, item["current"], "交還給程式管理"))
 
-    return messages, needs_today
+    return messages, events, needs_today
 
 
 def commit(proposals, book, sheet_name, today, at):
