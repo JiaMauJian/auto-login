@@ -368,11 +368,38 @@ def main():
             pass    # 使用者已經自己關掉瀏覽器了
 
 
+def route():
+    """
+    只打包一個 exe，靠參數決定要做什麼：
+
+        tbb-login.exe            自動登入（不帶參數就是它，跟以前一樣）
+        tbb-login.exe --sync     開持股同步的介面視窗
+        tbb-login.exe --update   持股同步的命令列版，後面的參數原樣傳下去
+
+    不做成好幾個 exe，是因為 Playwright 那包東西會被各塞一份，dist 直接肥好幾倍，
+    而部署方式是整包資料夾複製到目標電腦。
+
+    ui / update_excel 刻意在函式裡才 import：它們都會反過來 import 這個模組，
+    寫在檔案最上面會變成循環匯入。
+    """
+    args = sys.argv[1:]
+
+    if args and args[0] == "--sync":
+        import ui
+        ui.main()
+    elif args and args[0] == "--update":
+        import update_excel
+        sys.argv = [sys.argv[0]] + args[1:]
+        update_excel.main()
+    else:
+        main()
+
+
 if __name__ == "__main__":
     # 打包成 exe 用滑鼠雙擊執行時，程式一結束視窗就會關掉，
     # 所以出錯時要停下來讓使用者看得到訊息。
     try:
-        main()
+        route()
     except SystemExit as exc:
         if exc.code:
             pause("按 Enter 關閉視窗...")
