@@ -14,9 +14,16 @@ from excel_io import COL_COST, COL_QTY, CELL_BALANCE
 from recon import TRADE_NAMES
 from util import cell_name, same_number, to_num
 
-# 網頁沒有這一檔、Excel 沒有這一列，這兩種狀況不是「誰在管」的問題，
-# 但畫面上要跟自動/手動並排顯示，所以放在同一組狀態值裡。
+# 網頁沒有這一檔，不是「誰在管」的問題，但畫面上要跟自動/手動並排顯示，
+# 所以放在同一組狀態值裡。
 WEB_MISSING = "web_missing"
+
+STATUS_NAMES = {
+    ledger.AUTO: "自動",
+    ledger.MANUAL: "手動",
+    ledger.UNTRACKED: "未接管",
+    WEB_MISSING: "網頁沒有",
+}
 
 
 def merge_holdings(arrays):
@@ -229,40 +236,51 @@ def adopt(proposals, book, sheet_name, today, today_included, at):
     needs_today = False
 
     for item in proposals:
-        if item["status"] not in (ledger.MANUAL, ledger.UNTRACKED):
-            continue
-
-        if item["kind"] == "cash":
-            if item["current"] is None:
-                messages.append("B8 現金餘額是空的，沒有東西可以當基準，請先在 Excel 填一個數字")
-                continue
-            if today_included is None:
-                needs_today = True
-                continue
-
-            cash = book["cash"]
-            was = cash.get("last_written")
-            ledger.calibrate(cash, item["current"], today, item["net"], today_included, at)
-            message = (
-                f"現金基準改為 {cash['baseline_value']:g}"
-                f"（Excel 上的 {item['current']:g} "
-                f"{'已含' if today_included else '尚未含'}今日淨收付 {item['net']:g}），"
-                f"從 {today:%Y/%m/%d} 起重新起算"
-            )
+        message, event, missing = adopt_one(item, book, sheet_name, today, today_included, at)
+        needs_today = needs_today or missing
+        if message:
             messages.append(message)
-            events.append(_event(at, sheet_name, item, "adopt", was, item["current"], message))
-            continue
-
-        state = book["holdings"].setdefault(item["key"], {}).setdefault(item["which"], ledger.new_field())
-        was = state.get("last_written")
-        state["mode"] = ledger.AUTO
-        state["last_written"] = item["current"]
-        state["last_written_at"] = at
-        state.pop("since", None)
-        messages.append(f"{item['cell']} {item['label']} 交還給程式管理")
-        events.append(_event(at, sheet_name, item, "adopt", was, item["current"], "交還給程式管理"))
+        if event:
+            events.append(event)
 
     return messages, events, needs_today
+
+
+def adopt_one(item, book, sheet_name, today, today_included, at):
+    """
+    交還單獨一格，回傳 (訊息, 歷程項目, 是否還缺 today_included)。
+
+    介面上的「交還給程式」按鈕是一次處理一格，命令列的 --adopt 是全部跑一遍，
+    兩邊走的是同一段程式碼，才不會出現「介面接管的結果跟命令列不一樣」。
+    """
+    if item["status"] not in (ledger.MANUAL, ledger.UNTRACKED):
+        return None, None, False
+
+    if item["kind"] == "cash":
+        if item["current"] is None:
+            return "B8 現金餘額是空的，沒有東西可以當基準，請先在 Excel 填一個數字", None, False
+        if today_included is None:
+            return None, None, True
+
+        cash = book["cash"]
+        was = cash.get("last_written")
+        ledger.calibrate(cash, item["current"], today, item["net"], today_included, at)
+        message = (
+            f"現金基準改為 {cash['baseline_value']:g}"
+            f"（Excel 上的 {item['current']:g} "
+            f"{'已含' if today_included else '尚未含'}今日淨收付 {item['net']:g}），"
+            f"從 {today:%Y/%m/%d} 起重新起算"
+        )
+        return message, _event(at, sheet_name, item, "adopt", was, item["current"], message), False
+
+    state = book["holdings"].setdefault(item["key"], {}).setdefault(item["which"], ledger.new_field())
+    was = state.get("last_written")
+    state["mode"] = ledger.AUTO
+    state["last_written"] = item["current"]
+    state["last_written_at"] = at
+    state.pop("since", None)
+    message = f"{item['cell']} {item['label']} 交還給程式管理"
+    return message, _event(at, sheet_name, item, "adopt", was, item["current"], message), False
 
 
 def commit(proposals, book, sheet_name, today, at):

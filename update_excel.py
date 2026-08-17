@@ -39,10 +39,8 @@ Excel 的版面完全維持原樣，沒有任何輔助欄位。程式要記的�
 """
 
 import datetime
-import os
 import sys
 import traceback
-from pathlib import Path
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
@@ -50,27 +48,11 @@ from playwright.sync_api import sync_playwright
 import excel_io
 import ledger
 import planner
+from excel_io import excel_path
 from fetch import collect
 from login import app_dir, configure_browsers_path, load_accounts, open_context, pause, wait_until_finished
+from planner import STATUS_NAMES
 from util import pad, show
-
-DEFAULT_EXCEL = Path("dist") / "持股管理-台美股-5家.xls"
-
-STATUS_NAMES = {
-    ledger.AUTO: "自動",
-    ledger.MANUAL: "手動",
-    ledger.UNTRACKED: "未接管",
-    planner.WEB_MISSING: "網頁沒有",
-}
-
-
-def excel_path():
-    """Excel 檔位置。可用 .env 的 EXCEL_PATH 蓋過，相對路徑以 .env 所在資料夾為基準。"""
-    raw = os.getenv("EXCEL_PATH", "").strip().strip('"')
-    path = Path(os.path.expandvars(raw)) if raw else DEFAULT_EXCEL
-    if not path.is_absolute():
-        path = app_dir() / path
-    return path
 
 
 def parse_args(argv):
@@ -226,7 +208,7 @@ def run(path, records, today, write, adopt, today_included):
             print("有分頁沒過檢查，整份都不寫入。請先處理上面的 [中止] 項目。")
             return
 
-        write_all(path, book_ledger, pending, adopt_events, today, at, attached)
+        write_all(path, book_ledger, pending, adopt_events, today, at, workbook, attached)
 
     finally:
         excel_io.close_workbook(excel, workbook, attached)
@@ -247,7 +229,7 @@ def show_table(proposals):
             print(f"  {' ' * 6}{item['note']}")
 
 
-def write_all(path, book_ledger, pending, adopt_events, today, at, attached):
+def write_all(path, book_ledger, pending, adopt_events, today, at, workbook, attached):
     """真的寫入：先備份，再寫 Excel，最後才更新紀錄檔與歷程。"""
     writes = [
         (sheet, [(item["row"], item["col"], item["proposed"]) for item in proposals if item["will_write"]])
@@ -260,6 +242,12 @@ def write_all(path, book_ledger, pending, adopt_events, today, at, attached):
 
     for sheet, cells in writes:
         excel_io.write_cells(sheet, cells)
+
+    # 檔案是我們自己開的就要自己存檔 —— close_workbook 是 Close(False)，
+    # 不存的話剛剛寫的全部丟掉，而紀錄檔卻已經記成「寫過了」。
+    # 接上使用者開著的 Excel 時則刻意不存，留給他自己按 Ctrl+S。
+    if not attached and total:
+        workbook.Save()
 
     # 紀錄檔在 Excel 寫完之後才更新。順序反過來的話，Excel 寫入失敗會留下一份
     # 「以為自己寫過了」的帳本，之後每次比對都判定成人工改動。

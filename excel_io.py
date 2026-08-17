@@ -14,11 +14,15 @@ Excel 讀寫。只認得持股管理表的這幾格，其餘全是公式，一�
 """
 
 import datetime
+import os
 import re
 import shutil
 from pathlib import Path
 
+from login import app_dir
 from util import to_num
+
+DEFAULT_EXCEL = Path("dist") / "持股管理-台美股-5家.xls"
 
 HOLDING_ROWS = range(4, 9)
 COL_NAME, COL_QTY, COL_COST = 4, 5, 6
@@ -28,6 +32,15 @@ BACKUP_KEEP = 10
 
 # 從「台灣50(0050)」取出 0050。全形括號也吃，因為是人手打的欄位。
 CODE_PATTERN = re.compile(r"[（(]\s*([0-9A-Za-z]+)\s*[)）]")
+
+
+def excel_path():
+    """Excel 檔位置。可用 .env 的 EXCEL_PATH 蓋過，相對路徑以 .env 所在資料夾為基準。"""
+    raw = os.getenv("EXCEL_PATH", "").strip().strip('"')
+    path = Path(os.path.expandvars(raw)) if raw else DEFAULT_EXCEL
+    if not path.is_absolute():
+        path = app_dir() / path
+    return path
 
 
 def stock_code_of(text):
