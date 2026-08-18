@@ -30,6 +30,8 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+import simulate
+
 
 def app_dir():
     """打包成 exe 後回傳 exe 所在資料夾，直接跑 .py 時回傳原始碼資料夾。.env 要放在這裡。"""
@@ -242,6 +244,13 @@ def open_context(p):
 
 
 def load_accounts():
+    """
+    .env 裡的帳號設定，依序編號。
+
+    後面會接上模擬用的假帳號（.env 的 SIMULATE_ACCOUNTS，沒設就一個都沒有，
+    正式部署的機器上等於這件事不存在）。假帳號帶 fake 旗標，
+    不會去登入任何網站，詳見 simulate.py。
+    """
     accounts = []
     i = 1
     while True:
@@ -251,6 +260,8 @@ def load_accounts():
             break
         accounts.append({"id": tbb_id, "password": tbb_password})
         i += 1
+
+    accounts.extend(simulate.fake_accounts())
     return accounts
 
 
@@ -347,18 +358,25 @@ def main():
         spare_page = context.pages[0] if context.pages else None
 
         count = 0
+        fakes = 0
         try:
             for account in accounts:
-                do_login(context, account["id"], account["password"], spare_page)
+                if account.get("fake"):
+                    # 假帳號沒有東西可以登入，只是在同一個瀏覽器多開一頁模擬頁面。
+                    simulate.open_page(context, account, spare_page)
+                    print(f"[{account['id']}] 已開啟模擬頁面（不連任何網站）")
+                    fakes += 1
+                else:
+                    do_login(context, account["id"], account["password"], spare_page)
+                    count += 1
                 spare_page = None
-                count += 1
         except PlaywrightTimeoutError:
             print("找不到登入欄位，網站版面可能已變更，請檢查 login.py 中的選擇器。")
             close_browser()
             sys.exit(1)
 
         print("=" * 60)
-        print(f"共 {count} 組帳號已自動送出登入。")
+        print(f"共 {count} 組帳號已自動送出登入。" + (f"另有 {fakes} 個模擬帳號的假頁面。" if fakes else ""))
         print("=" * 60)
         wait_until_finished(context)
 
@@ -372,9 +390,10 @@ def route():
     """
     只打包一個 exe，靠參數決定要做什麼：
 
-        tbb-login.exe            自動登入（不帶參數就是它，跟以前一樣）
-        tbb-login.exe --sync     開持股同步的介面視窗
-        tbb-login.exe --update   持股同步的命令列版，後面的參數原樣傳下去
+        tbb-login.exe              自動登入（不帶參數就是它，跟以前一樣）
+        tbb-login.exe --sync       開持股同步的介面視窗
+        tbb-login.exe --update     持股同步的命令列版，後面的參數原樣傳下去
+        tbb-login.exe --sim-excel  在 Excel 補上模擬用的分頁（測試用，見 sim_excel.py）
 
     不做成好幾個 exe，是因為 Playwright 那包東西會被各塞一份，dist 直接肥好幾倍，
     而部署方式是整包資料夾複製到目標電腦。
@@ -391,6 +410,10 @@ def route():
         import update_excel
         sys.argv = [sys.argv[0]] + args[1:]
         update_excel.main()
+    elif args and args[0] == "--sim-excel":
+        import sim_excel
+        sys.argv = [sys.argv[0]] + args[1:]
+        sim_excel.main()
     else:
         main()
 

@@ -85,6 +85,10 @@ def main():
     which, write, adopt, today_included = parse_args(sys.argv)
 
     path = excel_path()
+    if path is None:
+        print("還沒指定要同步哪一份 Excel。")
+        print("請在 .env 用 EXCEL_PATH 指定，或開介面（ui.py）按「開啟EXCEL」選一次。")
+        sys.exit(1)
     if not path.is_file():
         print(f"找不到 Excel 檔: {path}")
         print("可以在 .env 用 EXCEL_PATH 指定位置。")
@@ -215,15 +219,15 @@ def run(path, records, today, write, adopt, today_included):
 
 
 def show_table(proposals):
-    print(f"  {pad('格子', 6)}{pad('項目', 30)}{pad('Excel', 12)}{pad('網頁', 12)}"
-          f"{pad('會變成', 12)}{pad('狀態', 10)}")
+    print(f"  {pad('格子', 6)}{pad('項目', 30)}{pad('Excel', 16)}{pad('網頁', 16)}"
+          f"{pad('會變成', 16)}{pad('狀態', 10)}")
     for item in proposals:
         mark = "  <= 會改" if item["will_write"] else ""
         proposed = show(item["proposed"]) if item["will_write"] else "—"
         print(
             f"  {pad(item['cell'], 6)}{pad(item['label'], 30)}"
-            f"{pad(show(item['current']), 12)}{pad(show(item['web']), 12)}"
-            f"{pad(proposed, 12)}{pad(STATUS_NAMES.get(item['status'], item['status']), 10)}{mark}"
+            f"{pad(show(item['current']), 16)}{pad(show(item['web']), 16)}"
+            f"{pad(proposed, 16)}{pad(STATUS_NAMES.get(item['status'], item['status']), 10)}{mark}"
         )
         if item["note"]:
             print(f"  {' ' * 6}{item['note']}")

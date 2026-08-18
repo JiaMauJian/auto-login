@@ -13,16 +13,19 @@ Excel 讀寫。只認得持股管理表的這幾格，其餘全是公式，一�
 哪一格是自動哪一格是手動，全部記在 ledger.py 管理的紀錄檔裡。
 """
 
+import codecs
 import datetime
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 from login import app_dir
 from util import to_num
 
-DEFAULT_EXCEL = Path("dist") / "持股管理-台美股-5家.xls"
+ENV_FILE = ".env"
+ENV_KEY = "EXCEL_PATH"
 
 HOLDING_ROWS = range(4, 9)
 COL_NAME, COL_QTY, COL_COST = 4, 5, 6
@@ -30,17 +33,86 @@ CELL_BALANCE = (8, 2)
 
 BACKUP_KEEP = 10
 
+# Excel 實例在半路死掉時會看到的 HRESULT。
+#   0x800A01A8  物件不見了（Open 成功之後，下一句就撲空）
+#   0x80010108  用戶端中斷了已啟動物件的連線
+DEAD_OBJECT_CODES = (-2146827864, -2147417848)
+
+DEAD_EXCEL_HINT = (
+    "Excel 開起來之後又自己消失了。\n\n"
+    "這通常是 Office 沒有啟用：啟用檢查失敗時 Excel 會把自己收掉、"
+    "改用「產品啟動失敗」模式重開，程式手上的物件就跟著失效。\n\n"
+    "兩個辦法：\n"
+    "  1. 先自己用 Excel 把這個檔開著再跑 —— 程式會接上你那個視窗，不會另外開一個。\n"
+    "  2. 把 Office 啟用起來，從根本解決。"
+)
+
+
+def is_dead_object(exc):
+    """這個例外是不是「Excel 死在半路」。是的話錯誤訊息要多說一句，不然沒人看得懂。"""
+    code = getattr(exc, "hresult", None)
+    if code is None:
+        args = getattr(exc, "args", ())
+        code = args[0] if args and isinstance(args[0], int) else None
+    return code in DEAD_OBJECT_CODES
+
 # 從「台灣50(0050)」取出 0050。全形括號也吃，因為是人手打的欄位。
 CODE_PATTERN = re.compile(r"[（(]\s*([0-9A-Za-z]+)\s*[)）]")
 
 
 def excel_path():
-    """Excel 檔位置。可用 .env 的 EXCEL_PATH 蓋過，相對路徑以 .env 所在資料夾為基準。"""
-    raw = os.getenv("EXCEL_PATH", "").strip().strip('"')
-    path = Path(os.path.expandvars(raw)) if raw else DEFAULT_EXCEL
-    if not path.is_absolute():
-        path = app_dir() / path
-    return path
+    """
+    要同步哪一份 Excel。只看 .env 的 EXCEL_PATH，沒設就回傳 None（還沒選過）。
+
+    刻意不給預設檔名。給了預設的話，換一台機器或改個檔名，程式會安靜地去同步
+    「另一個檔」或報「找不到某某檔」，而不是直接說「你還沒選」—— 對一支會改寫
+    檔案的程式來說，猜錯對象是最不能接受的錯。
+
+    相對路徑以 .env 所在資料夾為基準（打包成 exe 後就是 exe 旁邊）。
+    """
+    raw = os.getenv(ENV_KEY, "").strip().strip('"')
+    if not raw:
+        return None
+    path = Path(os.path.expandvars(raw))
+    return path if path.is_absolute() else app_dir() / path
+
+
+def remember_excel_path(path):
+    """
+    把選好的檔案寫回 .env 的 EXCEL_PATH，下次開啟就直接用，不必再選一次。
+
+    只動那一行：整個檔讀進來、找到就換掉、沒有就補在最後，其他行原封不動 ——
+    .env 裡都是人寫的設定與註解，任何「重新產生一份」的做法都會把它們洗掉。
+    BOM 也要留著：用記事本存過的 .env 檔頭會有 BOM，拿掉之後下次讀取
+    第一個設定會失效（load_dotenv 是用 utf-8-sig 讀的）。
+    """
+    env = app_dir() / ENV_FILE
+    raw = env.read_bytes() if env.is_file() else b""
+    has_bom = raw.startswith(codecs.BOM_UTF8)
+    text = raw.decode("utf-8-sig") if raw else ""
+    newline = "\r\n" if "\r\n" in text else "\n"
+
+    lines = text.splitlines()
+    entry = f"{ENV_KEY}={path}"
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        if stripped.split("=", 1)[0].strip() == ENV_KEY:
+            lines[i] = entry
+            break
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("# 要同步哪一份 Excel。介面上按「開啟EXCEL」選檔時會自動改這一行。")
+        lines.append(entry)
+
+    body = (newline.join(lines) + newline).encode("utf-8")
+    env.write_bytes((codecs.BOM_UTF8 if has_bom else b"") + body)
+
+    # 這個行程的 os.environ 也要跟著更新，否則同一次執行裡再呼叫 excel_path()
+    # 拿到的還是舊的（load_dotenv 只在 import 時跑過一次）。
+    os.environ[ENV_KEY] = str(path)
 
 
 def stock_code_of(text):
@@ -106,16 +178,53 @@ def is_open_in_excel(path):
         return True
 
 
-def open_workbook(path, write):
+def open_workbook(path, write, attempts=3):
     """
     取得 Workbook，回傳 (excel, book, attached)。
 
     檔案已經開在 Excel 裡時就直接接上那個實例，不必為了跑這支程式先關檔。
-    接上的好處不只是方便：讀到的是你畫面上的即時內容（含還沒存檔的修改），
-    寫入也只進到記憶體，你看過覺得對再自己 Ctrl+S，等於多一道人工確認。
+    接上的好處不只是方便：讀到的是你畫面上的即時內容（含還沒存檔的修改）。
+    寫入之後一樣會存檔 —— 留給人自己按 Ctrl+S 聽起來像多一道確認，實際上是
+    「紀錄檔記成寫過了、檔案卻沒存」這個破口的來源。反悔靠寫入前那份備份。
 
     attached=True 時絕對不能 Close 或 Quit —— 那是使用者的視窗，關掉他會很錯愕。
+
+    為什麼開完要再碰一下、失敗還要重開
+    ----------------------------------
+    Office 沒啟用時，Excel 起來之後那道啟用檢查失敗會把自己收掉重來，
+    Open 明明成功，下一句碰 Worksheets 就是 OLE error 0x800A01A8。
+    錯誤發生在半路最麻煩 —— 那時備份做了、可能還寫了一半。所以開完先碰一下
+    確認物件是活的，死的就整個丟掉、換一個新的 Excel 再試。
     """
+    trouble = ""
+    for attempt in range(attempts):
+        excel = book = None
+        attached = False
+        try:
+            excel, book, attached = _open_once(path, write)
+        except Exception as exc:
+            trouble = str(exc)
+        else:
+            if _still_alive(book):
+                return excel, book, attached
+            trouble = DEAD_EXCEL_HINT
+            close_workbook(excel, book, attached)
+        if attempt < attempts - 1:
+            time.sleep(1.0)
+
+    raise RuntimeError(f"開不了 Excel：{path}\n\n{trouble}")
+
+
+def _still_alive(book):
+    """碰一下 COM 物件，確認它還在。死掉的物件在這裡就會丟例外。"""
+    try:
+        book.Worksheets.Count
+        return True
+    except Exception:
+        return False
+
+
+def _open_once(path, write):
     import win32com.client
 
     if is_open_in_excel(path):
@@ -137,11 +246,20 @@ def open_workbook(path, write):
 
 
 def close_workbook(excel, book, attached):
-    """接上使用者自己開的 Excel 時，關檔與結束都不是我們該做的事。"""
+    """
+    接上使用者自己開的 Excel 時，關檔與結束都不是我們該做的事。
+
+    這裡的錯誤一律吞掉。收尾失敗沒有任何補救動作可做，而 Excel 已經死掉時
+    Close/Quit 只會再丟一個例外，把真正的原因蓋在「During handling of the
+    above exception」底下 —— 那正是最需要看清楚的那一行。
+    """
     if attached:
         return
-    book.Close(False)
-    excel.Quit()
+    for action in (lambda: book.Close(False), excel.Quit):
+        try:
+            action()
+        except Exception:
+            pass
 
 
 def backup(path):

@@ -32,6 +32,13 @@ applied 是 {日期: 金額} 的字典而不是一個累計數字，這帶來兩
 baseline_value 的定義是「起算日當天，套用 applied 之前的餘額」。
 校正時如果使用者說「Excel 上這個數字已經含今天的淨收付了」，
 基準就要往回推一天份（balance - net），這樣加回來才會等於畫面上的數字。
+
+同一天內想改餘額
+----------------
+基準每天由「當天第一次登入」自己設好，所以正常情況沒有人要碰它。
+但當天第二次以後登入時，B8 上的數字很可能已經含了今天的成交 —— 程式看不出來，
+猜錯就是把今天的淨收付加第二次。這種時候由人直接講「今天開盤前的現金是多少」，
+走的還是 calibrate，只是 balance 由人給（見 planner.apply_cash_reset）。
 """
 
 import datetime
@@ -103,6 +110,14 @@ class Ledger:
         holding = book["holdings"].setdefault(code, {})
         return holding.setdefault(which, new_field())
 
+    def setting(self, key, default=None):
+        """介面用的偏好設定。跟著這份 Excel 走，不是全域的。"""
+        return self.data.setdefault("settings", {}).get(key, default)
+
+    def set_setting(self, key, value):
+        self.data.setdefault("settings", {})[key] = value
+        self.save()
+
     def save(self):
         """先寫暫存檔再換掉本尊，避免寫到一半斷電留下一個殘缺的帳本。"""
         text = json.dumps(self.data, ensure_ascii=False, indent=2)
@@ -118,6 +133,26 @@ class Ledger:
         with self.history_path.open("a", encoding="utf-8") as handle:
             for event in events:
                 handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def clear_history(self):
+        """
+        清掉歷程。回傳收起來的檔案位置，本來就沒有歷程就回傳 None。
+
+        檔案不刪，改名收進「備份」資料夾。歷程是拿來對帳的東西 ——「那天那一格
+        是誰改的」問不出來的代價，遠大於多留一個檔案；按錯一顆按鈕就永久失去
+        追溯能力，那顆按鈕不該存在。
+
+        只動歷程，不動 self.data：誰在管哪一格、現金基準跟流水都記在紀錄檔那邊，
+        清歷程等於撕掉日記本，不是把帳算掉。
+        """
+        if not self.history_path.is_file():
+            return None
+        folder = self.history_path.parent / "備份"
+        folder.mkdir(exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = folder / f"{self.history_path.stem}_{stamp}{self.history_path.suffix}"
+        self.history_path.replace(dest)
+        return dest
 
 
 def status_of(state, current):
@@ -149,14 +184,6 @@ def mark_manual(state, at):
     """偵測到人工改動，轉為手動並記下時間（是偵測到的時間，不是實際改動的時間）。"""
     state["mode"] = MANUAL
     state["since"] = at
-
-
-def expected_cash(cash):
-    """依基準與流水算出「現金餘額應該是多少」。沒有基準就回 None。"""
-    base = cash.get("baseline_value")
-    if base is None:
-        return None
-    return round(base + sum((cash.get("applied") or {}).values()), 2)
 
 
 def cash_after(cash, day, net):

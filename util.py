@@ -49,10 +49,19 @@ def values_match(left, right):
 
 
 def show(value):
-    """印給人看的數字。None 顯示成 (空)，數字去掉多餘的零。"""
+    """
+    印給人看的數字。None 顯示成 (空)，數字加千分位、去掉多餘的零。
+
+    為什麼不用 :g
+    -------------
+    :g 只留 6 位有效數字，超過就跳成 3.12966e+06。現金餘額動輒七八位數，
+    畫面上全是科學記號，人根本核對不出「三百一十二萬」還是「三千一百萬」。
+    改成 12 位有效數字 + 千分位，錢的位數一眼就數得出來，
+    浮點數的 34.550000000000004 也還是會收成 34.55。
+    """
     if value is None:
         return "(空)"
     number = to_num(value, None)
     if number is None:
         return str(value).strip()
-    return f"{number:g}"
+    return f"{number:,.12g}"

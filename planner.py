@@ -12,7 +12,7 @@
 import ledger
 from excel_io import COL_COST, COL_QTY, CELL_BALANCE
 from recon import TRADE_NAMES
-from util import cell_name, same_number, to_num
+from util import cell_name, same_number, show, to_num
 
 # 網頁沒有這一檔，不是「誰在管」的問題，但畫面上要跟自動/手動並排顯示，
 # 所以放在同一組狀態值裡。
@@ -163,7 +163,31 @@ def _row(row, col, kind, key, which, label, current, web, proposed, status, note
         "kind": kind, "key": key, "which": which, "label": label,
         "current": current, "web": web, "proposed": proposed,
         "status": status, "note": note, "will_write": will_write,
+        "reset_to": None,
     }
+
+
+def apply_cash_reset(item, opening):
+    """
+    把人填的「今天開盤前的現金」套進現金那一列。就地改，回傳同一個 item。
+
+    只能在 plan() 之後叫得動 —— 它要用今日淨收付，而那是網頁資料，
+    登入的當下還沒去查（login_only 只登入、不抓資料）。這也正是它值得晚一步
+    才問的原因：算得出結果，就不必請人回答「你填的數字含不含今天的成交」，
+    那個問題每次都要人回想今天做過什麼，答錯的代價剛好是一整天的淨收付。
+
+    這是唯一能蓋過「手動」的東西。人已經明講了正確的數字，
+    程式沒有理由再守著一個它自己也知道過時的值。
+    """
+    target = round(opening + item["net"], 2)
+    item["proposed"] = target
+    item["status"] = ledger.AUTO
+    item["reset_to"] = target
+    item["record_net"] = False          # calibrate 會把流水一起寫好
+    item["will_write"] = not same_number(item["current"], target)
+    item["note"] = (f"開盤前 {show(opening)} + 今日淨收付 {show(item['net'])}"
+                    f"（{item['net_rows']} 筆成交），從今天起重新起算")
+    return item
 
 
 def _cash(sheet_data, record, book, today, warnings):
@@ -183,6 +207,9 @@ def _cash(sheet_data, record, book, today, warnings):
     proposal["net"] = net
     proposal["net_rows"] = rows
     proposal["record_net"] = False
+    # 淨收付本身信不過的時候立起來。這一格連「重設基準」都不該讓人按 ——
+    # 拿一個已知是錯的 net 去 calibrate，等於把今天的成交永久算進基準裡。
+    proposal["blocked"] = False
 
     if balance is None:
         proposal["note"] = "B8 是空的或不是數字，請先填一個現金餘額"
@@ -193,32 +220,39 @@ def _cash(sheet_data, record, book, today, warnings):
     # 只擋現金這一格，持股照樣可以寫。
     if net == 0 and traded_today(record.get("未實現損益", []), today):
         proposal["note"] = "未實現損益顯示今天有成交、淨收付卻是 0（收盤結帳後可能查不到當日資料），現金這格先不動"
+        proposal["blocked"] = True
         warnings.append("[現金] " + proposal["note"])
         return proposal
 
     if proposal["status"] == ledger.UNTRACKED:
-        proposal["note"] = "還沒設定現金基準，用 --adopt 搭配 --today= 交給程式管理"
+        proposal["note"] = "還沒設定現金基準，要先校正一次才會開始自動累加"
         return proposal
 
     if proposal["status"] == ledger.MANUAL:
         proposal["note"] = (
             f"手動改過（程式記得 {cash.get('last_written')}），"
-            f"要交還請用 --adopt 搭配 --today="
+            f"要交還給程式要先重新校正一次基準"
         )
         return proposal
 
     proposal["proposed"] = ledger.cash_after(cash, today, net)
     proposal["will_write"] = not same_number(balance, proposal["proposed"])
     proposal["record_net"] = True
-    proposal["note"] = f"今日淨收付 {net:g}（{rows} 筆成交）"
+    proposal["note"] = f"今日淨收付 {show(net)}（{rows} 筆成交）"
 
     for day in ledger.missing_dates(cash, today):
         warnings.append(
             f"[現金] {day:%Y/%m/%d} 沒有淨收付紀錄。那天如果有成交，餘額會少算，"
-            f"可以去對帳單查到金額後補登（國定假日可忽略）"
+            f"請對照對帳單直接把正確餘額填進 Excel 的 B8，下次登入程式會以它為準"
+            f"（國定假日可忽略）"
         )
 
     return proposal
+
+
+# 歷程的「說明」欄。項目、動作、新舊值三欄已經講完「哪一格、做了什麼、變成多少」，
+# 說明再覆述一次等於空白，所以這裡只補那三欄講不出來的一件事：數字是從 Excel 抄來的。
+ADOPTED_NOTE = "以 Excel 上的數字為準"
 
 
 def adopt(proposals, book, sheet_name, today, today_included, at):
@@ -266,9 +300,9 @@ def adopt_one(item, book, sheet_name, today, today_included, at):
         was = cash.get("last_written")
         ledger.calibrate(cash, item["current"], today, item["net"], today_included, at)
         message = (
-            f"現金基準改為 {cash['baseline_value']:g}"
-            f"（Excel 上的 {item['current']:g} "
-            f"{'已含' if today_included else '尚未含'}今日淨收付 {item['net']:g}），"
+            f"現金基準改為 {show(cash['baseline_value'])}"
+            f"（Excel 上的 {show(item['current'])} "
+            f"{'已含' if today_included else '尚未含'}今日淨收付 {show(item['net'])}），"
             f"從 {today:%Y/%m/%d} 起重新起算"
         )
         return message, _event(at, sheet_name, item, "adopt", was, item["current"], message), False
@@ -280,7 +314,50 @@ def adopt_one(item, book, sheet_name, today, today_included, at):
     state["last_written_at"] = at
     state.pop("since", None)
     message = f"{item['cell']} {item['label']} 交還給程式管理"
-    return message, _event(at, sheet_name, item, "adopt", was, item["current"], message), False
+    return message, _event(at, sheet_name, item, "adopt", was, item["current"], ADOPTED_NOTE), False
+
+
+def initialize(sheet_data, book, sheet_name, today, at):
+    """
+    以 Excel 現在的數字為準，把一個分頁整個交給程式管理。介面在登入完成後跑一次。
+
+    這裡刻意不需要網頁資料。初始化的定義就是「Excel 上這些數字是今天買賣之前的
+    狀態」，今天在網頁上成交了什麼，等按「讀取網頁資料」時再往上加 —— 所以現金
+    基準直接取 B8，今天的流水先記 0，之後 commit 會用真正的淨收付覆蓋掉那個 0。
+    這也是為什麼不必再問「B8 含不含今天的淨收付」：登入的當下它一定還沒含。
+
+    現金一天只初始化一次（基準日已經是今天就跳過）。今天的淨收付要是已經寫進
+    B8 了，再重設一次基準會讓它被加第二次，而且畫面上不會有任何徵兆。
+
+    跳過之後那一格就沒有出口了 —— 當天想改餘額只能由人明講，
+    走 apply_cash_reset（介面上是讀完網頁資料、寫入之前跳的「重設現金餘額」對話框）。
+    """
+    events = []
+
+    for line in sheet_data["rows"]:
+        for which, col, current in (("qty", COL_QTY, line["qty"]),
+                                    ("cost", COL_COST, line["cost"])):
+            state = (book["holdings"].get(line["code"]) or {}).get(which)
+            item = _row(line["row"], col, "holding", line["code"], which,
+                        f"{'股數' if which == 'qty' else '成本'}（{line['label']}）",
+                        current, None, None, ledger.status_of(state, current), "")
+            _message, event, _needs = adopt_one(item, book, sheet_name, today, False, at)
+            if event:
+                events.append(event)
+
+    balance = sheet_data["balance"]
+    cash = book["cash"]
+    if (balance is not None
+            and ledger.status_of(cash, balance) != ledger.AUTO
+            and cash.get("baseline_date") != today.isoformat()):
+        row, col = CELL_BALANCE
+        item = _row(row, col, "cash", "cash", "balance", "現金餘額",
+                    balance, None, None, ledger.UNTRACKED, "")
+        was = cash.get("last_written")
+        ledger.calibrate(cash, balance, today, 0.0, False, at)
+        events.append(_event(at, sheet_name, item, "adopt", was, balance, ADOPTED_NOTE))
+
+    return events
 
 
 def commit(proposals, book, sheet_name, today, at):
@@ -309,7 +386,22 @@ def commit(proposals, book, sheet_name, today, at):
         ledger.mark_written(state, item["proposed"], at)
 
     for item in proposals:
-        if item["kind"] == "cash" and item.get("record_net"):
+        if item["kind"] != "cash":
+            continue
+        if item["reset_to"] is not None:
+            # calibrate 一次做完基準、流水、last_written 三件事，所以不必再 record_net。
+            # reset_to 是「開盤前 + 今日淨收付」，所以 today_included 是 True，
+            # calibrate 往回推一天份之後剛好回到人填的那個開盤前數字。
+            was = book["cash"].get("last_written")
+            ledger.calibrate(book["cash"], item["reset_to"], today, item["net"], True, at)
+            if not item["will_write"]:
+                # 算出來剛好等於 B8 上的數字，所以沒有格子要寫 —— 但基準確實被人
+                # 改掉了。上面那一圈只替「寫過的格子」記歷程，這一筆不補就完全沒有
+                # 痕跡：帳從此算得不一樣，卻沒有人知道是誰、什麼時候、改成什麼。
+                # 記成 adopt 是因為變的是程式的記憶，Excel 一格都沒動。
+                events.append(_event(at, sheet_name, item, "adopt", was,
+                                     item["reset_to"], item["note"]))
+        elif item.get("record_net"):
             ledger.record_net(book["cash"], today, item["net"])
 
     return events
