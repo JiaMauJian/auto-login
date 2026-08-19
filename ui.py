@@ -1225,6 +1225,16 @@ class SyncApp:
                 f"這個資料夾正被 Chrome 開著，請先關掉：\n{target}", parent=self.root)
             return
 
+        # target 是 USER_DATA_DIR 本身，但 Chrome 實際把資料存在它底下的 Default（或
+        # BROWSER_PROFILE_DIR）子資料夾裡 —— copy_cert 要對到那一層，不是 USER_DATA_DIR 自己。
+        profile_dir = target / profile_tools.profile_subdir_name()
+        if not profile_dir.is_dir():
+            messagebox.showerror(
+                "Profile 還沒初始化",
+                f"這個資料夾裡還沒有 {profile_tools.profile_subdir_name()} 子資料夾：\n{target}\n\n"
+                "請先用上面的「建立 Profile」把資料夾初始化，再回來複製憑證。", parent=self.root)
+            return
+
         if not messagebox.askyesno(
             "複製憑證",
             f"把「{source['browser']} / {source['name']}」的憑證複製到自動登入用的 Profile？\n\n"
@@ -1234,7 +1244,7 @@ class SyncApp:
             return
 
         try:
-            backup = profile_tools.copy_cert(source["path"], target)
+            backup = profile_tools.copy_cert(source["path"], profile_dir)
         except OSError as exc:
             messagebox.showerror("複製失敗", str(exc), parent=self.root)
             return

@@ -59,6 +59,11 @@ def resolve_path(raw):
     return path
 
 
+def profile_subdir_name():
+    """USER_DATA_DIR 底下實際存放憑證資料的子資料夾（Default、Profile 1...），對應 BROWSER_PROFILE_DIR（見 login.py）。"""
+    return os.getenv("BROWSER_PROFILE_DIR", "").strip().strip('"') or "Default"
+
+
 def default_chrome_dir():
     return Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
 

@@ -9,10 +9,11 @@
 分頁是整張複製現有那個真分頁，所以版面、格式、公式（那張表的公式全部只參照
 自己這一頁，複製不會跑掉）都跟真的一模一樣，只改這幾格：
 
-    D4:D8  股票名稱(代號)  <- 模擬用的 5 檔
-    E4:G8  股數/成本/現金股利 <- 清成 0，之後交給程式接管
-    I4:I8  股價           <- 這欄是人自己填的，給個合理數字，市值才不會是 0
-    B6:B8  原始資金/今年股本/現金餘額 <- 固定的起始現金（見 simulate.INITIAL_CASH）
+    D4:D8  股票名稱(代號)  <- 這個假帳號的 5 檔
+    E4:G8  股數/成本/現金股利 <- 照 simulate.FIXED_ACCOUNTS 那個帳號的固定數字填，
+                             不是隨機也不是清成 0，跟假網頁看到的數字一致
+    I4:I8  股價           <- 同樣照 FIXED_ACCOUNTS 填，市值才不會是 0
+    B6:B8  原始資金/今年股本/現金餘額 <- 固定的起始資金與現金（見 simulate.FIXED_ACCOUNTS）
 
 為什麼要能一鍵移除
 ------------------
@@ -43,6 +44,7 @@ from login import pause
 from util import pad
 
 COL_DIVIDEND = 7     # G 現金股利
+COL_PRICE = 9        # I 股價
 ROW_CAPITAL = 6      # B6 原始資金
 ROW_YEAR = 7         # B7 今年股本
 
@@ -147,10 +149,13 @@ def add_sheets(path, workbook, count, write):
     print(f"要新增 {len(todo)} 個分頁" + (f"，已存在跳過 {len(wanted) - len(todo)} 個" if len(todo) < len(wanted) else ""))
     print()
 
-    print(f"  {pad('分頁', 12)}{pad('起始現金', 14)}{'持股'}")
+    print(f"  {pad('分頁', 12)}{pad('現金餘額', 14)}{'持股'}")
     for name in todo:
-        stocks = "、".join(f"{stock_name}({code})" for code, stock_name, _base in simulate.STOCKS)
-        print(f"  {pad(name, 12)}{pad(f'{simulate.INITIAL_CASH:,}', 14)}{stocks}")
+        account = simulate.FIXED_ACCOUNTS.get(name, {})
+        cash = account.get("cash", 0)
+        stocks = "、".join(f"{stock_name}({code})" for code, stock_name, _qty, _price, _mkt
+                           in account.get("holdings", []))
+        print(f"  {pad(name, 12)}{pad(f'{cash:,}', 14)}{stocks}")
     print()
 
     if not todo:
@@ -180,28 +185,34 @@ def add_sheets(path, workbook, count, write):
 
         sheet = workbook.Worksheets(workbook.Worksheets.Count)
         sheet.Name = name
-        fill_sheet(sheet)
+        fill_sheet(sheet, name)
         print(f"  已新增分頁「{name}」")
 
     print()
-    print(f"共新增 {len(todo)} 個分頁。這些分頁的股數與成本都是 0、還沒交給程式管理，")
-    print("接下來一次把 20 個分頁的現況接管起來（用介面一格一格按會按到天荒地老）：")
+    print(f"共新增 {len(todo)} 個分頁。這些分頁已經填好 FIXED_ACCOUNTS 的固定股數與成本，")
+    print("但還沒交給程式管理，接下來一次把 20 個分頁的現況接管起來（用介面一格一格按會按到天荒地老）：")
     print("    python update_excel.py --adopt --today=pending --write")
 
 
-def fill_sheet(sheet):
-    """把複製出來的分頁改成這個假帳號的樣子。只碰那幾格，版面完全不動。"""
-    cash = simulate.INITIAL_CASH
+def fill_sheet(sheet, name):
+    """把複製出來的分頁改成這個假帳號的樣子。只碰那幾格，版面完全不動。
 
-    for row, (code, stock_name, base) in zip(HOLDING_ROWS, simulate.STOCKS):
+    資料全部來自 simulate.FIXED_ACCOUNTS[name]，跟假網頁（simulate.seed_data）
+    看到的股數/成本/市價/現金一致，不是隨機生成也不是清成 0。
+    """
+    account = simulate.FIXED_ACCOUNTS.get(name, {})
+    capital = account.get("original_capital", 0)
+    cash = account.get("cash", 0)
+
+    for row, (code, stock_name, qty, price, mkt) in zip(HOLDING_ROWS, account.get("holdings", [])):
         sheet.Cells(row, COL_NAME).Value = f"{stock_name}({code})"
-        sheet.Cells(row, COL_QTY).Value = 0
-        sheet.Cells(row, COL_COST).Value = 0
+        sheet.Cells(row, COL_QTY).Value = qty
+        sheet.Cells(row, COL_COST).Value = price
         sheet.Cells(row, COL_DIVIDEND).Value = 0
-        sheet.Cells(row, simulate.COL_PRICE).Value = base
+        sheet.Cells(row, COL_PRICE).Value = mkt
 
-    sheet.Cells(ROW_CAPITAL, 2).Value = cash
-    sheet.Cells(ROW_YEAR, 2).Value = cash
+    sheet.Cells(ROW_CAPITAL, 2).Value = capital
+    sheet.Cells(ROW_YEAR, 2).Value = capital
     sheet.Cells(*CELL_BALANCE).Value = cash
 
 
