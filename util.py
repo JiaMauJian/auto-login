@@ -1,10 +1,26 @@
 """
-數字與格子名稱的小轉換。沒有任何相依套件，所以每個模組都能安心引用。
+數字、格子名稱與 .env 設定的小轉換。沒有任何相依套件，所以每個模組都能安心引用。
 """
+
+import os
 
 # 金額比對用的容差。Excel 存的是浮點數，893.0 有可能變成 892.9999999999999，
 # 直接用 == 比會說「不一樣」，在這支程式裡的後果是把它誤判成「有人手動改過」。
 EPSILON = 0.005
+
+
+def env_int(key, default):
+    """
+    從 .env 讀一個整數。沒設、留空、或填了看不懂的東西都回 default ——
+    這些都是可有可無的微調，不值得為了一個打錯的數字讓程式跑不起來。
+    """
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(float(raw))
+    except ValueError:
+        return default
 
 
 def to_num(value, default=0.0):

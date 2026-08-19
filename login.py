@@ -31,6 +31,7 @@ from playwright.sync_api import (
 )
 
 from dev_tools import simulate
+from util import env_int
 
 
 def app_dir():
@@ -48,7 +49,10 @@ LOGIN_URL = "https://www.tbbstock.com.tw/tbb/index/home.jsp"
 
 # 攔截到驗證碼後多等一下（毫秒），讓頁面可能的第二次 VerifyNumberServlet 請求先回來，
 # 以最後一次的值為準；送出登入前也再等同樣的時間，避免驗證碼還沒套用就按下登入。
-VERIFY_SETTLE_MS = 200
+#
+# 網站慢的時候第二次請求可能還沒回來就被填掉，可以在 .env 設 VERIFY_SETTLE_MS 加大。
+# 上限 5000：再多就不是「等它安定」而是每個帳號都白白多等五秒，通常代表數字填錯了。
+VERIFY_SETTLE_MS = max(0, min(5000, env_int("VERIFY_SETTLE_MS", 200)))
 
 # 登入表單最多等多久（毫秒）才判定「這個瀏覽器裡已經有人登入著」。等不到就清 cookie
 # 重來一次（見 do_login），所以這一段不能設太長 —— 換交易人時每次都要先耗掉它。

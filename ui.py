@@ -114,7 +114,7 @@ import profile_tools
 import fetch as fetch_mod
 from fetch import collect, login_only
 from login import app_dir, configure_browsers_path, load_accounts, open_context
-from util import cell_name, show, to_num, values_match
+from util import cell_name, env_int, show, to_num, values_match
 
 # 「補登」這個來源已經沒有入口了（現金帳本分頁拿掉時一起收掉），
 # 但舊的歷程檔裡還有這種紀錄，名字要留著才不會顯示成一個英文代號。
@@ -150,20 +150,6 @@ FONT_MIN, FONT_MAX = 8, 24
 WIDTH_ENV_KEY, HEIGHT_ENV_KEY = "UI_WIDTH", "UI_HEIGHT"
 # 視窗再小就不叫小視窗，而是壞掉的版面：左邊名單擠成一條、右邊那幾格全是省略號。
 WINDOW_MIN_W, WINDOW_MIN_H = 640, 400
-
-
-def env_int(key, default):
-    """
-    從 .env 讀一個整數。沒設、留空、或填了看不懂的東西都回 default ——
-    這些都是外觀設定，不值得為了一個打錯的數字讓整個介面開不起來。
-    """
-    raw = os.getenv(key, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(float(raw))
-    except ValueError:
-        return default
 
 
 def font_size_from_env():
