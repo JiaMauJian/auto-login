@@ -98,24 +98,12 @@ if errorlevel 1 pause
 "@
 Set-Content -Path "dist\持股同步.bat" -Value $syncBat -Encoding ASCII
 
-# setup-profile.ps1 也要跟著走：新電腦上必須用它把自動登入專用的使用者資料夾建出來，
-# migrate-cert.ps1 才有地方把憑證複製進去（該資料夾不能從別台電腦複製，見 .env 註解）。
-Copy-Item -Force "setup-profile.ps1" "dist\setup-profile.ps1"
+# setup-profile.ps1 / migrate-cert.ps1 已經沒人在看，不再打包進 dist——
+# 這兩件事現在都在 GUI 的「憑證」分頁按鈕就能做（見 ui.py 的 _build_cert_tab）。
+# 兩支腳本還留著當 GUI 壞了時的備用手動工具，搬去 dev_tools\ 了。
 
-# migrate-cert.ps1 同理：新電腦上要把 tbbstock 的網頁版憑證從日常 Chrome profile
-# 複製到自動登入用的 profile，否則登入後會被「瀏覽器查無有效數位憑證」擋下來。
-Copy-Item -Force "migrate-cert.ps1" "dist\migrate-cert.ps1"
-
-# 說明文件也一起帶走，dist 整包複製到別台電腦時就有完整的設定步驟可以照做。
-Copy-Item -Force "詳細說明.md" "dist\詳細說明.md"
-Copy-Item -Force "簡易說明.md" "dist\簡易說明.md"
-
-# 另外產一份 HTML：那台電腦不一定有 Markdown 編輯器，.md 被記事本開啟時表格會糊掉。
-# HTML 樣式內嵌、不連外部資源，雙擊用瀏覽器就能讀。
-python -m pip install --quiet markdown
-if ($LASTEXITCODE -ne 0) { throw "安裝 markdown 失敗" }
-python build_docs.py
-if ($LASTEXITCODE -ne 0) { throw "產生 HTML 說明文件失敗" }
+# 簡易/詳細說明.md 也已經沒人在看，不再打包進 dist（archived at docs\）。
+# 如果之後又需要出貨用的說明文件，用 dev_tools\build_docs.py 手動轉成 HTML。
 
 Write-Host ""
 Write-Host "完成。執行檔在 dist 資料夾。"

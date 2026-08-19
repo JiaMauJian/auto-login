@@ -17,28 +17,30 @@ Excel 完全保持原本的版面，所有輔助資訊都放在這裡，檔案�
 自動轉手動由程式自己偵測、悄悄發生，目的是保護使用者的手改；
 手動轉自動一定要人明確要求（CLI 的 --adopt、介面上的「交還給程式」按鈕）。
 
-現金為什麼要記流水
-------------------
+現金：每天重新起算，不回頭算舊帳
+--------------------------------
 網頁只回答「今天的淨收付是多少」，從來不告訴你「你現在有多少現金」，
-所以餘額只能從某個基準往後累加：
+所以餘額要有一個起點才算得出來：
 
-    應有餘額 = baseline_value + applied 裡所有日期的淨收付總和
+    應有餘額 = baseline_value + 今天的淨收付
 
-applied 是 {日期: 金額} 的字典而不是一個累計數字，這帶來兩件事：
-同一天重跑只是覆蓋同一個 key，跑幾次結果都一樣；
-漏跑的那天會在字典裡缺一個 key，看得見、也補得回來 —— 舊的「前日餘額 +
-今日淨收付」模型漏掉一天就永遠追不回來，這是換成流水的主因。
+baseline_value 就是介面上那個「今日初始現金餘額」—— 今天第一次登入時 Excel 上的
+B8。那個時間點今天要買賣什麼都還沒發生，所以它必定是今天的起點
+（見 planner.initialize）。
 
-baseline_value 的定義是「起算日當天，套用 applied 之前的餘額」。
-校正時如果使用者說「Excel 上這個數字已經含今天的淨收付了」，
-基準就要往回推一天份（balance - net），這樣加回來才會等於畫面上的數字。
+跨日累加的版本試過：基準只設一次，applied 把每天的淨收付一路往後疊。它的代價是
+漏跑一天就永遠少一段，而且要補得回頭一天一天對。改成每天重設之後，昨天有沒有跑過、
+跑得對不對都不影響今天 —— 今天的起點就是今天看到的 B8，沒有舊帳要算。
+
+applied 仍然是 {日期: 金額} 的字典，只是裡面永遠只有今天一筆。留著它是因為
+同一天重跑只是覆蓋同一個 key，跑幾次結果都一樣。
 
 同一天內想改餘額
 ----------------
-基準每天由「當天第一次登入」自己設好，所以正常情況沒有人要碰它。
-但當天第二次以後登入時，B8 上的數字很可能已經含了今天的成交 —— 程式看不出來，
-猜錯就是把今天的淨收付加第二次。這種時候由人直接講「今天開盤前的現金是多少」，
-走的還是 calibrate，只是 balance 由人給（見 planner.apply_cash_reset）。
+基準每天由「當天第一次登入」自己設好，正常情況沒有人要碰它。會碰到的是當天
+第二次以後登入：基準已經設過、不會再跟著 B8 走，這時候手改 B8 只會被判成人工
+改動。要改就直接改介面上那個「今日初始現金餘額」，走的還是 calibrate，
+只是 balance 由人給（見 planner.apply_cash_reset）。
 """
 
 import datetime
@@ -196,6 +198,16 @@ def cash_after(cash, day, net):
     return round(base + sum(applied.values()), 2)
 
 
+def opening_balance(cash):
+    """
+    今日初始現金餘額 —— 今天第一次登入時 Excel 上的 B8，餘額就是從它加起來的。
+
+    它就是 baseline_value 本身。基準每天重設一次（見 planner.initialize），
+    所以不必把前幾天的流水加回來 —— 這支程式不回頭算舊帳。
+    """
+    return cash.get("baseline_value")
+
+
 def record_net(cash, day, net):
     """把某一天的淨收付記進流水。同一天重記就是覆蓋，所以重跑不會重複扣。"""
     cash.setdefault("applied", {})[day.isoformat()] = round(net, 2)
@@ -218,28 +230,3 @@ def calibrate(cash, balance, day, net, today_included, at):
     cash["last_written"] = round(balance, 2)
     cash["last_written_at"] = at
     cash.pop("since", None)
-
-
-def missing_dates(cash, today):
-    """
-    基準日到今天之間，流水裡沒有紀錄的工作日。
-
-    只跳週末，不管國定假日，所以會有假警報 —— 但方向是對的：
-    寧可多提醒幾天讓人去看一眼，也不要漏掉真的沒跑到的那天。
-    """
-    raw = cash.get("baseline_date")
-    if not raw:
-        return []
-    try:
-        start = datetime.date.fromisoformat(raw)
-    except ValueError:
-        return []
-
-    applied = cash.get("applied") or {}
-    missing = []
-    day = start
-    while day < today:
-        if day.weekday() < 5 and day.isoformat() not in applied:
-            missing.append(day)
-        day += datetime.timedelta(days=1)
-    return missing

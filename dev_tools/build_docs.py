@@ -1,8 +1,11 @@
 """把 .md 說明文件轉成單一檔案的 HTML（樣式內嵌、可離線雙擊開啟）。
 
+已經不是打包流程的一部分（見 build.ps1）——簡易/詳細說明.md 已經沒人在看，
+搬到 docs\ 存檔了。留著這支是萬一之後又要出一份給不裝 Markdown 編輯器的電腦看。
+
 用法：
-    python build_docs.py                 # 轉換預設的兩份文件到 dist\
-    python build_docs.py a.md b.md       # 指定要轉換的檔案
+    python dev_tools/build_docs.py                 # 轉換 docs\ 裡預設的兩份文件到 dist\
+    python dev_tools/build_docs.py a.md b.md        # 指定要轉換的檔案
 
 給沒有 VS Code／Markdown 編輯器的電腦看用的：.md 在 Windows 預設會被記事本開啟，
 表格和換行會糊成一團；轉成 HTML 後用任何瀏覽器雙擊就能正常閱讀。
@@ -13,9 +16,10 @@ from pathlib import Path
 
 import markdown
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
+DOCS = ROOT / "docs"
 DIST = ROOT / "dist"
-DEFAULT_DOCS = ["簡易說明.md", "詳細說明.md"]
+DEFAULT_DOCS = [DOCS / "簡易說明.md", DOCS / "詳細說明.md"]
 
 # 字型只用 Windows 內建的，不連外部 CDN（那台電腦可能沒網路，也不該有外連）。
 CSS = """

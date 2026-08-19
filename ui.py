@@ -18,18 +18,47 @@
 對照的時候才不必在心裡翻譯一次。值平常只寫現在的數字，有變化才寫成
 「舊 → 新」—— 20 檔裡通常只有一兩格要動，那一兩個箭頭才跳得出來。
 
+一次讀全部，還是只更新一位
+--------------------------
+上面那個「範圍」跟左邊那份名單是同一個選擇的兩個入口：名單上點誰，範圍就換成誰，
+「讀取網頁資料」那顆也跟著改名成「更新（王小明）」，按下去只查他一個、只寫他那一頁。
+要重讀全部就把範圍切回「全部」。
+
+一天下來按最多次的是「只更新一位」（盯著某一位的部位在動），一次讀全部反而只有
+開盤前那一次。預設仍然是全部，因為交易人的名字要登入之後才從網站拿得到
+（.env 裡只有帳密），沒讀過一輪之前左邊名單是空的，也就沒有人可以點。
+
+只更新一位有兩件事要守住：
+
+一、畫面上的資料新舊不一。別人那幾列是上一輪讀的，所以每一位都記著自己的讀取時間，
+右邊標頭寫「讀取於 10:32」—— 沒有它，半小時前的數字跟剛讀的長得一模一樣。
+
+二、寫入、落帳、接管只能碰這一輪讀到的那幾位（round_scope）。名單上別人也可能有
+「要寫」的格子，那是用上一輪的網頁資料算出來的，順手寫出去就是拿舊資料改 Excel。
+
+還有一個藏在瀏覽器裡的限制：整個瀏覽器只有一組 cookie，同時只帶得動一個人的身分
+—— 而被頂掉的那個分頁自己不會知道，探起來還像活著。但伺服器那邊 20 個帳號的
+session 是各自獨立的，B 登入不會殺掉 A 的，所以換人不必重登：把 A 登入時收下來的
+cookie 換回去就回到他登入完的那一刻（見 fetch.new_store），只有他在伺服器上逾時了
+才需要真的重登一次。
+
 原本還有第三個「現金帳本」分頁（基準、逐日流水、補登、重新校正）。
 登入即初始化之後那些操作全部沒有存在的必要了：基準每次登入自己重設，
 要修正就直接改 Excel 的 B8 —— 下次登入程式就以那個數字為準。
 現金的流水還是照記，只是那是程式內部的帳，不再是一個要人看、要人操作的畫面。
 
 「改 B8 就好」只在隔天成立。同一天第二次以後登入，基準已經設過、不會再跟著 B8 走，
-手改只會被判成人工改動然後凍住一整天。那唯一的缺口由 ask_cash_reset 補上：
-符合條件才跳、一個視窗問完所有分頁、留空就是不改。
+手改只會被判成人工改動然後凍住一整天。所以基準本身就寫在畫面上：現金那一條底下
+一行「今日初始現金餘額」，旁邊一顆「修改」（見 _fill_opening、edit_opening）。
 
-它跳在讀完網頁資料、寫入之前，不是登入的當下。差別在有沒有今日淨收付：有了它
-才能把「B8 會變成多少」直接算給人看，不必請人回答「你填的數字含不含今天的成交」
-—— 那種要人回想今天做過什麼的問題，答錯不會有任何徵兆。
+    現金餘額 = 今日初始現金餘額 + 今日淨收付
+
+右邊那項是網頁抄來的、不會錯，所以餘額不對的時候要改的一定是左邊那項。
+
+這裡原本是另一種做法：程式自己判斷「今天可能已經開過了」，讀完網頁資料就跳一個
+對話框、一次問完所有分頁。改掉的理由是猜錯的兩個方向都很貴 —— 不該問的時候問，
+20 個分頁按到最後沒人在看內容；該問的時候沒問（或當下填錯），當天就再也沒有入口。
+數字一直在畫面上、按鈕一直按得動，就不必由程式決定什麼時候該問誰。
 
 Excel 由誰維護，只由上面那個「程式自動更新」開關決定
 --------------------------------------------------
@@ -81,6 +110,8 @@ from playwright.sync_api import sync_playwright
 import excel_io
 import ledger as ledger_mod
 import planner
+import profile_tools
+import fetch as fetch_mod
 from fetch import collect, login_only
 from login import app_dir, configure_browsers_path, load_accounts, open_context
 from util import cell_name, show, to_num, values_match
@@ -338,143 +369,125 @@ HISTORY_COLUMNS = (
     ("note", "說明", 420, 80, "w"),
 )
 
-# 對話框裡一次看得到幾列，多的用捲軸。20 個交易人全部攤開會長到螢幕外，
-# 而下面那兩顆按鈕正好是被切掉的部分。
-CASH_RESET_ROWS = 8
-
-
-def ask_cash_reset(parent, family, rows):
+def ask_opening_balance(parent, family, name, current, item):
     """
-    問「今天開盤前的現金是多少」。回傳 {分頁名: 開盤前餘額}，一個都沒改就是空的。
+    改一個人的「今日初始現金餘額」。回傳新的開盤前金額，取消或留空就回 None。
 
-    什麼時候會看到它：今天已經初始化過（也就是今天第二次以後登入），或這份
-    Excel 還沒有紀錄檔。兩種情況的共同點是「B8 可能已經含了今天的成交」——
-    程式沒有辦法自己看出來，猜錯就是把今天的淨收付加第二次。當天第一次登入
-    不問，那時候 B8 一定還沒含。
+    這裡曾經有另一個對話框：程式自己判斷「今天可能已經開過了」，讀完網頁資料就
+    跳出來、一次問完所有分頁。它被這顆按鈕取代了 —— 同一個問題，程式問是「猜
+    你需要」，而猜錯的兩個方向都很貴：不該跳的時候跳，20 個分頁按到最後沒人在看
+    內容；該跳的時候沒跳，或跳的時候填錯，當天就再也沒有入口。基準現在一直寫在
+    畫面上，看到不對再按，不必由程式決定什麼時候該問誰。
 
-    為什麼問「開盤前」而不是「現在正確的餘額」
-    ------------------------------------------
-    因為它是那個不會動的量。今天的淨收付盤中還會再變，「現在的餘額」講完
-    下一筆成交就過期了；開盤前的現金是固定的，往上加多少由程式自己算。
-
-    而且這個問法不必再問一次「你填的數字含不含今天的成交」。這個對話框跳在
-    讀完網頁資料之後，淨收付已經在手上，右邊那欄直接把 B8 會變成多少算給人看
-    —— 該不該按，看那個數字就知道，不必靠人回想今天做過什麼。
-
-    留空 = 不改。20 個分頁全列在同一個視窗，通常直接按 Esc 就走。
+    填的是「開盤前」而不是「現在正確的餘額」：開盤前的現金是今天唯一不會再變的
+    量，往上加多少由程式自己算（見 planner.apply_cash_reset）。
     """
     win = tk.Toplevel(parent)
-    win.title("重設現金餘額")
+    win.title("修改今日初始現金餘額")
     win.transient(parent)
     win.resizable(False, False)
 
-    answers = {}
-    entries = []
+    answer = {}
 
     outer = ttk.Frame(win, padding=12)
     outer.pack(fill="both", expand=True)
 
     ttk.Label(outer, justify="left", text=(
-        "今天已經開啟過，Excel 上的現金餘額可能已經含了今天的成交。\n"
-        "要改的分頁請填「今天開盤前的現金」，右邊會算出 B8 會變成多少；留空表示維持原樣。"
-    )).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        f"「{name}」今天開盤前有多少錢 —— 今天第一筆成交之前的現金。\n"
+        f"餘額是它一路加上每天的淨收付算出來的，所以餘額不對的時候，要改的是這個數字。"
+    )).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-    name_w, num_w = 16, 14
-    heads = (("分頁", name_w, "w"), ("程式記得", num_w, "e"), ("今日淨收付", num_w, "e"),
-             ("開盤前", num_w, "e"), ("B8 會變成", num_w, "e"))
+    lines = (("現在記著的今日初始現金餘額", show(current)),
+             (f"今日淨收付（{item['net_rows']} 筆成交）", show(item["net"])),
+             ("Excel 上的現金餘額 " + item["cell"], show(item["current"])))
+    for index, (title, value) in enumerate(lines, start=1):
+        ttk.Label(outer, text=title, style="Hint.TLabel").grid(row=index, column=0,
+                                                              sticky="w", pady=2)
+        ttk.Label(outer, text=value).grid(row=index, column=1, sticky="e",
+                                          padx=(24, 0), pady=2)
 
-    head = ttk.Frame(outer)
-    head.grid(row=1, column=0, sticky="w")
-    for column, (text, width, anchor) in enumerate(heads):
-        ttk.Label(head, text=text, width=width, anchor=anchor,
-                  style="Hint.TLabel").grid(row=0, column=column, padx=(0 if column < 3 else 8, 0))
+    text = tk.StringVar(value="" if current is None else show(current))
+    row = len(lines) + 1
 
-    canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
-    canvas.grid(row=2, column=0, sticky="nw")
-    bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-    canvas.configure(yscrollcommand=bar.set)
+    # 會走到這個對話框的路幾乎只有一條：人自己在盤中改過 B8。他改進去的是「現在
+    # 正確的餘額」，那個數字已經含了今天的成交 —— 照抄進來就等於把今天的淨收付
+    # 算進起點裡，待會兒再加一次。扣掉淨收付才是開盤前，算出來擺著並且給一顆
+    # 「帶入」，比請人自己心算可靠：這一格填錯，畫面上不會有任何徵兆。
+    if item["current"] is not None:
+        suggested = round(item["current"] - item["net"], 2)
+        ttk.Label(outer, text=f"{item['cell']} 已經含了今天的成交的話，開盤前是",
+                  style="Hint.TLabel").grid(row=row, column=0, sticky="w", pady=2)
+        pick = ttk.Frame(outer)
+        pick.grid(row=row, column=1, sticky="e", padx=(24, 0), pady=2)
+        ttk.Label(pick, text=show(suggested)).pack(side="left")
+        ttk.Button(pick, text="帶入", width=5,
+                   command=lambda: (text.set(show(suggested)), entry.focus_set(),
+                                    entry.select_range(0, "end"))).pack(side="left", padx=(8, 0))
+        row += 1
 
-    inner = ttk.Frame(canvas)
-    canvas.create_window((0, 0), window=inner, anchor="nw")
+    ttk.Label(outer, text="改成（今天開盤前的現金）").grid(row=row, column=0,
+                                                          sticky="w", pady=(10, 2))
+    entry = ttk.Entry(outer, width=16, font=(family, FONT_SIZE), justify="right",
+                      textvariable=text)
+    entry.grid(row=row, column=1, sticky="e", padx=(24, 0), pady=(10, 2))
 
-    for index, row in enumerate(rows):
-        # 對不上的排在最前面（見 _ask_cash_reset），再標色 —— 20 列裡真正要看的
-        # 通常只有那一兩列，光靠排序還是得一列一列讀過去。
-        tone = "Manual.TLabel" if row["odd"] else "TLabel"
-        ttk.Label(inner, text=row["name"], width=name_w,
-                  style=tone).grid(row=index, column=0, sticky="w", pady=2)
-        ttk.Label(inner, text=show(row["remembered"]), width=num_w, anchor="e",
-                  style=tone).grid(row=index, column=1, pady=2)
-        ttk.Label(inner, text=show(row["net"]), width=num_w, anchor="e",
-                  style=tone).grid(row=index, column=2, pady=2)
+    # 結果邊打邊算。要核對的是「按下去會變成什麼」，自己看得到就不必先在心裡
+    # 算一次再賭它跟程式算的一樣。
+    ttk.Label(outer, text=f"{item['cell']} 會變成", style="Hint.TLabel").grid(
+        row=row + 1, column=0, sticky="w", pady=2)
+    result = ttk.Label(outer, text="維持原樣", style="Hint.TLabel")
+    result.grid(row=row + 1, column=1, sticky="e", padx=(24, 0), pady=2)
 
-        text = tk.StringVar()
-        entry = ttk.Entry(inner, width=num_w, font=(family, FONT_SIZE),
-                          justify="right", textvariable=text)
-        entry.grid(row=index, column=3, padx=(8, 0), pady=2)
+    def update(*_args):
+        raw = text.get().strip().replace(",", "")
+        if not raw:
+            result.configure(text="維持原樣", style="Hint.TLabel")
+            return
+        opening = to_num(raw, None)
+        if opening is None:
+            result.configure(text="看不懂", style="Manual.TLabel")
+            return
+        result.configure(text=show(round(opening + item["net"], 2)), style="Auto.TLabel")
 
-        # 結果邊打邊算。這一欄才是使用者真正在核對的東西 ——「填完按下去會變成
-        # 什麼」自己看得到的話，就不必先在心裡算一次再賭它跟程式算的一樣。
-        result = ttk.Label(inner, text="維持原樣", width=num_w, anchor="e", style="Hint.TLabel")
-        result.grid(row=index, column=4, padx=(8, 0), pady=2)
+    text.trace_add("write", update)
+    update()
 
-        def update(*_args, text=text, result=result, net=row["net"]):
-            raw = text.get().strip().replace(",", "")
-            if not raw:
-                result.configure(text="維持原樣", style="Hint.TLabel")
-                return
-            opening = to_num(raw, None)
-            if opening is None:
-                result.configure(text="看不懂", style="Manual.TLabel")
-                return
-            result.configure(text=show(round(opening + net, 2)), style="Auto.TLabel")
-
-        text.trace_add("write", update)
-        entries.append((row["name"], entry, text))
-
-    inner.update_idletasks()
-    full_w, full_h = inner.winfo_reqwidth(), inner.winfo_reqheight()
-    row_h = max(full_h // max(len(rows), 1), 1)
-    canvas.configure(width=full_w, height=row_h * min(len(rows), CASH_RESET_ROWS),
-                     scrollregion=(0, 0, full_w, full_h))
-
-    if len(rows) > CASH_RESET_ROWS:
-        bar.grid(row=2, column=1, sticky="ns")
-        # 綁在 Toplevel 而不是 canvas：滑鼠實際上停在裡面的 Entry 或 Label 上，
-        # 事件是往上傳到視窗，傳不到 canvas 這個「旁邊的」祖先。
-        win.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
-
-    def confirm():
-        picked = {}
-        for name, entry, text in entries:
-            raw = text.get().strip().replace(",", "")
-            if not raw:
-                continue
-            value = to_num(raw, None)
-            if value is None:
-                messagebox.showerror(
-                    "看不懂這個數字",
-                    f"分頁「{name}」填的是「{text.get().strip()}」，請填一個數字。",
-                    parent=win)
-                entry.focus_set()
-                return
-            picked[name] = value
-        answers.update(picked)
+    def confirm(*_args):
+        raw = text.get().strip().replace(",", "")
+        if not raw:
+            win.destroy()
+            return
+        value = to_num(raw, None)
+        if value is None:
+            messagebox.showerror("看不懂這個數字",
+                                 f"「{text.get().strip()}」不是一個數字。", parent=win)
+            entry.focus_set()
+            return
+        answer["opening"] = value
         win.destroy()
 
+    # 填錯只有一種形狀，就直接寫出來。這裡沒有任何檢查擋得住它：
+    # 兩個數字都是合法的金額，錯的那個要到明天的餘額才看得出來。
+    ttk.Label(outer, justify="left", style="Hint.TLabel", text=(
+        "盤中自己改過 " + item["cell"] + " 的話要小心：改進去的通常是「已經含了今天成交」的餘額，\n"
+        "不能直接當成開盤前 —— 那樣今天的淨收付會被算兩次。"
+    )).grid(row=row + 2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
     buttons = ttk.Frame(outer)
-    buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
-    ttk.Button(buttons, text="全部維持原樣", command=win.destroy).pack(side="left", padx=(0, 8))
+    buttons.grid(row=row + 3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+    ttk.Button(buttons, text="取消", command=win.destroy).pack(side="left", padx=(0, 8))
     ttk.Button(buttons, text="確定", command=confirm).pack(side="left")
 
     win.protocol("WM_DELETE_WINDOW", win.destroy)
     win.bind("<Escape>", lambda _e: win.destroy())
+    win.bind("<Return>", confirm)
     center_on(win, parent)
     win.grab_set()
-    if entries:
-        entries[0][1].focus_set()
+    # 整段選起來：來改的人心裡已經有一個數字，直接打就換掉，不必先清空。
+    entry.focus_set()
+    entry.select_range(0, "end")
     parent.wait_window(win)
-    return answers
+    return answer.get("opening")
 
 
 class SyncApp:
@@ -493,9 +506,30 @@ class SyncApp:
         self.before = {}         # (分頁名, 格子) -> 這批網頁資料讀進來時 Excel 上的舊值
         self.proposals = {}      # 分頁名 -> 提案清單
         self.warnings = {}       # 分頁名 -> 提醒
-        self.problems = []       # 整組失敗的原因
+        self.problems = []       # 這一輪畫在提醒框裡的失敗原因（由 problem_of 攤平而來）
         self.current_sheet = None  # 右邊正在看哪一位交易人
+
+        # 「第幾組帳號」與「哪一位交易人」的對照。帳號設定裡只有帳密沒有名字，
+        # 名字要登入之後才從網站的 sessionStorage 拿得到，所以這份對照是一邊做
+        # 一邊長出來的。模擬帳號例外 —— 它的名字本來就寫在 .env 裡，
+        # 一開機就填得進去，逐一交易人更新在模擬模式下不必先讀一輪。
+        self.trader_of = {i: a["name"] for i, a in enumerate(self.accounts, start=1)
+                          if a.get("fake")}
+        # 每一位的網頁資料是什麼時候讀的。改成一次只更新一位之後，畫面上同時
+        # 存在好幾個時間點的資料 —— 不寫出來，別人那幾列看起來就跟剛讀的一樣新。
+        self.read_at = {}        # 分頁名 -> datetime
+        # 失敗原因改成用「第幾組」當 key，不再是一整串重來一次的清單：只更新一位的
+        # 時候，別人上一輪的失敗還沒被解決，不能因為這一輪沒讀到他就當作沒事了。
+        self.problem_of = {}     # 第幾組 -> 失敗原因
+        # 這一輪動到哪幾位。寫入、落帳、接管都只能在這個範圍裡做 —— 別人手上那份
+        # 是上一輪的舊資料，拿舊資料去寫 Excel 是這個改動最大的風險。
+        self.round_scope = set()
+        # 這一輪按下去的時候要做誰（None = 全部）。報告用的，不是判斷用的。
+        self.round_target = None
         self.busy = False
+        # 「修改今日初始現金餘額」現在能不能按。_fill_opening 判定，_sync_buttons 套用
+        # ——「忙不忙」跟「有沒有資料」是兩件事，分開記才不會互相蓋掉。
+        self.opening_ready = False
         self.write_count = 0     # 這次要寫幾格，寫完報告時要用
         self.queue = queue.Queue()
         self.browser_cmd_queue = queue.Queue()
@@ -505,14 +539,30 @@ class SyncApp:
         # 就是在盯這件事。
         self.browser_waiting = 0
 
+        # 「憑證」分頁：交易人 -> {"text": 網頁抄來的原文, "expiry": 解析出來的到期日}。
+        # 只在登入的當下抓一次（見 fetch._fetch_cert_status），所以還沒登入過的人不會出現。
+        self.cert_status = {}
+        # 這次工作階段已經提醒過的人 —— 快到期不必每讀一次資料就再跳一次視窗。
+        self.cert_alerted = set()
+        self._migrate_candidates = {}   # 遷移憑證那張表的列 id -> profile_tools.scan_cert_sources() 的一筆
+        self.profile_busy = False       # 「建立 Profile」進行中，避免重複點
+        self.cert_tab_scanned = False   # 「憑證」分頁只在第一次切過去時自動掃描一次，之後靠手動「掃描」
+
         self.ledger = None
         self.ledger_error = None
+        # 這份 Excel 的紀錄檔是不是這次才生出來的。是的話，今天的現金起點是憑
+        # 「B8 現在的數字」定的，而程式沒有任何辦法看出它含不含今天的成交
+        # —— 唯一能發現的人是使用者，所以要在提醒欄講一句（見 _fill_notes）。
+        # 記在這裡而不是每次去問 ledger.existed：存過一次檔它就變成 True 了，
+        # 而「這一天是從一份空帳本開始的」這件事不會因為存過檔就不成立。
+        self.ledger_fresh = False
         # 這份 Excel 現在有沒有真的開在 Excel 裡。登入與讀取都卡在這個旗標上，
         # 由 _poll_excel 每幾秒重新確認一次 —— 使用者中途把 Excel 關掉也算數。
         self.excel_open = False
         if self.path is not None:
             try:
                 self.ledger = ledger_mod.Ledger(self.path)
+                self.ledger_fresh = not self.ledger.existed
             except RuntimeError as exc:
                 self.ledger_error = str(exc)
 
@@ -521,12 +571,6 @@ class SyncApp:
         # 只看有差異的：20 位裡通常只有幾位要動，這個開關把名單縮到那幾位。
         # 刻意不記進紀錄檔 —— 它是「這一輪想少看幾個人」，不是一個設定。
         self.only_diff = tk.BooleanVar(value=False)
-
-        # 登入時算好「哪些分頁要問現金基準」，等讀完網頁資料才真的問（見 _ask_cash_reset）。
-        self.cash_prompts = {}
-        # 這次執行已經替哪些分頁決定過現金基準（登入時初始化過的，或已經問過的）。
-        # 沒有這份名單，不經過登入的那條路會在每一次讀取都重問一次同一個問題。
-        self.cash_settled = set()
 
         self._build()
         self._drain()
@@ -589,6 +633,7 @@ class SyncApp:
         # 整個畫面只有「程式自動更新」「只看有差異的」兩個還是原本的小字 ——
         # 而前者正是決定程式會不會動你 Excel 的那個開關。
         style.configure("TCheckbutton", font=(family, FONT_SIZE))
+        style.configure("TNotebook.Tab", font=(family, FONT_SIZE))
         style.configure("Hint.TLabel", font=(family, HINT_SIZE), foreground="#666666")
         style.configure("Big.TButton", font=(family, FONT_SIZE, "bold"))
         style.configure("Auto.TLabel", font=(family, HINT_SIZE), foreground="#1a7f37")
@@ -615,19 +660,25 @@ class SyncApp:
         self.login_button = ttk.Button(top, text="登入", command=self.start_login)
         self.login_button.grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
-        ttk.Label(top, text="帳號").grid(row=1, column=1, sticky="w", padx=(16, 0), pady=(6, 0))
-        # 模擬帳號在清單裡直接標出名字，20 組時光看「第 7 組」根本不知道是誰。
-        choices = ["全部"] + [
-            f"第 {i} 組" + (f"　{a['name']}（模擬）" if a.get("fake") else "")
-            for i, a in enumerate(self.accounts, start=1)
-        ]
+        # 「範圍」不只是登入哪幾組 —— 讀取也照它走，而且它跟左邊那份名單是同一個
+        # 選擇的兩個入口：名單上點一位，這裡就換成那一位；這裡換一位，名單也跟著跳。
+        # 一次只更新一位是常態（一整天下來按最多次的就是它），一次讀全部反而是
+        # 開盤前那一次，所以入口做成「預設全部、點了誰就只做誰」。
+        ttk.Label(top, text="範圍").grid(row=1, column=1, sticky="w", padx=(16, 0), pady=(6, 0))
         # 名字不能叫 width —— 上面那個 width 是視窗寬度，_center 最後還要用它。
-        choice_width = 22 if self.fake_sheets else 10
-        self.account_choice = ttk.Combobox(top, values=choices, state="readonly",
+        choice_width = 22 if self.fake_sheets else 16
+        self.account_choice = ttk.Combobox(top, values=self._account_choices(), state="readonly",
                                            width=choice_width, font=(family, FONT_SIZE))
         self.account_choice.current(0)
         self.account_choice.grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
+        self.account_choice.bind("<<ComboboxSelected>>", self._on_scope_changed)
 
+        ttk.Label(top, text="左邊名單點一位，這裡就跟著換；要重讀全部就切回「全部」",
+                  style="Hint.TLabel").grid(row=1, column=3, sticky="w",
+                                            padx=(12, 0), pady=(6, 0))
+
+        # 按鈕上的字跟著範圍走：全部是「讀取網頁資料」，選了一位就是「更新（王小明）」
+        # —— 按下去會動到誰，寫在按鈕上，不必回頭去看那個下拉選單（見 _refresh_fetch_button）。
         self.fetch_button = ttk.Button(top, text="讀取網頁資料", style="Big.TButton", command=self.start_fetch)
         self.fetch_button.grid(row=2, column=0, sticky="ew", pady=(6, 0))
 
@@ -652,11 +703,13 @@ class SyncApp:
 
         self._build_sync_tab()
         self._build_history_tab()
+        self._build_cert_tab()
 
         self.status = ttk.Label(self.root, text="", style="Hint.TLabel", anchor="w", padding=(12, 6))
         self.status.pack(fill="x")
 
         self._refresh_mode_hint()
+        self._refresh_fetch_button()
         # 按鈕的初始亮暗也要照規則來。少了這一次，Excel 沒開著時「登入」會亮到
         # 第一次狀態改變為止 —— 而「一直沒開」正好就是不會有改變的那種情況。
         self._sync_buttons()
@@ -812,9 +865,28 @@ class SyncApp:
         # 拖動中間那條分隔線會改變寬度，說明就可能從一行變兩行 —— 寬度變了就重量一次。
         self.cash_line.bind("<Configure>", lambda _event: self._fit_cash_line())
 
+        # 現金那一條底下再貼一條：今天是從多少錢開始的。
+        #
+        # 餘額不是網頁抄來的，是「今日初始現金餘額 + 今日淨收付」算出來的，所以
+        # 餘額不對的時候要改的是這個數字。它一直只存在紀錄檔裡，畫面上看不到，
+        # 而唯一改得到它的入口是程式自己判斷該不該跳的那個對話框 —— 沒跳、
+        # 或跳的時候填錯，就得等明天。擺一個固定的位置給它就沒有這種時段了。
+        #
+        # 貼在現金那一條正下方，因為要看的是兩者的關係（初始 + 今日 = 現在）。
+        opening = ttk.Frame(box)
+        opening.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        ttk.Label(opening, text="今日初始現金餘額", style="Hint.TLabel").pack(side="left")
+        self.opening_value = ttk.Label(opening, text="")
+        self.opening_value.pack(side="left", padx=(8, 0))
+        self.opening_button = ttk.Button(opening, text="修改", width=6, command=self.edit_opening)
+        self.opening_button.pack(side="left", padx=(12, 0))
+        # 按鈕變灰的時候，理由就寫在旁邊 —— 灰掉而不說為什麼，看起來就像壞了。
+        self.opening_hint = ttk.Label(opening, text="", style="Hint.TLabel")
+        self.opening_hint.pack(side="left", padx=(12, 0))
+
         self.warn_box = tk.Text(box, height=5, wrap="word", font=(self.family, HINT_SIZE),
                                 background="#fbfbfb", relief="flat", state="disabled")
-        self.warn_box.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.warn_box.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         # 換人只靠名單本身。原本這裡還有「上一位／下一位」兩顆按鈕，但名單就在
         # 左邊、點下去更快，那兩顆只是同一件事的第二個入口；「寫入」也拿掉了
@@ -828,7 +900,7 @@ class SyncApp:
         # ——它是每天最先要看的一個數字，不該離持股表那麼遠。所以表格改成照列數
         # 決定高度（見 _fill_detail），多出來的空白由最下面那一列吸收。
         box.rowconfigure(1, weight=0)
-        box.rowconfigure(4, weight=1)
+        box.rowconfigure(5, weight=1)
         box.columnconfigure(0, weight=1)
 
     def _build_history_tab(self):
@@ -888,12 +960,407 @@ class SyncApp:
         frame.rowconfigure(1, weight=1)
         frame.columnconfigure(0, weight=1)
 
+    def _build_cert_tab(self):
+        """
+        把 setup-profile.ps1（建立/重建使用者資料夾）與 migrate-cert.ps1（掃描、複製憑證）
+        整合進來，外加登入時順便抓到的憑證到期日 —— 這三件事本來都要開 PowerShell 手動跑，
+        現在收進同一個分頁，按鈕按下去就是了。
+        """
+        frame = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(frame, text="  憑證  ")
+
+        self._build_profile_section(frame)
+        self._build_migrate_section(frame)
+        self._build_cert_status_section(frame)
+
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(2, weight=1)
+
+    def _build_profile_section(self, parent):
+        """建立／重建自動登入用的 Chrome 使用者資料夾（對應 setup-profile.ps1）。"""
+        box = ttk.LabelFrame(parent, text="Profile", padding=8)
+        box.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        self.profile_status = ttk.Label(box, text="", style="Hint.TLabel")
+        self.profile_status.grid(row=0, column=0, columnspan=4, sticky="w")
+
+        ttk.Label(box, text="Profile 名稱").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.profile_name = tk.StringVar(value=profile_tools.current_raw())
+        ttk.Entry(box, textvariable=self.profile_name, width=28,
+                  font=(self.family, FONT_SIZE)).grid(row=1, column=1, sticky="w",
+                                                       padx=(8, 8), pady=(6, 0))
+
+        self.profile_button = ttk.Button(box, text="建立 Profile", command=self.create_profile)
+        self.profile_button.grid(row=1, column=2, sticky="w", pady=(6, 0))
+
+        ttk.Label(box, text="沒填就用 chrome-profile。會開一個 Chrome 視窗把資料夾初始化，"
+                            "完成後自動關掉；資料夾已存在的話（沒有憑證就直接清空重建，"
+                            "有憑證會先問過你）。",
+                  style="Hint.TLabel", wraplength=wide(760)).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        box.columnconfigure(3, weight=1)
+        self._refresh_profile_status()
+
+    def _build_migrate_section(self, parent):
+        """從平常在用的 Chrome/Edge 找出已經申請過的憑證，複製到自動登入用的 Profile（對應 migrate-cert.ps1）。"""
+        box = ttk.LabelFrame(parent, text="遷移憑證", padding=8)
+        box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        head = ttk.Frame(box)
+        head.grid(row=0, column=0, sticky="ew")
+        ttk.Button(head, text="掃描", command=self.scan_cert_sources).pack(side="left")
+        self.migrate_copy_button = ttk.Button(head, text="複製到自動登入用的 Profile",
+                                              command=self.copy_selected_cert, state="disabled")
+        self.migrate_copy_button.pack(side="left", padx=(8, 0))
+        self.migrate_status = ttk.Label(head, text="", style="Hint.TLabel")
+        self.migrate_status.pack(side="left", padx=(16, 0))
+
+        columns = ("browser", "name", "found", "path")
+        titles = {"browser": "瀏覽器", "name": "Profile", "found": "憑證", "path": "路徑"}
+        widths = {"browser": 70, "name": 90, "found": 60, "path": 380}
+        self.migrate_tree = ttk.Treeview(box, columns=columns, show="headings",
+                                         height=6, selectmode="browse")
+        for key in columns:
+            self.migrate_tree.heading(key, text=titles[key])
+            anchor = "center" if key == "found" else "w"
+            self.migrate_tree.column(key, width=wide(widths[key]), minwidth=wide(widths[key] // 2),
+                                     anchor=anchor, stretch=(key == "path"))
+        self.migrate_tree.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.migrate_tree.bind("<<TreeviewSelect>>", self._on_migrate_select)
+        self.migrate_tree.tag_configure("found", background="#eaf4ea")
+
+        box.columnconfigure(0, weight=1)
+
+    def _build_cert_status_section(self, parent):
+        """登入過的每一位交易人，憑證什麼時候到期（見 fetch._fetch_cert_status）。"""
+        box = ttk.LabelFrame(parent, text="登入帳號的憑證到期日", padding=8)
+        box.grid(row=2, column=0, sticky="nsew")
+
+        columns = ("name", "expiry", "state")
+        titles = {"name": "交易人", "expiry": "憑證到期日", "state": "狀態"}
+        widths = {"name": 120, "expiry": 170, "state": 100}
+        self.cert_tree = ttk.Treeview(box, columns=columns, show="headings", selectmode="browse")
+        for key in columns:
+            self.cert_tree.heading(key, text=titles[key])
+            anchor = "center" if key == "state" else "w"
+            self.cert_tree.column(key, width=wide(widths[key]), minwidth=wide(widths[key] // 2),
+                                  anchor=anchor, stretch=(key == "name"))
+        bar = ttk.Scrollbar(box, orient="vertical", command=self.cert_tree.yview)
+        self.cert_tree.configure(yscrollcommand=bar.set)
+        self.cert_tree.grid(row=0, column=0, sticky="nsew")
+        bar.grid(row=0, column=1, sticky="ns")
+        self.cert_tree.tag_configure("expired", foreground="#c00000")
+        self.cert_tree.tag_configure("soon", foreground="#a34a00")
+
+        ttk.Label(box, text="登入時才會抓到；還沒登入過的人這裡不會出現。",
+                  style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+
+    # ---------- 憑證分頁 ----------
+
+    def _refresh_profile_status(self):
+        raw = profile_tools.current_raw()
+        path = profile_tools.resolve_path(raw)
+        if path is None:
+            self.profile_status.configure(text="目前 .env 沒有設定 USER_DATA_DIR —— 憑證存不住。")
+        elif not path.is_dir():
+            self.profile_status.configure(text=f"目前的 Profile：{path}（還沒建立）")
+        elif profile_tools.has_cert(path):
+            self.profile_status.configure(text=f"目前的 Profile：{path}（已經有 tbbstock 憑證）")
+        else:
+            self.profile_status.configure(text=f"目前的 Profile：{path}（還沒有 tbbstock 憑證）")
+
+    def create_profile(self):
+        """
+        建立（或清空重建）自動登入用的 Chrome 使用者資料夾：開一個一般模式的 Chrome
+        把資料夾初始化出來，確認初始化完成就自動關掉視窗，不必像 setup-profile.ps1
+        那樣手動把視窗關掉。對應 2.1～2.3。
+        """
+        if self.profile_busy:
+            return
+
+        raw = self.profile_name.get().strip() or profile_tools.DEFAULT_NAME
+        path = profile_tools.resolve_path(raw)
+        if path is None:
+            messagebox.showerror("名稱不能是空的", "請輸入 Profile 名稱。", parent=self.root)
+            return
+        if profile_tools.is_default_chrome_dir(path):
+            messagebox.showerror(
+                "不能用這個資料夾",
+                "不能指向 Chrome 的預設使用者資料夾，Chrome 136 之後禁止自動化連上它。\n"
+                "請換一個名稱（例如 chrome-profile）。", parent=self.root)
+            return
+
+        if path.is_dir():
+            if profile_tools.chrome_pids_for_profile(path):
+                messagebox.showerror(
+                    "資料夾正在使用中",
+                    f"這個資料夾正被 Chrome 開著，請先把它關掉再試一次：\n{path}", parent=self.root)
+                return
+            if profile_tools.has_cert(path) and not messagebox.askyesno(
+                "資料夾裡已經有憑證",
+                f"這個資料夾裡有 tbbstock 的數位憑證：\n{path}\n\n"
+                "刪掉重建的話，那張憑證就沒了，之後要重新申請一次。\n確定要刪除重建嗎？",
+                icon="warning", default="no", parent=self.root,
+            ):
+                return
+            try:
+                profile_tools.delete_profile(path)
+            except OSError as exc:
+                messagebox.showerror("刪不掉", f"刪除資料夾失敗：\n{exc}", parent=self.root)
+                return
+
+        chrome_exe = profile_tools.find_chrome()
+        if chrome_exe is None:
+            messagebox.showerror("找不到 Chrome", "這台電腦找不到 Google Chrome，請先安裝。",
+                                 parent=self.root)
+            return
+
+        try:
+            profile_tools.remember_user_data_dir(raw)
+        except OSError as exc:
+            messagebox.showwarning("沒寫進 .env", f"這次可以用，但沒能寫進 .env：\n{exc}",
+                                   parent=self.root)
+
+        try:
+            profile_tools.launch_manual_chrome(chrome_exe, path)
+        except OSError as exc:
+            messagebox.showerror("開不起來", f"沒辦法開啟 Chrome：\n{exc}", parent=self.root)
+            return
+
+        self.profile_busy = True
+        self.profile_button.configure(state="disabled")
+        self.profile_status.configure(text=f"正在建立 Profile：{path}（Chrome 開起來了，請稍候…）")
+        self._poll_profile_init(path, 0)
+
+    def _poll_profile_init(self, path, tries):
+        """每半秒確認一次資料夾初始化完成沒，完成就自動把那個 Chrome 視窗關掉（2.3）。"""
+        if profile_tools.profile_initialized(path):
+            profile_tools.kill_pids(profile_tools.chrome_pids_for_profile(path))
+            self.profile_busy = False
+            self.profile_button.configure(state="normal")
+            self._refresh_profile_status()
+            messagebox.showinfo(
+                "Profile 建好了",
+                f"資料夾已就緒，視窗已經自動關掉：\n{path}\n\n"
+                "接下來可以用下面的「遷移憑證」把憑證複製進來；掃不到的話就是還沒申請過，"
+                "自己開這個資料夾登入 tbbstock 申請一次即可。", parent=self.root)
+            return
+        if tries >= 60:   # 30 秒
+            self.profile_busy = False
+            self.profile_button.configure(state="normal")
+            self.profile_status.configure(text=f"還沒看到 Profile 初始化完成：{path}")
+            messagebox.showwarning(
+                "沒看到初始化完成",
+                f"30 秒過去了，還沒看到 Chrome 把資料夾初始化好：\n{path}\n\n"
+                "視窗可能還在開啟中，請自己看一下，關掉後再按一次「建立 Profile」確認結果。",
+                parent=self.root)
+            return
+        self.root.after(500, lambda: self._poll_profile_init(path, tries + 1))
+
+    def scan_cert_sources(self):
+        """掃描這台電腦上 Chrome／Edge 的每個 profile，看誰有 tbbstock 憑證痕跡（2.4）。"""
+        target = profile_tools.resolve_path(profile_tools.current_raw())
+        self.migrate_tree.delete(*self.migrate_tree.get_children())
+        self._migrate_candidates = {}
+        self.migrate_copy_button.configure(state="disabled")
+
+        if target is None:
+            self.migrate_status.configure(text="還沒設定 USER_DATA_DIR。")
+            return
+
+        candidates = profile_tools.scan_cert_sources(target)
+        # 沒憑證痕跡的 profile 只是雜訊 —— 這張表是給人挑「要從哪一個複製」，
+        # 不是給人看「這台電腦裝了幾個 profile」，所以只列有痕跡的那幾個。
+        found_candidates = [c for c in candidates if c["found"]]
+        for candidate in found_candidates:
+            item = self.migrate_tree.insert(
+                "", "end",
+                values=(candidate["browser"], candidate["name"], "有", str(candidate["path"])),
+                tags=("found",),
+            )
+            self._migrate_candidates[item] = candidate
+
+        if found_candidates:
+            self.migrate_status.configure(
+                text=f"掃了 {len(candidates)} 個 profile，{len(found_candidates)} 個有憑證痕跡。")
+        elif candidates:
+            self.migrate_status.configure(text=f"掃了 {len(candidates)} 個 profile，沒有找到憑證痕跡。")
+        else:
+            self.migrate_status.configure(text="這台電腦上沒找到 Chrome／Edge 的 profile。")
+
+    def _on_migrate_select(self, _event=None):
+        selection = self.migrate_tree.selection()
+        ok = bool(selection) and self._migrate_candidates.get(selection[0], {}).get("found")
+        self.migrate_copy_button.configure(state="normal" if ok else "disabled")
+
+    def copy_selected_cert(self):
+        """把選中的來源 profile 的憑證複製到自動登入用的 Profile。"""
+        selection = self.migrate_tree.selection()
+        if not selection:
+            return
+        source = self._migrate_candidates.get(selection[0])
+        if not source or not source["found"]:
+            return
+
+        target = profile_tools.resolve_path(profile_tools.current_raw())
+        if target is None or not target.is_dir():
+            messagebox.showerror(
+                "目標 Profile 還不存在",
+                "請先用上面的「建立 Profile」把資料夾建出來，再回來複製憑證。", parent=self.root)
+            return
+
+        if profile_tools.browser_running(source["exe"]):
+            messagebox.showerror(
+                "來源瀏覽器還開著",
+                f"{source['browser']} 還在執行，複製到的可能是還沒寫進磁碟的舊資料。\n"
+                f"請把 {source['browser']} 所有視窗（含背景程序）都關掉再試一次。", parent=self.root)
+            return
+        if profile_tools.chrome_pids_for_profile(target):
+            messagebox.showerror(
+                "目標 Profile 正在使用中",
+                f"這個資料夾正被 Chrome 開著，請先關掉：\n{target}", parent=self.root)
+            return
+
+        if not messagebox.askyesno(
+            "複製憑證",
+            f"把「{source['browser']} / {source['name']}」的憑證複製到自動登入用的 Profile？\n\n"
+            "目標現有的資料會先備份。來源那張憑證不受影響（這只是複製檔案，不是重新申請）。",
+            parent=self.root,
+        ):
+            return
+
+        try:
+            backup = profile_tools.copy_cert(source["path"], target)
+        except OSError as exc:
+            messagebox.showerror("複製失敗", str(exc), parent=self.root)
+            return
+
+        self._refresh_profile_status()
+        self.scan_cert_sources()
+        note = f"（原本的已備份到 {backup.name}）" if backup else ""
+        self.migrate_status.configure(text=f"已複製完成{note}")
+        messagebox.showinfo(
+            "複製完成",
+            f"憑證已複製到自動登入用的 Profile{note}。\n"
+            "接下來按「登入」實際驗證，不再跳「瀏覽器查無有效數位憑證」就是成功了。", parent=self.root)
+
+    def _update_cert_status(self, records):
+        """
+        把這批登入結果裡的憑證到期日記起來，畫進「憑證」分頁；快到期或已過期的人跳一次提醒
+        （同一個工作階段只提醒一次，不必每讀一次資料就再煩一次，見 2.5）。
+        """
+        alerts = []
+        for record in records:
+            name = record.get("sheet_name")
+            if not name or record.get("cert_text") is None:
+                continue
+            raw_expiry = record.get("cert_expiry")
+            expiry = datetime.datetime.fromisoformat(raw_expiry) if raw_expiry else None
+            self.cert_status[name] = {"text": record["cert_text"], "expiry": expiry}
+            level = profile_tools.cert_alert_level(expiry)
+            if level and name not in self.cert_alerted:
+                self.cert_alerted.add(name)
+                alerts.append((name, level, expiry))
+
+        self._refresh_cert_tree()
+
+        if alerts:
+            lines = [f"・{name}：{'已過期' if level == 'expired' else '快到期'}"
+                    f"（{expiry.strftime('%Y/%m/%d') if expiry else '?'}）"
+                    for name, level, expiry in alerts]
+            messagebox.showwarning(
+                "憑證快到期了",
+                "以下交易人的 tbbstock 數位憑證：\n\n" + "\n".join(lines) +
+                "\n\n請提醒本人去 tbbstock 重新申請憑證。", parent=self.root)
+
+    def _refresh_cert_tree(self):
+        self.cert_tree.delete(*self.cert_tree.get_children())
+        now = datetime.datetime.now()
+        for name in sorted(self.cert_status):
+            info = self.cert_status[name]
+            expiry = info.get("expiry")
+            level = profile_tools.cert_alert_level(expiry, now)
+            expiry_text = expiry.strftime("%Y/%m/%d %H:%M") if expiry else (info.get("text") or "抓不到")
+            state = {"expired": "已過期", "soon": "即將到期"}.get(level, "正常" if expiry else "未知")
+            self.cert_tree.insert("", "end", values=(name, expiry_text, state),
+                                  tags=(level,) if level else ())
+
     # ---------- 背景工作 ----------
 
     def _selected_accounts(self):
         choice = self.account_choice.current()
         numbered = list(enumerate(self.accounts, start=1))
-        return numbered if choice == 0 else [numbered[choice - 1]]
+        return numbered if choice <= 0 else [numbered[choice - 1]]
+
+    def _account_choices(self):
+        """範圍選單上的每一列。名字知道了就寫名字 —— 20 組時光看「第 7 組」不知道是誰。"""
+        choices = ["全部"]
+        for i, account in enumerate(self.accounts, start=1):
+            name = self.trader_of.get(i)
+            label = f"第 {i} 組"
+            if name:
+                label += f"　{name}" + ("（模擬）" if account.get("fake") else "")
+            choices.append(label)
+        return choices
+
+    def _refresh_account_choices(self):
+        """登入或讀取之後名字才知道，選單上那幾列要跟著補上去。選中的那一列不動。"""
+        keep = max(self.account_choice.current(), 0)
+        self.account_choice.configure(values=self._account_choices())
+        self.account_choice.current(keep)
+        self._refresh_fetch_button()
+
+    def _scope_order(self):
+        """這次要做第幾組；None 代表全部。"""
+        choice = self.account_choice.current()
+        return choice if choice > 0 else None
+
+    def _scope_name(self):
+        """這次要做的是哪一位交易人；全部、或名字還不知道時是 None。"""
+        order = self._scope_order()
+        return None if order is None else self.trader_of.get(order)
+
+    def _refresh_fetch_button(self):
+        """
+        按鈕上的字就是「按下去會動到誰」。
+
+        名字還不知道（那一組沒登入過）時寫「第 3 組」而不是硬掰一個名字：
+        這種時候按下去確實只做那一組，只是程式還說不出他是誰。
+        """
+        order = self._scope_order()
+        if order is None:
+            text = "讀取網頁資料"
+        else:
+            name = self.trader_of.get(order)
+            text = f"更新（{name}）" if name else f"讀取網頁資料（第 {order} 組）"
+        self.fetch_button.configure(text=text)
+
+    def _on_scope_changed(self, _event=None):
+        """上面換了範圍，左邊名單也跳到那一位 —— 兩邊是同一個選擇的兩個入口。"""
+        self._refresh_fetch_button()
+        name = self._scope_name()
+        if name and name != self.current_sheet and name in self._shown():
+            self.current_sheet = name
+            self.people.selection_set(name)
+            self.people.see(name)
+            self._fill_detail()
+
+    def _sync_scope_to_person(self):
+        """
+        左邊名單換人，上面的範圍跟著換成他。
+
+        對不到帳號時範圍不動（名單是網頁資料長出來的，正常情況一定對得到）
+        —— 硬把範圍留在別人身上也不會說謊，按鈕上寫的一直是範圍裡的那個人。
+        """
+        order = next((i for i, name in self.trader_of.items() if name == self.current_sheet), None)
+        if order is not None and order <= len(self.accounts):
+            if self.account_choice.current() != order:
+                self.account_choice.current(order)
+        self._refresh_fetch_button()
 
     def _ensure_browser_thread(self):
         if self.browser_thread is None or not self.browser_thread.is_alive():
@@ -925,8 +1392,12 @@ class SyncApp:
             messagebox.showerror("紀錄檔有問題", self.ledger_error)
             return
 
+        # 這一輪要做的是誰，按下去的當下就記起來：等結果回來的這幾十秒裡，
+        # 使用者隨時可能在左邊名單上點別人（範圍會跟著換），報告卻是在講剛才那一輪。
+        who = self.round_target = self._scope_name()
         self._ensure_browser_thread()
-        self._set_busy(True, "讀取中，還沒登入的話瀏覽器會自己開起來，請不要關掉它…")
+        self._set_busy(True, f"讀取{f'（{who}）' if who else ''}中，"
+                             f"還沒登入的話瀏覽器會自己開起來，請不要關掉它…")
         self.browser_waiting += 1
         self.browser_cmd_queue.put(("fetch", (self._selected_accounts(), self.path)))
 
@@ -934,6 +1405,9 @@ class SyncApp:
         """
         背景：整個瀏覽器 session 的生命週期都在這個執行緒裡，一直活到使用者自己把
         瀏覽器關掉，或整個介面關閉為止。
+
+        每組帳號的分頁與 cookie 都收在這個執行緒手上的 store 裡（見 fetch.new_store）
+        —— 「只更新某一位」能不重登就查得到資料，靠的就是它活得跟瀏覽器一樣久。
 
         不能每次按鈕都開新執行緒各開各的瀏覽器 —— Playwright 的同步 API 底層用
         greenlet 綁死建立它的那個執行緒，換一個執行緒去操作同一個 context 會直接
@@ -952,10 +1426,13 @@ class SyncApp:
         —— 錯誤處理只有一份，不會有「登入那條路修好了、讀取那條還留著舊寫法」。
         """
         playwright = context = browser = None
-        pages = {}     # 第幾組帳號 -> 上次登入用的分頁，讓下一次操作能重複利用
+        # 每組帳號的分頁、cookie、身分，還有「現在瀏覽器帶著誰的 cookie」。
+        # 「一次只更新一位」全靠它：換人時把那一組登入時收下來的 cookie 換回去，
+        # 不必重登（見 fetch.new_store）。跟著瀏覽器一起生、一起死。
+        store = fetch_mod.new_store()
 
         def ensure_browser():
-            nonlocal playwright, context, browser, pages
+            nonlocal playwright, context, browser, store
             if playwright is None:
                 # 瀏覽器的位置要在 driver 起來之前決定好，它是靠環境變數傳下去的。
                 configure_browsers_path()
@@ -964,7 +1441,7 @@ class SyncApp:
                 context = browser = None      # 使用者自己把它關掉了，重開一個
             if context is None:
                 context, browser = open_context(playwright)
-                pages = {}
+                store = fetch_mod.new_store()
 
         # 指令 -> (要呼叫誰, 回話時說自己是哪一種)
         jobs = {"login": (login_only, "logged_in"), "fetch": (collect, "fetched")}
@@ -980,7 +1457,7 @@ class SyncApp:
                 try:
                     ensure_browser()
                     # 登入完也順便把 Excel 現值讀出來，主執行緒要拿它當程式的起點。
-                    records = fetch_records(context, selected, pages)
+                    records = fetch_records(context, selected, store)
                     payload = _read_excel_after_fetch(records, path)
                 except Exception as exc:
                     payload = {"error": traceback.format_exc()}
@@ -1011,9 +1488,15 @@ class SyncApp:
         要寫哪幾格完全由 planner 的 will_write 決定，介面不再插手。以前介面會把
         沒勾的就地改成不寫，那是紀錄檔跟 Excel 對不起來的唯一破口 —— 現在沒有
         這條路了，寫進 Excel 的跟記進紀錄檔的必定是同一批。
+
+        只收 round_scope 裡那幾位。名單上其他人可能也有「要寫」的格子，但那是
+        用上一輪的網頁資料算出來的 —— 按「更新（王小明）」只會去查王小明，
+        這時候順手把別人那幾格也寫進去，寫的是舊資料，而且沒有人要求過。
         """
         writes, total = {}, 0
         for name, items in self.proposals.items():
+            if name not in self.round_scope:
+                continue
             cells = [(item["row"], item["col"], item["proposed"])
                      for item in items if item["will_write"]]
             if cells:
@@ -1154,17 +1637,21 @@ class SyncApp:
 
         names, problems = [], []
         for record in payload["records"]:
+            # 名字是登入才拿得到的東西，拿到就記著 —— 上面那個範圍選單、
+            # 「更新（某某）」那顆按鈕都靠這份對照。
+            if record.get("sheet_name"):
+                self.trader_of[record["order"]] = record["sheet_name"]
             if record["problems"]:
                 problems.append(f"第 {record['order']} 組：" + "；".join(record["problems"]))
             elif record.get("sheet_name"):
                 names.append(record["sheet_name"])
         problems.extend(payload.get("sheet_errors", {}).values())
+        self._refresh_account_choices()
+        self._update_cert_status(payload["records"])
 
-        self.sheet_data = payload.get("sheets", {})
+        # 只登入一組時，其他人上次讀到的 Excel 現值要留著，不能整份換掉。
+        self.sheet_data.update(payload.get("sheets", {}))
         self.today = datetime.date.today()
-        # 順序不能反：_initialize 會把現金基準設成 B8，設完就看不出「程式本來記得什麼」，
-        # 對話框上那一欄會變成照抄 Excel，等於沒問。
-        self.cash_prompts = self._cash_reset_names()
         count = self._initialize(payload["records"])
 
         if problems:
@@ -1174,62 +1661,6 @@ class SyncApp:
 
         done = f"，並以 Excel 現在的數字初始化了 {count} 格" if count else ""
         self._say(f"已登入：{'、'.join(names)}{done}。要更新資料時再按「讀取網頁資料」。")
-
-    def _cash_reset_names(self):
-        """
-        哪些分頁該問「要不要重設現金餘額」，以及程式本來記得的數字。
-        一定要在 _initialize 之前叫。
-
-        會問的只有兩種情況：今天已經初始化過（今天第二次以後開啟），或這份 Excel
-        還沒有紀錄檔。其餘一律回空的 —— 今天第一次開啟時 B8 就是唯一真相，
-        沒有什麼好問的，多問一次只會變成閉著眼睛按掉的東西。
-
-        紀錄檔全新那一條不能省。那種時候 baseline_date 是 None，光看「今天有沒有
-        初始化過」會判成第一次開啟，於是把已經含了今日淨收付的 B8 當成基準、
-        待會兒再加一次 —— 而且畫面上不會有任何徵兆。
-        """
-        if self.ledger is None or not self.sheet_data:
-            return {}
-
-        today = self.today.isoformat()
-        fresh = not self.ledger.existed
-        names = {}
-        for name in self.sheet_data:
-            cash = self.ledger.sheet(name)["cash"]
-            if not fresh and cash.get("baseline_date") != today:
-                continue
-            names[name] = cash.get("last_written")
-        return names
-
-    def _catch_up_cash_prompts(self):
-        """
-        補上「這次執行沒經過登入」的那些分頁的待問清單。一定要在 _auto_adopt 之前叫。
-
-        為什麼需要它：待問清單本來只在按「登入」時算（見 _cash_reset_names），
-        但讀取自己也會登入，所以使用者完全可以不按登入、直接按「讀取網頁資料」，
-        換一份 Excel 之後更是如此。那條路上沒有人算過這份清單，於是紀錄檔全新的
-        分頁會被 _auto_adopt 直接拿 B8 當基準 —— B8 要是已經含了今天的淨收付，
-        今天就被算了兩次，而且畫面上不會有任何徵兆。這裡就是把那條路補回同一道關卡。
-
-        一定要在 _auto_adopt 之前：它會把基準設成今天，設完每個分頁看起來都像
-        「今天已經開過了」，判斷的依據就沒了。
-
-        判斷過就記進 cash_settled，不管有沒有要問。沒記的話，_auto_adopt 設完基準
-        之後，下一次讀取會看到「baseline_date 是今天」而重新判定成要問 ——
-        同一個問題每讀一次跳一次，那種對話框最後只會被閉著眼睛按掉。
-        """
-        if self.ledger is None:
-            return
-
-        asking = self._cash_reset_names()
-        for name in self.sheet_data:
-            if name in self.cash_settled:
-                continue
-            self.cash_settled.add(name)
-            # 登入時已經問過的就用登入時的答案 —— 那是初始化之前量到的，
-            # 更接近「程式本來記得什麼」。
-            if name in asking and name not in self.cash_prompts:
-                self.cash_prompts[name] = asking[name]
 
     def _initialize(self, records):
         """
@@ -1261,9 +1692,6 @@ class SyncApp:
             # 使用者有可能登入完就沒有再按讀取。
             book["account_code"] = record.get("account_code", "")
             events.extend(planner.initialize(data, book, name, self.today, at))
-            # 有沒有真的收到東西都算「決定過了」：跳過是因為今天已經設過基準，
-            # 那也是一種決定，待會兒讀取時不該再被當成沒人管過的分頁重問一次。
-            self.cash_settled.add(name)
 
         if not events:
             return 0
@@ -1279,48 +1707,6 @@ class SyncApp:
         return next((item for item in self.proposals.get(name, [])
                      if item["kind"] == "cash"), None)
 
-    def _ask_cash_reset(self):
-        """
-        讀完網頁資料、寫入之前，問一次「今天開盤前的現金是多少」。
-
-        時機挑在這裡是因為現在手上有今日淨收付，可以把「B8 會變成多少」直接
-        算給人看。同一個問題如果跳在登入時，只能請人用文字描述自己填的是哪一種
-        數字（含不含今天的成交）—— 那正是最容易答錯、而且答錯不會有徵兆的地方。
-
-        要問誰不是這裡決定的 —— 按登入時算一次（_cash_reset_names），沒經過登入的
-        分頁在讀完之後、接管之前再補算一次（_catch_up_cash_prompts）。兩次都在
-        「基準被設成今天」之前，因為設完就看不出那個今天是誰設的了。
-        """
-        prompts, self.cash_prompts = self.cash_prompts, {}
-        if not prompts or self.ledger is None:
-            return
-
-        rows = []
-        for name, remembered in prompts.items():
-            item = self._cash_item(name)
-            # B8 是空的、或今天的淨收付本身就信不過，這一格連問都不該問。
-            if item is None or item["current"] is None or item["blocked"]:
-                continue
-            rows.append({
-                "name": name, "remembered": remembered,
-                "net": item["net"], "current": item["current"],
-                "odd": not values_match(remembered, item["current"]),
-            })
-
-        if not rows:
-            return
-
-        rows.sort(key=lambda row: (not row["odd"], row["name"]))
-        answers = ask_cash_reset(self.root, self.family, rows)
-        if not answers:
-            return
-
-        for name, opening in answers.items():
-            planner.apply_cash_reset(self._cash_item(name), opening)
-
-        # 只重畫，不能 replan() —— 那會把提案整個重算一次，剛套進去的重設就沒了。
-        self.fill_sync_tree()
-
     def _on_fetched(self, payload):
         self.browser_waiting = max(0, self.browser_waiting - 1)
         self._set_busy(False)
@@ -1330,42 +1716,79 @@ class SyncApp:
             messagebox.showerror("讀取失敗", _error_text(payload))
             return
 
-        self.records, self.problems = {}, []
+        # 這一輪讀到的一律是「補上去」，不是「整份換掉」：一次只更新一位的時候，
+        # 名單上其他人手上那份是上一輪的資料，清掉他們等於整份名單只剩一個人。
+        # 留著的代價是畫面上同時有好幾個時間點的資料，所以每一位都記下讀取時間，
+        # 右邊標頭寫得出「讀取於 10:32」（見 _fill_head）。
+        now = datetime.datetime.now()
+        errors = payload["sheet_errors"]
+        fresh = []
         for record in payload["records"]:
-            if record["problems"]:
-                self.problems.append(f"第 {record['order']} 組：" + "；".join(record["problems"]))
-            elif record.get("sheet_name"):
-                self.records[record["sheet_name"]] = record
-        for name, error in payload["sheet_errors"].items():
-            self.problems.append(error)
+            order, name = record["order"], record.get("sheet_name")
+            if name:
+                self.trader_of[order] = name
 
-        self.sheet_data = payload["sheets"]
+            if record["problems"]:
+                problem = f"第 {order} 組：" + "；".join(record["problems"])
+            elif not name:
+                problem = f"第 {order} 組：讀不出這是哪一位交易人"
+            elif name in errors:
+                problem = errors[name]
+            else:
+                problem = None
+
+            # 失敗原因跟著組別走：這一組這次成功就把上次的原因收掉，
+            # 沒讀到的那幾組維持原樣 —— 別人的問題不會因為我這次讀成功就消失。
+            if problem:
+                self.problem_of[order] = problem
+                continue
+            self.problem_of.pop(order, None)
+            self.records[name] = record
+            self.read_at[name] = now
+            fresh.append(name)
+
+        # 這一輪只准碰這幾位。寫入、落帳、接管全部照它 —— 別人手上那份是舊資料，
+        # 拿舊資料去寫 Excel 是「一次只更新一位」最貴的一種錯。
+        self.round_scope = set(fresh)
+        self.sheet_data.update(payload["sheets"])
+        self._refresh_problems()
+        self._refresh_account_choices()
+        self._update_cert_status(payload["records"])
         self.today = datetime.date.today()
         self.replan()
         # 舊值要在任何寫入之前收好。寫入成功後 sheet_data 會被換成新數字，
-        # 那時候再問「原本是多少」就沒有人記得了。
-        self.before = {(name, item["cell"]): item["current"]
-                       for name, items in self.proposals.items() for item in items}
+        # 那時候再問「原本是多少」就沒有人記得了。只換這一輪讀到的那幾位：
+        # 別人畫面上的「舊 → 新」是上一輪剛寫進去的結果，不該被這一輪抹掉。
+        self.before = {key: value for key, value in self.before.items() if key[0] not in fresh}
+        self.before.update({(name, item["cell"]): item["current"]
+                            for name in fresh for item in self.proposals.get(name, [])})
 
+        who = self.round_target
         note = self._problem_note()
+        # 一位都沒讀成功的時候絕對不能說「已讀取」——「更新（王小明）」按下去、
+        # 他那一組登入逾時，畫面上其他人的數字全都還在，最像結論的那一句要是
+        # 寫著「已讀取」，看的人不會知道自己看的是半小時前的東西。
+        if not self.round_scope:
+            self._say((f"{who} 這一次沒讀到，什麼都沒做。" if who
+                       else "這一輪沒有一位對照得起來，什麼都沒做。") + note)
+            return
+
+        head = f"已讀取（{who}）。" if who else "已讀取。"
         if payload.get("attached"):
-            self._say("已讀取。這個 Excel 正開著，程式會直接接上那個視窗寫入並存檔。" + note)
+            self._say(head + "這個 Excel 正開著，程式會直接接上那個視窗寫入並存檔。" + note)
         else:
-            self._say("已讀取。" + note)
+            self._say(head + note)
 
         # 自動模式：讀完直接接著寫，中間不再問一次。按「讀取網頁資料」之前使用者
         # 就已經在那個開關上表達過意願了，再跳一個確認只是重複問同一件事。
         if self.auto_write.get():
-            # 順序不能動：補清單 -> 接管 -> 問。接管會把基準設成今天，
-            # 補清單要在那之前，才看得出哪些分頁的基準是別人設的。
-            self._catch_up_cash_prompts()
             self._auto_adopt()
-            self._ask_cash_reset()
             writes, total = self._collect_writes()
             if total:
                 self._begin_write(writes, total)
-            elif self.proposals:
-                # 一格都不必寫，不代表沒事發生：剛填的現金基準就是在這條路上落帳的。
+            else:
+                # 一格都不必寫，不代表沒事發生：剛接管的格子、剛偵測到的人工改動、
+                # 今天的淨收付，都是在這條路上落帳的。
                 recorded = self._commit_round()
                 self.replan()
                 self.refresh_history()
@@ -1376,11 +1799,9 @@ class SyncApp:
                 # 看的是 proposals 不是 records：網頁讀到了、Excel 卻找不到那個
                 # 分頁時 records 有東西、畫面上卻一位都沒有，這種時候說「一致」
                 # 是把「沒得比」講成了「比過了」。
-                scope = "對照得起來的那幾位" if self.problems else "Excel 的數字"
+                scope = who if who else ("對照得起來的那幾位" if self.problems else "Excel 的數字")
                 kept = f"紀錄檔更新了 {recorded} 筆（見歷程）。" if recorded else ""
-                self._say(f"已讀取。{scope}跟網頁一致，沒有需要寫的格子。{kept}{note}")
-            else:
-                self._say("這一輪沒有一位對照得起來，什麼都沒做。" + note)
+                self._say(f"{head}{scope}跟網頁一致，沒有需要寫的格子。{kept}{note}")
 
     def _commit_round(self):
         """
@@ -1401,6 +1822,10 @@ class SyncApp:
         at = datetime.datetime.now().isoformat(timespec="seconds")
         events = []
         for name, items in self.proposals.items():
+            # 跟 _collect_writes 同一個範圍。落帳記的是「這一輪發生了什麼」，
+            # 沒去查的那幾位這一輪什麼也沒發生，尤其不能替他們記今天的淨收付。
+            if name not in self.round_scope:
+                continue
             book = self.ledger.sheet(name)
             events.extend(planner.commit(items, book, name, self.today, at))
         self.ledger.save()
@@ -1420,9 +1845,11 @@ class SyncApp:
         self._commit_round()
 
         # Excel 已經被改過了，手上的現值是舊的，重新讀一次才會準。
+        # 只回填這一輪真的寫過的那幾位（範圍跟 _collect_writes 同一個）——
+        # 別人那些「要寫」的格子這次沒寫進去，跟著改就會變成畫面說寫了、檔案沒有。
         for name, items in self.proposals.items():
             data = self.sheet_data.get(name)
-            if not data:
+            if not data or name not in self.round_scope:
                 continue
             for item in items:
                 if item["will_write"]:
@@ -1443,6 +1870,16 @@ class SyncApp:
         # 提醒擺在備份路徑前面：路徑很長，接在後面的字會被擠出狀態列外面。
         self._say(f"已自動寫入 {self.write_count} 格並存檔{where}。"
                   f"{self._problem_note()}備份在 {payload['backup']}")
+
+    def _refresh_problems(self):
+        """
+        把「第幾組 -> 失敗原因」攤平成畫面上那一串。
+
+        原因記在組別上而不是每讀一次就整串重來：一次只更新一位的時候，別人上一輪
+        沒完成的事並沒有因此解決 —— 那些 ⚠ 要留在畫面上，直到那一組自己再讀一次
+        成功為止。照組別排序，畫面上的順序才不會每讀一次就跳一次。
+        """
+        self.problems = [self.problem_of[order] for order in sorted(self.problem_of)]
 
     def _problem_note(self):
         """
@@ -1537,6 +1974,7 @@ class SyncApp:
         self.path = path
         self.ledger = ledger
         self.ledger_error = None
+        self.ledger_fresh = not ledger.existed
         # excel_open 記的還是上一份檔的答案（通常是 True），而輪詢要三秒後才會發現
         # 換人了。中間那幾秒畫面在說謊：路徑列寫著新檔的路徑、後面卻接「已開在
         # Excel 裡」，登入也還亮著。那時候按下去，程式會自己開一個看不見的 Excel
@@ -1549,12 +1987,10 @@ class SyncApp:
         self.records, self.sheet_data, self.proposals = {}, {}, {}
         self.warnings, self.problems = {}, []
         self.before = {}
-        # 「該問誰重設現金、程式本來記得多少」是上一份檔的紀錄檔算出來的，
-        # 紀錄檔換掉它就跟著作廢。留著的話，下一次讀取會拿 A 檔記得的數字去問
-        # B 檔的分頁 —— 而兩份持股表的分頁名通常一模一樣（都是交易人的名字），
-        # 對話框上「程式記得」那一欄看起來完全正常，錯的是它屬於別份檔案。
-        self.cash_prompts = {}
-        self.cash_settled = set()
+        # 這幾樣都是「上一份檔的這一輪」，跟著整批作廢。trader_of 例外：
+        # 那是帳號與交易人的對照，跟開哪一份 Excel 無關。
+        self.problem_of, self.read_at, self.round_scope = {}, {}, set()
+        self.round_target = None
         self.current_sheet = None
         self.auto_write.set(bool(ledger.setting("auto_write", True)))
 
@@ -1805,6 +2241,7 @@ class SyncApp:
         if not picked or picked[0] == self.current_sheet:
             return
         self.current_sheet = picked[0]
+        self._sync_scope_to_person()
         self._fill_detail()
 
     def _step_person(self, delta):
@@ -1821,6 +2258,7 @@ class SyncApp:
         self.current_sheet = names[index]
         self.people.selection_set(self.current_sheet)
         self.people.see(self.current_sheet)
+        self._sync_scope_to_person()
         self._fill_detail()
 
     def _grouped(self, name):
@@ -1899,6 +2337,7 @@ class SyncApp:
 
         self._fill_head(name)
         self._fill_cash(name, cash)
+        self._fill_opening(name, cash)
         self._fill_notes(name)
 
     def _fill_cash(self, name, item):
@@ -1959,8 +2398,106 @@ class SyncApp:
         if height != int(self.cash_line["height"]):
             self.cash_line.configure(height=height)
 
+    def _fill_opening(self, name, item):
+        """
+        現金那一條底下那一行：今日初始現金餘額，加一顆改它的按鈕。
+
+        數字直接讀紀錄檔的現金基準（見 ledger.opening_balance），不是提案算出來的
+        —— 它講的是「今天從多少錢開始」，跟這一輪要不要寫哪一格無關，就算這位
+        今天一格都不必動也要看得到。基準每天由當天第一次登入設成 B8，所以正常
+        情況它就是今天早上的那個數字。
+
+        剛按過「修改」還沒落帳的時候寫成「舊 → 新」，跟上面那一條同一個寫法：
+        按完卻還顯示舊數字，看起來就像沒按到。
+
+        沒有網頁資料就不給改：新的餘額是「開盤前 + 今日淨收付」，
+        沒有淨收付算不出來，也就沒有東西可以寫回 Excel。
+        """
+        cash = self.ledger.sheet(name)["cash"] if (self.ledger is not None and name) else None
+        opening = ledger_mod.opening_balance(cash) if cash is not None else None
+
+        # 一位都還沒選（還沒讀過網頁資料）時寫破折號而不是「還沒設定」——
+        # 那時候是「不知道要看誰」，不是「這個人沒有基準」。
+        text = "—" if not name else ("(還沒設定)" if opening is None else show(opening))
+        if item is not None and item["reset_to"] is not None:
+            text = f"{text} → {show(round(item['reset_to'] - item['net'], 2))}"
+
+        # 平常寫的是「這個數字打哪來」。它是整條算式裡唯一可能錯的一項，
+        # 而它怎麼來的決定了它什麼時候會錯 —— 講出來，比只擺一個數字有用。
+        # 按鈕變灰的時候換成理由：灰掉而不說為什麼，看起來就像壞了。
+        reason = ""
+        if self.ledger is None or not name:
+            reason = ""
+        elif item is None:
+            reason = "按「讀取網頁資料」之後才改得動"
+        elif item["blocked"]:
+            # 淨收付本身信不過的時候連基準都不該讓人按（見 planner._cash）：
+            # 拿一個已知是錯的淨收付去算，等於把今天的成交永久算進基準裡。
+            reason = "今日淨收付對不上，這個數字先不要動"
+        else:
+            # 後半句是「什麼時候該按那顆按鈕」的完整答案：那個時間點的 B8 已經
+            # 含了今天的成交（自己盤中改過），才需要按。平常不必管它。
+            reason = "＝ 今天第一次登入時 Excel 上的 B8（那時它已含今天的成交才要按「修改」）"
+
+        number = to_num(opening, None)
+        self.opening_value.configure(
+            text=text, foreground="#c00000" if number is not None and number < 0 else "")
+        self.opening_hint.configure(text=reason)
+        self.opening_ready = (self.ledger is not None and item is not None
+                              and not item["blocked"])
+        self._sync_buttons()
+
+    def edit_opening(self):
+        """
+        「修改」按下去：問一個新的開盤前現金，套進提案，然後照這一輪的規矩落實。
+
+        套用走的是 planner.apply_cash_reset —— 跟程式自己跳的那個對話框同一段
+        程式碼，兩個入口不會算出不一樣的結果。
+
+        落實的方式跟著「程式自動更新」走，不另外開一條路：勾著就直接寫進 Excel
+        並落帳（沒有格子要寫也一樣要落帳，理由見 _commit_round）；沒勾就只是把
+        建議值畫出來，Excel 由人自己改 —— 人工維護的時候程式一格都不碰，
+        這顆按鈕不該是例外。
+        """
+        name = self.current_sheet
+        item = self._cash_item(name)
+        if self.ledger is None or item is None or item["blocked"] or self.busy:
+            return
+
+        cash = self.ledger.sheet(name)["cash"]
+        opening = ask_opening_balance(self.root, self.family, name,
+                                      ledger_mod.opening_balance(cash), item)
+        if opening is None:
+            return
+
+        planner.apply_cash_reset(item, opening)
+        # 這顆按鈕動到的只有眼前這一位，寫入與落帳的範圍就跟著縮到他身上
+        # —— 名單上別人那些「要寫」的格子是上一輪算的，不該被這一下順手寫出去。
+        self.round_scope = {name}
+        self.fill_sync_tree()
+
+        if not self.auto_write.get():
+            self._say(f"{name} 的今日初始現金餘額改成 {show(opening)}，"
+                      f"{item['cell']} 要填 {show(item['proposed'])} —— "
+                      f"「程式自動更新」沒有勾，程式不會動 Excel，請自己填進去。")
+            return
+
+        writes, total = self._collect_writes()
+        if total:
+            self._begin_write(writes, total)
+            return
+
+        # 算出來剛好等於 Excel 上的數字，一格都不必寫 —— 但基準確實被改掉了，
+        # 這一筆不落帳就等於沒按過（見 _commit_round）。
+        recorded = self._commit_round()
+        self.replan()
+        self.refresh_history()
+        self._say(f"{name} 的今日初始現金餘額改成 {show(opening)}，"
+                  f"{item['cell']} 上的數字剛好一樣，沒有格子要寫。"
+                  + (f"紀錄檔更新了 {recorded} 筆（見歷程）。" if recorded else ""))
+
     def _fill_head(self, name):
-        """表格上方那一行：是誰、第幾位、現金多少、這次要寫幾格。"""
+        """表格上方那一行：是誰、第幾位、現金多少、這次要寫幾格、資料是幾點讀的。"""
         if not name:
             self.detail_head.configure(text="還沒有資料 —— 按上面的「讀取網頁資料」")
             return
@@ -1973,6 +2510,11 @@ class SyncApp:
         if cash:
             parts.append(f"現金 {cash}")
         parts.append(f"要寫 {writes} 格" if writes else "跟網頁一致")
+        # 一次只更新一位之後，畫面上每個人的資料新舊不一 —— 沒有這個時間，
+        # 半小時前讀的數字跟剛剛讀的長得一模一樣。
+        read = self.read_at.get(name)
+        if read:
+            parts.append(f"讀取於 {read:%H:%M}")
         self.detail_head.configure(text="　".join(parts))
 
     def _fill_notes(self, name):
@@ -1986,6 +2528,17 @@ class SyncApp:
         text = [f"• {warning}" for warning in self.warnings.get(name, [])]
         for problem in self.problems:
             text.append(f"⚠ {problem}")
+
+        if self.ledger_fresh and self.proposals:
+            # 只有這一天要講。紀錄檔存在的日子裡，現金起點是「今天第一次登入時的
+            # B8」，而那個時間點今天還沒開盤 —— 沒有猜的成分。紀錄檔是新的（第一次
+            # 用這支程式、換了電腦、Excel 改過檔名或搬過資料夾）就不一樣了：
+            # 起點只能取「現在的 B8」，它含不含今天的成交，程式看不出來，
+            # 唯一看得出來的人是使用者。
+            text.append("這份 Excel 還沒有紀錄檔（第一次用、換電腦，或檔名／資料夾"
+                        "改過），今天的「今日初始現金餘額」是拿 B8 現在的數字當起點的。"
+                        "今天如果已經有成交、而 B8 已經含了它，請按現金底下的「修改」"
+                        "改成今天開盤前的金額，否則今天的淨收付會被算兩次。")
 
         others = sum(1 for other, warns in self.warnings.items() if warns and other != name)
         if others:
@@ -2002,10 +2555,18 @@ class SyncApp:
         elif not self.auto_write.get():
             text.append("「程式自動更新」沒有勾，程式不會動 Excel，箭頭右邊那個數字"
                         "只是建議值，要自己填進 Excel；要讓程式代勞就把上面那個"
-                        "開關勾起來，再按一次「讀取網頁資料」。")
+                        "開關勾起來，再按一次上面那顆讀取／更新。")
 
         if not text:
             text.append("沒有需要注意的事。")
+
+        # 每天都成立的兩條規矩，擺在最後一行。這個框只有五行高又沒有捲軸，
+        # 常駐的字排在前面就會把當天真正的警告推出視線 —— 排最後的話，
+        # 沒事的日子看得到（框是空的），有事的日子被擠掉的正好是它。
+        if self.proposals:
+            text.append("今天操作中不要改 Excel 的檔名或搬資料夾，也不要自己去改 B8 —— "
+                        "兩者都會讓今天的起點算錯，今天的淨收付被算兩次；真的改了，"
+                        "就用現金底下那顆「修改」把今天開盤前的金額補給程式。")
 
         self.warn_box.configure(state="normal")
         self.warn_box.delete("1.0", "end")
@@ -2025,6 +2586,11 @@ class SyncApp:
         ready = self.excel_open and not self.busy
         self.login_button.configure(state="normal" if ready else "disabled")
         self.fetch_button.configure(state="normal" if ready else "disabled")
+        # 「修改」不看 Excel 開著沒 —— 它改的是紀錄檔裡的基準，要寫 Excel 的時候
+        # 寫入那邊自己會把檔案開起來。能不能按只看「這一位有沒有網頁資料」，
+        # 那是 _fill_opening 判的。
+        self.opening_button.configure(
+            state="normal" if self.opening_ready and not self.busy else "disabled")
 
     def _auto_adopt(self):
         """
@@ -2045,6 +2611,10 @@ class SyncApp:
         events = []
 
         for name, items in self.proposals.items():
+            # 接管是「拿 Excel 現值當新起點」，只能對這一輪剛讀過的那幾位做：
+            # 別人手上的現值是上一輪讀的，中間有可能已經被人改過。
+            if name not in self.round_scope:
+                continue
             book = self.ledger.sheet(name)
             for item in items:
                 if item["kind"] == "cash" and book["cash"].get("baseline_date") == today:
@@ -2188,14 +2758,21 @@ class SyncApp:
         self._say(f"歷程已清空。舊的收在 {saved}" if saved else "歷程已清空。")
 
     def _on_tab_changed(self, _event):
-        if self.tabs.index(self.tabs.select()) != 1:
-            return
-        self.refresh_history()
-        # 切過來通常就是想看「剛才那位」的歷程，不必再選一次人。
-        if self.current_sheet and self.current_sheet in tuple(self.history_who["values"]):
-            self.history_who.set(self.current_sheet)
-            self._refresh_history_choices()
-            self._fill_history()
+        index = self.tabs.index(self.tabs.select())
+        if index == 1:
+            self.refresh_history()
+            # 切過來通常就是想看「剛才那位」的歷程，不必再選一次人。
+            if self.current_sheet and self.current_sheet in tuple(self.history_who["values"]):
+                self.history_who.set(self.current_sheet)
+                self._refresh_history_choices()
+                self._fill_history()
+        elif index == 2:
+            self._refresh_profile_status()
+            # 掃描要讀遍 Chrome／Edge 每個 profile 的 Local Storage，不便宜，
+            # 所以只在第一次切過去時自動做一次，之後靠手動按「掃描」。
+            if not self.cert_tab_scanned:
+                self.cert_tab_scanned = True
+                self.scan_cert_sources()
 
 
 def within(stamp, when, today):

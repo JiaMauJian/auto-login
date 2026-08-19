@@ -172,9 +172,10 @@ def apply_cash_reset(item, opening):
     把人填的「今天開盤前的現金」套進現金那一列。就地改，回傳同一個 item。
 
     只能在 plan() 之後叫得動 —— 它要用今日淨收付，而那是網頁資料，
-    登入的當下還沒去查（login_only 只登入、不抓資料）。這也正是它值得晚一步
-    才問的原因：算得出結果，就不必請人回答「你填的數字含不含今天的成交」，
-    那個問題每次都要人回想今天做過什麼，答錯的代價剛好是一整天的淨收付。
+    登入的當下還沒去查（login_only 只登入、不抓資料）。這也正是介面上那顆
+    「修改」要等讀完網頁資料才亮的原因：算得出結果，就不必請人回答「你填的數字
+    含不含今天的成交」，那個問題每次都要人回想今天做過什麼，答錯的代價剛好是
+    一整天的淨收付。
 
     這是唯一能蓋過「手動」的東西。人已經明講了正確的數字，
     程式沒有理由再守著一個它自己也知道過時的值。
@@ -239,20 +240,16 @@ def _cash(sheet_data, record, book, today, warnings):
     proposal["will_write"] = not same_number(balance, proposal["proposed"])
     proposal["record_net"] = True
     proposal["note"] = f"今日淨收付 {show(net)}（{rows} 筆成交）"
-
-    for day in ledger.missing_dates(cash, today):
-        warnings.append(
-            f"[現金] {day:%Y/%m/%d} 沒有淨收付紀錄。那天如果有成交，餘額會少算，"
-            f"請對照對帳單直接把正確餘額填進 Excel 的 B8，下次登入程式會以它為準"
-            f"（國定假日可忽略）"
-        )
-
     return proposal
 
 
 # 歷程的「說明」欄。項目、動作、新舊值三欄已經講完「哪一格、做了什麼、變成多少」，
 # 說明再覆述一次等於空白，所以這裡只補那三欄講不出來的一件事：數字是從 Excel 抄來的。
 ADOPTED_NOTE = "以 Excel 上的數字為準"
+
+# 現金的初始化每天都會發生一次，值常常跟昨天一樣（昨天收盤多少，今天就從多少開始），
+# 所以歷程上會出現一排「893 → 893」。說明寫清楚它是什麼，那一列才讀得懂。
+OPENING_NOTE = "今日初始現金餘額（今天第一次登入時的 B8）"
 
 
 def adopt(proposals, book, sheet_name, today, today_included, at):
@@ -326,11 +323,15 @@ def initialize(sheet_data, book, sheet_name, today, at):
     基準直接取 B8，今天的流水先記 0，之後 commit 會用真正的淨收付覆蓋掉那個 0。
     這也是為什麼不必再問「B8 含不含今天的淨收付」：登入的當下它一定還沒含。
 
-    現金一天只初始化一次（基準日已經是今天就跳過）。今天的淨收付要是已經寫進
+    現金每天重新起算：只要基準日還不是今天，就把 B8 收成今天的起點，不管它昨天
+    是自動還是手動、昨天有沒有跑過。這就是「今日初始現金餘額」的定義，也是這支
+    程式唯一的現金起點 —— 舊帳一概不算（見 ledger 的模組說明）。
+
+    反過來說，一天也只設一次（基準日已經是今天就跳過）。今天的淨收付要是已經寫進
     B8 了，再重設一次基準會讓它被加第二次，而且畫面上不會有任何徵兆。
 
-    跳過之後那一格就沒有出口了 —— 當天想改餘額只能由人明講，
-    走 apply_cash_reset（介面上是讀完網頁資料、寫入之前跳的「重設現金餘額」對話框）。
+    跳過之後那一格不是就沒有出口了 —— 當天想改餘額由人明講，走 apply_cash_reset
+    （介面上現金那一條底下的「今日初始現金餘額　[修改]」）。
     """
     events = []
 
@@ -347,15 +348,13 @@ def initialize(sheet_data, book, sheet_name, today, at):
 
     balance = sheet_data["balance"]
     cash = book["cash"]
-    if (balance is not None
-            and ledger.status_of(cash, balance) != ledger.AUTO
-            and cash.get("baseline_date") != today.isoformat()):
+    if balance is not None and cash.get("baseline_date") != today.isoformat():
         row, col = CELL_BALANCE
         item = _row(row, col, "cash", "cash", "balance", "現金餘額",
                     balance, None, None, ledger.UNTRACKED, "")
         was = cash.get("last_written")
         ledger.calibrate(cash, balance, today, 0.0, False, at)
-        events.append(_event(at, sheet_name, item, "adopt", was, balance, ADOPTED_NOTE))
+        events.append(_event(at, sheet_name, item, "adopt", was, balance, OPENING_NOTE))
 
     return events
 

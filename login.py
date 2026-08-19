@@ -30,7 +30,7 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-import simulate
+from dev_tools import simulate
 
 
 def app_dir():
@@ -49,6 +49,10 @@ LOGIN_URL = "https://www.tbbstock.com.tw/tbb/index/home.jsp"
 # 攔截到驗證碼後多等一下（毫秒），讓頁面可能的第二次 VerifyNumberServlet 請求先回來，
 # 以最後一次的值為準；送出登入前也再等同樣的時間，避免驗證碼還沒套用就按下登入。
 VERIFY_SETTLE_MS = 200
+
+# 登入表單最多等多久（毫秒）才判定「這個瀏覽器裡已經有人登入著」。等不到就清 cookie
+# 重來一次（見 do_login），所以這一段不能設太長 —— 換交易人時每次都要先耗掉它。
+SWITCH_USER_TIMEOUT_MS = 6000
 
 # 送出登入後最多等多久（毫秒）讓頁面換完。逾時不算失敗，只代表網站沒有換頁
 # （例如驗證碼錯誤被擋在原頁），程式照樣往下印出目前網址讓使用者自己判斷。
@@ -249,7 +253,7 @@ def load_accounts():
 
     後面會接上模擬用的假帳號（.env 的 SIMULATE_ACCOUNTS，沒設就一個都沒有，
     正式部署的機器上等於這件事不存在）。假帳號帶 fake 旗標，
-    不會去登入任何網站，詳見 simulate.py。
+    不會去登入任何網站，詳見 dev_tools/simulate.py。
     """
     accounts = []
     i = 1
@@ -287,8 +291,22 @@ def do_login(context, tbb_id, tbb_password, page=None):
 
     # 頁面預設是「帳號登入」模式，欄位 placeholder 為「帳號」；
     # 必須先點「身份證登入」，網站的 JS 才會把同一個欄位切換成「身分證」模式。
+    #
+    # 表單沒出現的話多半不是網站改版，而是這個瀏覽器裡已經有人登入著：網站看到
+    # cookie 就把人導去別的頁，登入表單根本不會畫出來。換交易人就一定會遇到
+    # （整個瀏覽器只有一組 session，見 fetch.ensure_logged_in）。所以先清掉
+    # cookie 再回登入頁一次 —— 那是網站認人的唯一依據，清掉就等於登出。
+    # 憑證不在 cookie 裡（它在 Windows 的憑證存放區與這個 Chrome profile 裡），
+    # 不會被這一步弄掉。
     mode_link = page.locator("a:visible", has_text="身份證登入").first
-    mode_link.wait_for(state="visible", timeout=15000)
+    try:
+        mode_link.wait_for(state="visible", timeout=SWITCH_USER_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        print(f"[{tbb_id}] 登入頁沒有出現登入表單，清掉 cookie（等於登出）再試一次。")
+        context.clear_cookies()
+        page.goto(LOGIN_URL)
+        mode_link = page.locator("a:visible", has_text="身份證登入").first
+        mode_link.wait_for(state="visible", timeout=15000)
     mode_link.click()
 
     # 頁面上有兩個 id="id" 的重複欄位，用父層範圍鎖定可見的那個。
@@ -393,7 +411,7 @@ def route():
         tbb-login.exe              自動登入（不帶參數就是它，跟以前一樣）
         tbb-login.exe --sync       開持股同步的介面視窗
         tbb-login.exe --update     持股同步的命令列版，後面的參數原樣傳下去
-        tbb-login.exe --sim-excel  在 Excel 補上模擬用的分頁（測試用，見 sim_excel.py）
+        tbb-login.exe --sim-excel  在 Excel 補上模擬用的分頁（測試用，見 dev_tools/sim_excel.py）
 
     不做成好幾個 exe，是因為 Playwright 那包東西會被各塞一份，dist 直接肥好幾倍，
     而部署方式是整包資料夾複製到目標電腦。
@@ -411,7 +429,7 @@ def route():
         sys.argv = [sys.argv[0]] + args[1:]
         update_excel.main()
     elif args and args[0] == "--sim-excel":
-        import sim_excel
+        from dev_tools import sim_excel
         sys.argv = [sys.argv[0]] + args[1:]
         sim_excel.main()
     else:

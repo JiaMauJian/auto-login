@@ -1,9 +1,12 @@
 ﻿# 把 tbbstock 的網頁版數位憑證從你平常在用的瀏覽器 profile 複製到自動登入用的 profile。
 #
-# 用法：
-#   .\migrate-cert.ps1                     # 只掃描，列出哪些 profile 裡有憑證（不會動到任何檔案）
-#   .\migrate-cert.ps1 -From "<profile路徑>"  # 實際複製（路徑是含 Local Storage 的那層，例如 ...\User Data\Default）
-#   .\migrate-cert.ps1 -From "..." -Force  # 瀏覽器有背景程序殘留、確認過沒在用時強制執行
+# 用法（在專案根目錄執行）：
+#   .\dev_tools\migrate-cert.ps1                     # 只掃描，列出哪些 profile 裡有憑證（不會動到任何檔案）
+#   .\dev_tools\migrate-cert.ps1 -From "<profile路徑>"  # 實際複製（路徑是含 Local Storage 的那層，例如 ...\User Data\Default）
+#   .\dev_tools\migrate-cert.ps1 -From "..." -Force  # 瀏覽器有背景程序殘留、確認過沒在用時強制執行
+#
+# 現在 GUI（tbb-login.exe --sync 的「憑證」分頁）已經把這支腳本的功能做成按鈕，
+# 這支留著當 GUI 壞了時的備用手動工具。
 #
 # 憑證在另一台電腦時：
 #   1. 在有憑證那台跑 .\migrate-cert.ps1（純掃描），看出是哪一個 profile；
@@ -31,12 +34,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# 這支腳本住在 dev_tools\ 底下，但 .env、chrome-profile 都在專案根目錄。
+$ProjectRoot = Split-Path $PSScriptRoot -Parent
+
 # leveldb 檔案裡出現這些字串，代表這個 profile 存過 tbbstock 的憑證資料。
 $markers = @("TWCACertIdxRef", "tbbstock")
 
 # --- 1. 從 .env 讀出 USER_DATA_DIR，算出目標 profile ---------------------------
 
-$envFile = Join-Path $PSScriptRoot ".env"
+$envFile = Join-Path $ProjectRoot ".env"
 $rawPath = "chrome-profile"
 
 if (Test-Path $envFile) {
@@ -62,7 +68,7 @@ if (-not $rawPath) {
 
 $targetUserData = [Environment]::ExpandEnvironmentVariables($rawPath)
 if (-not [IO.Path]::IsPathRooted($targetUserData)) {
-    $targetUserData = Join-Path $PSScriptRoot $targetUserData
+    $targetUserData = Join-Path $ProjectRoot $targetUserData
 }
 $targetUserData = [IO.Path]::GetFullPath($targetUserData)
 

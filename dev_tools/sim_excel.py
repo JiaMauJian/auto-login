@@ -1,10 +1,10 @@
 """
 在持股管理 Excel 補上模擬用的分頁（交易人A、交易人B…），測完再一鍵移除。
 
-    python sim_excel.py                 只看會做什麼（試算，安全）
-    python sim_excel.py --write          真的加分頁（會先自動備份）
-    python sim_excel.py --count 5        只加 5 個
-    python sim_excel.py --remove --write 把模擬分頁與它們在紀錄檔裡的資料清掉
+    python dev_tools/sim_excel.py                 只看會做什麼（試算，安全）
+    python dev_tools/sim_excel.py --write          真的加分頁（會先自動備份）
+    python dev_tools/sim_excel.py --count 5        只加 5 個
+    python dev_tools/sim_excel.py --remove --write 把模擬分頁與它們在紀錄檔裡的資料清掉
 
 分頁是整張複製現有那個真分頁，所以版面、格式、公式（那張表的公式全部只參照
 自己這一頁，複製不會跑掉）都跟真的一模一樣，只改這幾格：
@@ -26,10 +26,18 @@ import json
 import shutil
 import sys
 import traceback
+from pathlib import Path
+
+# 這支腳本可能被 login.py 用 `from dev_tools import sim_excel` 匯入，
+# 也可能直接用 `python dev_tools/sim_excel.py` 執行；兩種情況 sys.path 起點不一樣，
+# 這裡把專案根目錄補回去，root 底下那些模組（excel_io / login / util）才找得到。
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 import excel_io
 import ledger as ledger_mod
-import simulate
+from dev_tools import simulate
 from excel_io import CELL_BALANCE, COL_COST, COL_NAME, COL_QTY, HOLDING_ROWS, excel_path
 from login import pause
 from util import pad

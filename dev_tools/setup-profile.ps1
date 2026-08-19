@@ -1,9 +1,12 @@
 ﻿# 用「一般模式」的 Chrome 開啟自動登入專用的使用者資料夾（tbbstock 的數位憑證就存在裡面）。
 #
-# 用法：
-#   .\setup-profile.ps1          # 開起來手動操作（第一次執行順便把資料夾建出來）
-#   .\setup-profile.ps1 -Reset   # 先把整個資料夾砍掉重建，再開起來
-#                                # （資料夾裡已經有 tbbstock 憑證時會擋下來，要再加 -Force）
+# 用法（在專案根目錄執行）：
+#   .\dev_tools\setup-profile.ps1          # 開起來手動操作（第一次執行順便把資料夾建出來）
+#   .\dev_tools\setup-profile.ps1 -Reset   # 先把整個資料夾砍掉重建，再開起來
+#                                          # （資料夾裡已經有 tbbstock 憑證時會擋下來，要再加 -Force）
+#
+# 現在 GUI（tbb-login.exe --sync 的「憑證」分頁）已經把這支腳本的功能做成按鈕，
+# 這支留著當 GUI 壞了時的備用手動工具。
 #
 # 兩個用途：
 #   1. 首次設定時把資料夾初始化出來，好讓 migrate-cert.ps1 有地方把憑證複製進去。
@@ -25,9 +28,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# 這支腳本住在 dev_tools\ 底下，但 .env、chrome-profile 都在專案根目錄。
+$ProjectRoot = Split-Path $PSScriptRoot -Parent
+
 # --- 1. 從旁邊的 .env 讀出 USER_DATA_DIR，沒有就用預設值 -------------------------
 
-$envFile = Join-Path $PSScriptRoot ".env"
+$envFile = Join-Path $ProjectRoot ".env"
 $rawPath = "chrome-profile"
 
 if (Test-Path $envFile) {
@@ -54,7 +60,7 @@ if (-not $rawPath) {
 # 支援 %LOCALAPPDATA% 這類寫法；相對路徑以 .env 所在資料夾為基準（跟 login.py 的邏輯一致）。
 $profilePath = [Environment]::ExpandEnvironmentVariables($rawPath)
 if (-not [IO.Path]::IsPathRooted($profilePath)) {
-    $profilePath = Join-Path $PSScriptRoot $profilePath
+    $profilePath = Join-Path $ProjectRoot $profilePath
 }
 $profilePath = [IO.Path]::GetFullPath($profilePath)
 
