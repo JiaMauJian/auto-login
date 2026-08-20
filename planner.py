@@ -4,9 +4,11 @@
 這裡不碰 Excel、不碰網路，只有純計算，所以命令列跟之後的介面可以共用
 同一份判斷邏輯，也可以拿假資料直接測。
 
-提案是一格一列（E5 跟 F5 分開），因為自動/手動是一格一格判定的 ——
-同一檔股票的股數還在自動、成本被手改成手動，是完全可能的狀態。
-畫面上要把兩格併成一列顯示是顯示層的事。
+提案是一格一列（E5 跟 F5 分開），股數與成本分開算。畫面上要把兩格併成
+一列顯示是顯示層的事。
+
+Excel 上的現值一律被網頁值覆蓋，程式不記、不比對「這一格上次寫了什麼」——
+修改 Excel 的風險交給操作的人自己管控。
 """
 
 import ledger
@@ -14,15 +16,20 @@ from excel_io import COL_COST, COL_QTY, CELL_BALANCE
 from recon import TRADE_NAMES
 from util import cell_name, same_number, show, to_num
 
-# 網頁沒有這一檔，不是「誰在管」的問題，但畫面上要跟自動/手動並排顯示，
-# 所以放在同一組狀態值裡。
-WEB_MISSING = "web_missing"
+# 現金餘額的兩種算法（完整說明見 docs/現金餘額兩種算法.md）。
+#
+#   opening  今日初始現金餘額 + 今日淨收付
+#   bank     銀行餘額 + 還沒交割的成交淨收付
+#
+# 兩種並存不是備援，是各有各正確的日子：全額交割股當天，錢在成交當下就從銀行餘額
+# 扣走，但同一筆還掛在當日淨收付上（下午才更新改正），那天 bank 會扣兩次、
+# opening 才是對的。反過來，匯撥與股利這種非交易現金流不會進淨收付，
+# opening 看不到、bank 自動吸收。
+METHOD_OPENING, METHOD_BANK = "opening", "bank"
 
-STATUS_NAMES = {
-    ledger.AUTO: "自動",
-    ledger.MANUAL: "手動",
-    ledger.UNTRACKED: "未接管",
-    WEB_MISSING: "網頁沒有",
+METHOD_NAMES = {
+    METHOD_OPENING: "初始餘額累加",
+    METHOD_BANK: "銀行餘額推算",
 }
 
 
@@ -79,6 +86,60 @@ def settlement_total(arrays):
     return net, rows
 
 
+def bank_balance(rows):
+    """
+    銀行餘額（元）。讀不到、或讀不懂就回 None —— 絕對不要回 0。
+
+    Amount 的單位是分（真的回應長這樣：0000000089300 = 畫面上的 893.00）。
+    這是整條路上最容易錯又最不會被發現的一步：弄錯不報錯，只生出一個 100 倍大的數字。
+
+    「讀不懂就回 None」是刻意的：to_num 預設把看不懂的東西當成 0，而 0 在這裡看起來
+    像一個答案（這個人沒錢），會被拿去覆蓋 B8。真的遇過一次 —— 模擬頁面把負數補零成
+    `000-793672200`，整個人的餘額就變成 0 了。
+    """
+    if not rows:
+        return None
+    amount = to_num(rows[0].get("Amount"), None)
+    if amount is None:
+        return None
+    return round(amount / 100, 2)
+
+
+def unsettled_total(arrays, today):
+    """
+    還沒交割的成交淨收付合計。回傳 (合計, 筆數, 讀不到交割日的筆數, 有沒有今天的成交)。
+
+    銀行餘額只含已經交割的錢，所以要補的正好是「cdate 比今天晚」的那幾筆。
+    用每一筆自己帶的交割日，而不是「今天+昨天」：那個寫法要嘛得知道「前一日」的
+    定義（沒人證實過），要嘛在非交易日跑會漏一天。
+
+    讀不到 cdate 的列要單獨數出來給呼叫方擋 —— 那種列無法判斷該不該補，
+    默默跳過就是少算錢，而且畫面上不會有任何徵兆。
+
+    這裡不濾 reason 非空的列（匯撥、配股）：網頁畫面會濾掉它們，但這支算的是
+    「還沒離開銀行帳戶的錢」，匯撥要是還沒交割就該算進來。真的遇到再回頭看
+    （還沒有人看過那種列長什麼樣，見 todo 4.1）。
+    """
+    stamp = today.strftime("%Y%m%d")
+    total, rows, unknown, has_today = 0.0, 0, 0, False
+
+    for item in arrays:
+        for mat in item.get("matdat") or []:
+            if str(mat.get("qty") or "").strip() == "0":
+                continue
+            if str(mat.get("tdate") or "").strip() == stamp:
+                has_today = True
+            cdate = str(mat.get("cdate") or "").strip()
+            if not cdate:
+                unknown += 1
+                continue
+            if cdate > stamp:
+                total += to_num(mat.get("payn"))
+                rows += 1
+
+    return round(total, 2), rows, unknown, has_today
+
+
 def traded_today(pnl_arrays, today):
     """未實現損益的持股明細裡有沒有「今天」成交的紀錄。用來交叉檢查淨收付是不是漏了。"""
     stamp = today.strftime("%Y%m%d")
@@ -89,9 +150,13 @@ def traded_today(pnl_arrays, today):
     return False
 
 
-def plan(sheet_data, record, book, today):
+def plan(sheet_data, record, book, today, method=METHOD_OPENING):
     """
     算出這個分頁的提案。回傳 (提案清單, 提醒清單)。
+
+    method 決定現金那一格用哪一種算法（見 METHOD_OPENING / METHOD_BANK）。
+    只算選中的那一種：另一種算出來多少，對「今天該用哪一種」這個決定幫不上忙
+    （理由見 _cash），而且它要的資料 fetch 那邊根本不會去抓。
 
     純讀取，不會動到 book —— 要落實到紀錄檔是 commit() 的事，
     這樣試算模式才能保證真的什麼都沒改到。
@@ -119,7 +184,8 @@ def plan(sheet_data, record, book, today):
                                         ("cost", COL_COST, line["cost"])):
                 proposals.append(_row(line["row"], col, "holding", code, which,
                                       f"{'股數' if which == 'qty' else '成本'}（{line['label']}）",
-                                      current, None, None, WEB_MISSING, "網頁庫存已無此檔"))
+                                      current, None, None,
+                                      note="網頁庫存已無此檔", missing=True))
             continue
 
         label = f"{code} {found['name']}"
@@ -127,17 +193,10 @@ def plan(sheet_data, record, book, today):
             ("qty", COL_QTY, line["qty"], int(found["qty"])),
             ("cost", COL_COST, line["cost"], found["cost"]),
         ):
-            state = (book["holdings"].get(code) or {}).get(which)
-            status = ledger.status_of(state, current)
-            note = ""
-            if status == ledger.MANUAL:
-                note = f"手動改過（程式記得 {state.get('last_written')}），不會覆蓋"
-            elif status == ledger.UNTRACKED:
-                note = "尚未交給程式管理"
             proposals.append(_row(
                 line["row"], col, "holding", code, which,
                 f"{'股數' if which == 'qty' else '成本'}（{label}）",
-                current, web, web, status, note,
+                current, web, web,
             ))
 
     for code, found in holdings.items():
@@ -147,14 +206,14 @@ def plan(sheet_data, record, book, today):
                 f"不會自動新增，請自行決定放在哪一列"
             )
 
-    proposals.append(_cash(sheet_data, record, book, today, warnings))
+    proposals.append(_cash(sheet_data, record, book, today, warnings, method))
     return proposals, warnings
 
 
-def _row(row, col, kind, key, which, label, current, web, proposed, status, note):
-    """組一列提案。will_write 只有「自動」而且值真的不一樣時才會是 True。"""
+def _row(row, col, kind, key, which, label, current, web, proposed, note="", missing=False):
+    """組一列提案。will_write 只有算出新值而且跟現值不同時才會是 True。"""
     will_write = (
-        status == ledger.AUTO
+        not missing
         and proposed is not None
         and not same_number(current, proposed)
     )
@@ -162,7 +221,7 @@ def _row(row, col, kind, key, which, label, current, web, proposed, status, note
         "row": row, "col": col, "cell": cell_name(row, col),
         "kind": kind, "key": key, "which": which, "label": label,
         "current": current, "web": web, "proposed": proposed,
-        "status": status, "note": note, "will_write": will_write,
+        "note": note, "missing": missing, "will_write": will_write,
         "reset_to": None,
     }
 
@@ -176,13 +235,9 @@ def apply_cash_reset(item, opening):
     「修改」要等讀完網頁資料才亮的原因：算得出結果，就不必請人回答「你填的數字
     含不含今天的成交」，那個問題每次都要人回想今天做過什麼，答錯的代價剛好是
     一整天的淨收付。
-
-    這是唯一能蓋過「手動」的東西。人已經明講了正確的數字，
-    程式沒有理由再守著一個它自己也知道過時的值。
     """
     target = round(opening + item["net"], 2)
     item["proposed"] = target
-    item["status"] = ledger.AUTO
     item["reset_to"] = target
     item["record_net"] = False          # calibrate 會把流水一起寫好
     item["will_write"] = not same_number(item["current"], target)
@@ -191,198 +246,153 @@ def apply_cash_reset(item, opening):
     return item
 
 
-def _cash(sheet_data, record, book, today, warnings):
+def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
     """
     現金那一列。跟持股不同的地方全部集中在這裡。
 
-    現金是累加出來的：網頁只說「今天淨收付 -107」，不會說「你現在有多少錢」。
-    所以它的提議值不是網頁值，而是「基準 + 流水」算出來的應有餘額。
+        opening  今日初始現金餘額 + 今日淨收付   累加，要有基準
+        bank     銀行餘額 + 還沒交割的成交       快照，網頁直接給絕對值
+
+    只算選中的那一種。曾經兩種都算、把另一種也顯示在畫面上當對帳訊號，後來拿掉了
+    —— 差額講不出是哪一種原因造成的（全額交割？匯撥？有人手改過 B8？），
+    對「今天要用哪一種」這個決定幫不上忙，而那個決定的依據（今天有沒有買全額交割股）
+    本來就只有人知道。省下來的還有兩支查詢：用 opening 的日子完全不必碰銀行餘額。
     """
     row, col = CELL_BALANCE
     balance = sheet_data["balance"]
     cash = book["cash"]
+
+    # 當日淨收付兩種算法都要抓：opening 拿它算餘額，bank 雖然用不到它算餘額，
+    # 但「重設基準」與「今天有沒有成交」的交叉檢查都靠它，而且它只有一支查詢。
     net, rows = settlement_total(record.get("當日淨收付", []))
 
-    proposal = _row(row, col, "cash", "cash", "balance", "現金餘額",
-                    balance, net, None, ledger.status_of(cash, balance), "")
+    proposal = _row(row, col, "cash", "cash", "balance", "現金餘額", balance, net, None)
     proposal["net"] = net
     proposal["net_rows"] = rows
+    proposal["method"] = method
     proposal["record_net"] = False
     # 淨收付本身信不過的時候立起來。這一格連「重設基準」都不該讓人按 ——
     # 拿一個已知是錯的 net 去 calibrate，等於把今天的成交永久算進基準裡。
     proposal["blocked"] = False
 
+    bank = pending = None
+    pending_rows = unknown = 0
+    has_today = False
+    if method == METHOD_BANK:
+        bank = bank_balance(record.get("銀行餘額"))
+        pending, pending_rows, unknown, has_today = unsettled_total(
+            record.get("近期淨收付", []), today)
+    proposal["bank"] = bank
+    proposal["pending"] = pending
+    proposal["pending_rows"] = pending_rows
+
     if balance is None:
         proposal["note"] = "B8 是空的或不是數字，請先填一個現金餘額"
         return proposal
+
+    reason = _cash_blocked(record, today, method, net, bank, unknown, has_today)
+    if reason:
+        proposal["note"] = reason
+        proposal["blocked"] = True
+        warnings.append("[現金] " + reason)
+        return proposal
+
+    if method == METHOD_OPENING and cash.get("baseline_value") is None:
+        proposal["note"] = "還沒有今日初始現金餘額，登入一次就會自動設定"
+        return proposal
+
+    if method == METHOD_BANK:
+        proposal["proposed"] = round(bank + pending, 2)
+        proposal["note"] = (f"銀行餘額 {show(bank)} + 還沒交割的 {show(pending)}"
+                            f"（{pending_rows} 筆）")
+    else:
+        proposal["proposed"] = ledger.cash_after(cash, today, net)
+        proposal["note"] = f"今日淨收付 {show(net)}（{rows} 筆成交）"
+
+    proposal["will_write"] = (
+        proposal["proposed"] is not None
+        and not same_number(balance, proposal["proposed"])
+    )
+    proposal["record_net"] = True
+    return proposal
+
+
+def _cash_blocked(record, today, method, net, bank, unknown, has_today):
+    """
+    現金這一格該不該整個擋住不寫。要擋就回一句給人看的話，不擋回 None。
+
+    兩種算法各有各的破口，但形狀一樣：某一項資料其實是「查不到」，
+    而查不到跟「就是 0」在數字上長得一模一樣。分不出來的時候一律不寫 ——
+    少寫一次人看得到，寫錯一次沒有人會發現。
+    """
+    if "當日淨收付" not in record:
+        return "今日淨收付沒有讀到，現金這格先不動"
+
+    if method == METHOD_BANK:
+        if bank is None:
+            return "銀行餘額沒有讀到（剛換算法的話要再按一次「讀取網頁資料」），現金這格先不動"
+        if "近期淨收付" not in record:
+            return "近期淨收付沒有讀到，算不出還有哪幾筆沒交割，現金這格先不動"
+        if unknown:
+            return (f"有 {unknown} 筆成交讀不到交割日，無法判斷該不該算進來，"
+                    f"現金這格先不動")
+        if traded_today(record.get("未實現損益", []), today) and not has_today:
+            return ("未實現損益顯示今天有成交，近期淨收付裡卻沒有今天的資料"
+                    "（收盤結帳後可能查不到），現金這格先不動")
+        return None
 
     # 交叉檢查：未實現損益說今天有成交，淨收付卻是 0，兩邊矛盾。
     # 最可能的原因是收盤結帳後查不到當日資料了，這時候記 0 會讓餘額默默漏掉今天。
     # 只擋現金這一格，持股照樣可以寫。
     if net == 0 and traded_today(record.get("未實現損益", []), today):
-        proposal["note"] = "未實現損益顯示今天有成交、淨收付卻是 0（收盤結帳後可能查不到當日資料），現金這格先不動"
-        proposal["blocked"] = True
-        warnings.append("[現金] " + proposal["note"])
-        return proposal
+        return ("未實現損益顯示今天有成交、淨收付卻是 0"
+                "（收盤結帳後可能查不到當日資料），現金這格先不動")
+    return None
 
-    if proposal["status"] == ledger.UNTRACKED:
-        proposal["note"] = "還沒設定現金基準，要先校正一次才會開始自動累加"
-        return proposal
-
-    if proposal["status"] == ledger.MANUAL:
-        proposal["note"] = (
-            f"手動改過（程式記得 {cash.get('last_written')}），"
-            f"要交還給程式要先重新校正一次基準"
-        )
-        return proposal
-
-    proposal["proposed"] = ledger.cash_after(cash, today, net)
-    proposal["will_write"] = not same_number(balance, proposal["proposed"])
-    proposal["record_net"] = True
-    proposal["note"] = f"今日淨收付 {show(net)}（{rows} 筆成交）"
-    return proposal
-
-
-# 歷程的「說明」欄。項目、動作、新舊值三欄已經講完「哪一格、做了什麼、變成多少」，
-# 說明再覆述一次等於空白，所以這裡只補那三欄講不出來的一件事：數字是從 Excel 抄來的。
-ADOPTED_NOTE = "以 Excel 上的數字為準"
 
 # 現金的初始化每天都會發生一次，值常常跟昨天一樣（昨天收盤多少，今天就從多少開始），
 # 所以歷程上會出現一排「893 → 893」。說明寫清楚它是什麼，那一列才讀得懂。
 OPENING_NOTE = "今日初始現金餘額（今天第一次登入時的 B8）"
 
 
-def adopt(proposals, book, sheet_name, today, today_included, at):
-    """
-    把「未接管 / 手動」的格子交還給程式管理。回傳 (訊息清單, 歷程項目, 還缺什麼)。
-
-    持股沒有副作用：網頁庫存就是唯一真相，交還就是下次以網頁值重抄一次。
-    現金不一樣 —— 程式無法從一個數字看出它含不含今天的淨收付，猜錯就是多扣或
-    少扣一次，所以一定要 today_included 明講，沒講就不動現金那一格。
-
-    交接本身也要進歷程。它是唯一一種「人決定、程式照做」的異動，
-    日後回頭查帳最需要看到的就是這種：餘額為什麼從這天開始不一樣了。
-    """
-    messages, events = [], []
-    needs_today = False
-
-    for item in proposals:
-        message, event, missing = adopt_one(item, book, sheet_name, today, today_included, at)
-        needs_today = needs_today or missing
-        if message:
-            messages.append(message)
-        if event:
-            events.append(event)
-
-    return messages, events, needs_today
-
-
-def adopt_one(item, book, sheet_name, today, today_included, at):
-    """
-    交還單獨一格，回傳 (訊息, 歷程項目, 是否還缺 today_included)。
-
-    介面上的「交還給程式」按鈕是一次處理一格，命令列的 --adopt 是全部跑一遍，
-    兩邊走的是同一段程式碼，才不會出現「介面接管的結果跟命令列不一樣」。
-    """
-    if item["status"] not in (ledger.MANUAL, ledger.UNTRACKED):
-        return None, None, False
-
-    if item["kind"] == "cash":
-        if item["current"] is None:
-            return "B8 現金餘額是空的，沒有東西可以當基準，請先在 Excel 填一個數字", None, False
-        if today_included is None:
-            return None, None, True
-
-        cash = book["cash"]
-        was = cash.get("last_written")
-        ledger.calibrate(cash, item["current"], today, item["net"], today_included, at)
-        message = (
-            f"現金基準改為 {show(cash['baseline_value'])}"
-            f"（Excel 上的 {show(item['current'])} "
-            f"{'已含' if today_included else '尚未含'}今日淨收付 {show(item['net'])}），"
-            f"從 {today:%Y/%m/%d} 起重新起算"
-        )
-        return message, _event(at, sheet_name, item, "adopt", was, item["current"], message), False
-
-    state = book["holdings"].setdefault(item["key"], {}).setdefault(item["which"], ledger.new_field())
-    was = state.get("last_written")
-    state["mode"] = ledger.AUTO
-    state["last_written"] = item["current"]
-    state["last_written_at"] = at
-    state.pop("since", None)
-    message = f"{item['cell']} {item['label']} 交還給程式管理"
-    return message, _event(at, sheet_name, item, "adopt", was, item["current"], ADOPTED_NOTE), False
-
-
 def initialize(sheet_data, book, sheet_name, today, at):
     """
-    以 Excel 現在的數字為準，把一個分頁整個交給程式管理。介面在登入完成後跑一次。
+    現金每天重新起算：只要基準日還不是今天，就把 B8 收成今天的起點。
+    介面在登入成功後跑一次。股數/成本不需要初始化 —— 程式每次都直接以
+    網頁值覆蓋，沒有「先接管」這一步。
 
-    這裡刻意不需要網頁資料。初始化的定義就是「Excel 上這些數字是今天買賣之前的
-    狀態」，今天在網頁上成交了什麼，等按「讀取網頁資料」時再往上加 —— 所以現金
-    基準直接取 B8，今天的流水先記 0，之後 commit 會用真正的淨收付覆蓋掉那個 0。
-    這也是為什麼不必再問「B8 含不含今天的淨收付」：登入的當下它一定還沒含。
+    這裡刻意不需要網頁資料。今天在網頁上成交了什麼，等按「讀取網頁資料」時
+    再往上加 —— 所以現金基準直接取 B8，今天的流水先記 0，之後 commit 會用
+    真正的淨收付覆蓋掉那個 0。這也是為什麼不必再問「B8 含不含今天的淨收付」：
+    登入的當下它一定還沒含。
 
-    現金每天重新起算：只要基準日還不是今天，就把 B8 收成今天的起點，不管它昨天
-    是自動還是手動、昨天有沒有跑過。這就是「今日初始現金餘額」的定義，也是這支
-    程式唯一的現金起點 —— 舊帳一概不算（見 ledger 的模組說明）。
-
-    反過來說，一天也只設一次（基準日已經是今天就跳過）。今天的淨收付要是已經寫進
+    一天也只設一次（基準日已經是今天就跳過）。今天的淨收付要是已經寫進
     B8 了，再重設一次基準會讓它被加第二次，而且畫面上不會有任何徵兆。
 
     跳過之後那一格不是就沒有出口了 —— 當天想改餘額由人明講，走 apply_cash_reset
     （介面上現金那一條底下的「今日初始現金餘額　[修改]」）。
     """
-    events = []
-
-    for line in sheet_data["rows"]:
-        for which, col, current in (("qty", COL_QTY, line["qty"]),
-                                    ("cost", COL_COST, line["cost"])):
-            state = (book["holdings"].get(line["code"]) or {}).get(which)
-            item = _row(line["row"], col, "holding", line["code"], which,
-                        f"{'股數' if which == 'qty' else '成本'}（{line['label']}）",
-                        current, None, None, ledger.status_of(state, current), "")
-            _message, event, _needs = adopt_one(item, book, sheet_name, today, False, at)
-            if event:
-                events.append(event)
-
     balance = sheet_data["balance"]
     cash = book["cash"]
-    if balance is not None and cash.get("baseline_date") != today.isoformat():
-        row, col = CELL_BALANCE
-        item = _row(row, col, "cash", "cash", "balance", "現金餘額",
-                    balance, None, None, ledger.UNTRACKED, "")
-        was = cash.get("last_written")
-        ledger.calibrate(cash, balance, today, 0.0, False, at)
-        events.append(_event(at, sheet_name, item, "adopt", was, balance, OPENING_NOTE))
+    if balance is None or cash.get("baseline_date") == today.isoformat():
+        return []
 
-    return events
+    row, col = CELL_BALANCE
+    item = _row(row, col, "cash", "cash", "balance", "現金餘額", balance, None, None)
+    was = cash.get("last_written")
+    ledger.calibrate(cash, balance, today, 0.0, False, at)
+    return [_event(at, sheet_name, item, "adopt", was, balance, OPENING_NOTE)]
 
 
 def commit(proposals, book, sheet_name, today, at):
-    """
-    寫入成功之後更新紀錄檔，回傳要追加到歷程的項目。
-
-    偵測到的人工改動也在這裡落地：狀態轉成手動、歷程記一筆。
-    時間只能記「偵測到的時間」，因為程式沒在旁邊看著，實際什麼時候改的無從得知。
-    """
+    """寫入成功之後更新紀錄檔，回傳要追加到歷程的項目。"""
     events = []
 
     for item in proposals:
-        state = _state_of(book, item)
-
-        if item["status"] == ledger.MANUAL and state.get("mode") != ledger.MANUAL:
-            ledger.mark_manual(state, at)
-            events.append(_event(at, sheet_name, item, "human",
-                                 state.get("last_written"), item["current"],
-                                 "執行時偵測到人工改動，已轉為手動"))
-
         if not item["will_write"]:
             continue
-
         events.append(_event(at, sheet_name, item, "program",
                              item["current"], item["proposed"], item["note"]))
-        ledger.mark_written(state, item["proposed"], at)
 
     for item in proposals:
         if item["kind"] != "cash":
@@ -404,12 +414,6 @@ def commit(proposals, book, sheet_name, today, at):
             ledger.record_net(book["cash"], today, item["net"])
 
     return events
-
-
-def _state_of(book, item):
-    if item["kind"] == "cash":
-        return book["cash"]
-    return book["holdings"].setdefault(item["key"], {}).setdefault(item["which"], ledger.new_field())
 
 
 def _event(at, sheet_name, item, by, old, new, note):

@@ -190,8 +190,8 @@ def add_sheets(path, workbook, count, write):
 
     print()
     print(f"共新增 {len(todo)} 個分頁。這些分頁已經填好 FIXED_ACCOUNTS 的固定股數與成本，")
-    print("但還沒交給程式管理，接下來一次把 20 個分頁的現況接管起來（用介面一格一格按會按到天荒地老）：")
-    print("    python update_excel.py --adopt --today=pending --write")
+    print("直接跑一次同步就會照網頁值覆蓋、現金基準也會在第一次登入時設定好：")
+    print("    python update_excel.py --write")
 
 
 def fill_sheet(sheet, name):

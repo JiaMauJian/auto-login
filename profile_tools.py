@@ -30,8 +30,10 @@ DEFAULT_NAME = "chrome-profile"
 
 HOME_URL = "https://www.tbbstock.com.tw/tbb/index/home.jsp"
 
-# leveldb 檔案裡出現這些字串，代表這個 profile 存過 tbbstock 的憑證資料（見 migrate-cert.ps1 檔頭）。
-MARKERS = ("TWCACertIdxRef", "tbbstock")
+# leveldb 檔案裡出現這個字串，代表這個 profile 存過 tbbstock 的憑證資料（見 migrate-cert.ps1 檔頭）。
+# 不能拿 "tbbstock" 本身當標記 —— localStorage key 是照 origin 存的，只要開過
+# https://www.tbbstock.com.tw 這個網頁，不管有沒有憑證，這個字串就會寫進去。
+MARKERS = ("TWCACertIdxRef",)
 
 # 「系統訊息與憑證狀態」那個區塊的文字節點，含「憑證有效終止時間: 2027/08/15 23:59:59」。
 CERT_PAGE = "https://www.tbbstock.com.tw/tbb/welcome/layout.jsp?type=1"

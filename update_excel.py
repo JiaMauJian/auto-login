@@ -4,31 +4,27 @@
     python update_excel.py                      只看會改什麼（試算，安全）
     python update_excel.py --write               真的寫入（會先自動備份）
     python update_excel.py 1                     只處理 .env 的第 1 組帳號
-    python update_excel.py --adopt --today=applied --write
+    python update_excel.py --cash=bank           這次用銀行餘額推算現金
 
 寫入的格子只有三處，其餘全是公式，一律不碰：
 
     E4:E8  股數    <- 未實現損益的「成交股數」(costqtyn)
     F4:F8  成本    <- 未實現損益的「成交均價」(priceavgn)
-    B8     現金餘額 <- 現金基準 + 每日淨收付流水
+    B8     現金餘額 <- 兩種算法擇一，見下
+
+現金餘額有兩種算法，用 --cash 切換，不指定就照紀錄檔裡記著的（跟介面共用同一個設定）：
+
+    --cash=opening   今日初始現金餘額 + 今日淨收付
+    --cash=bank      銀行餘額 + 還沒交割的成交淨收付
+
+兩種並存是因為各有各正確的日子（全額交割、匯撥股利），完整說明見
+docs/現金餘額兩種算法.md。只會算選中的那一種 —— 用 opening 的時候完全不會去查銀行餘額。
 
 Excel 的版面完全維持原樣，沒有任何輔助欄位。程式要記的事情（現金基準、
-每日淨收付、哪一格是自動哪一格是手動、改動歷程）都放在 Excel 旁邊的紀錄檔裡，
-細節見 ledger.py。
+每日淨收付、改動歷程）都放在 Excel 旁邊的紀錄檔裡，細節見 ledger.py。
 
-自動與手動
-----------
-每一格各自有狀態。程式記得自己上次寫了什麼，所以 Excel 上跟記憶不符的數字
-一定是人改的 —— 這種格子會自動轉成「手動」，之後程式就不再碰它。
-
-要交還給程式管理是 --adopt。持股沒有副作用（網頁庫存就是唯一真相，交還等於
-重抄一次）；現金則必須同時說清楚 Excel 上那個數字含不含今天的淨收付：
-
-    --today=applied   B8 現在的數字已經含今天的淨收付了
-    --today=pending   還沒含，程式待會兒會幫你加上去
-
-猜錯的後果是多扣或少扣一次，所以程式不猜，沒講就不動現金那一格。
-第一次使用（紀錄檔還不存在）也是用 --adopt 把現況接管起來。
+股數與成本一律用網頁值覆蓋 Excel，不比對 Excel 上原本是什麼 —— 修改 Excel
+的風險交給操作的人自己管控。現金餘額另有基準機制，見上面「兩種算法」。
 
 分頁怎麼對到帳號
 ----------------
@@ -51,25 +47,22 @@ import planner
 from excel_io import excel_path
 from fetch import collect
 from login import app_dir, configure_browsers_path, load_accounts, open_context, pause, wait_until_finished
-from planner import STATUS_NAMES
 from util import pad, show
 
 
 def parse_args(argv):
-    """回傳 (要跑第幾組或 None, 是否寫入, 是否交接, 今日淨收付含了沒)。"""
-    write = adopt = False
+    """回傳 (要跑第幾組或 None, 是否寫入, 現金算法或 None)。"""
+    write = False
     which = None
-    today_included = None
+    method = None
 
     for arg in argv[1:]:
         if arg == "--write":
             write = True
-        elif arg == "--adopt":
-            adopt = True
-        elif arg == "--today=applied":
-            today_included = True
-        elif arg == "--today=pending":
-            today_included = False
+        elif arg == "--cash=bank":
+            method = planner.METHOD_BANK
+        elif arg == "--cash=opening":
+            method = planner.METHOD_OPENING
         else:
             try:
                 which = int(arg)
@@ -78,11 +71,11 @@ def parse_args(argv):
                 print(__doc__.strip())
                 sys.exit(1)
 
-    return which, write, adopt, today_included
+    return which, write, method
 
 
 def main():
-    which, write, adopt, today_included = parse_args(sys.argv)
+    which, write, method = parse_args(sys.argv)
 
     path = excel_path()
     if path is None:
@@ -106,6 +99,14 @@ def main():
             sys.exit(1)
         numbered = [numbered[which - 1]]
 
+    # 算法一定要在抓資料之前定案：它決定要不要多查銀行餘額那兩支。
+    if method is None:
+        try:
+            method = ledger.Ledger(path).setting("cash_method", planner.METHOD_OPENING)
+        except RuntimeError as exc:
+            print(exc)
+            sys.exit(1)
+
     today = datetime.date.today()
     print(f"Excel: {path}")
     print(f"今天: {today:%Y/%m/%d}    模式: {'寫入' if write else '試算（不會動檔案）'}")
@@ -118,8 +119,8 @@ def main():
     with sync_playwright() as p:
         context, browser = open_context(p)
         try:
-            records = collect(context, numbered)
-            run(path, records, today, write, adopt, today_included)
+            records = collect(context, numbered, need_bank=(method == planner.METHOD_BANK))
+            run(path, records, today, write, method)
         except RuntimeError as exc:
             print(exc)
         finally:
@@ -133,20 +134,23 @@ def main():
                 pass
 
 
-def run(path, records, today, write, adopt, today_included):
+def run(path, records, today, write, method=None):
     """開 Excel 算出變更、印出來，必要時寫入。"""
     book_ledger = ledger.Ledger(path)
+    # 沒指定就照紀錄檔裡記著的（介面上那顆總開關），兩邊看到的是同一個設定。
+    if method is None:
+        method = book_ledger.setting("cash_method", planner.METHOD_OPENING)
+    print(f"現金餘額算法：{planner.METHOD_NAMES.get(method, method)}"
+          f"（--cash=bank / --cash=opening 可以改）")
+    print()
     if not book_ledger.existed:
         print(f"還沒有紀錄檔，會在第一次寫入時建立: {book_ledger.path.name}")
-        print("第一次請加上 --adopt（現金還要 --today=applied 或 --today=pending）把現況接管起來。")
         print()
 
     excel, workbook, attached = excel_io.open_workbook(path, write)
 
     pending = []
-    adopt_events = []
     blocked = False
-    needs_today = False
     at = datetime.datetime.now().isoformat(timespec="seconds")
 
     try:
@@ -176,32 +180,13 @@ def run(path, records, today, write, adopt, today_included):
             book = book_ledger.sheet(record["sheet_name"])
             book["account_code"] = record["account_code"]
 
-            proposals, warnings = planner.plan(sheet_data, record, book, today)
-
-            if adopt:
-                messages, events, missing = planner.adopt(
-                    proposals, book, record["sheet_name"], today, today_included, at
-                )
-                needs_today = needs_today or missing
-                adopt_events.extend(events)
-                for message in messages:
-                    print(f"  [交接] {message}")
-                if messages:
-                    # 交接改變了「誰在管這一格」，整份提案要重算一次。
-                    proposals, warnings = planner.plan(sheet_data, record, book, today)
-                    print()
+            proposals, warnings = planner.plan(sheet_data, record, book, today, method)
 
             show_table(proposals)
             for warning in warnings:
                 print(f"  [提醒] {warning}")
 
             pending.append((sheet, proposals, book, record["sheet_name"]))
-            print()
-
-        if needs_today:
-            print("有現金格要交接，但沒說今天的淨收付算過了沒。")
-            print("  Excel 上的 B8 已經含今天的淨收付 -> 加 --today=applied")
-            print("  還沒含，要程式幫你加                -> 加 --today=pending")
             print()
 
         if not write:
@@ -212,7 +197,7 @@ def run(path, records, today, write, adopt, today_included):
             print("有分頁沒過檢查，整份都不寫入。請先處理上面的 [中止] 項目。")
             return
 
-        write_all(path, book_ledger, pending, adopt_events, today, at, workbook, attached)
+        write_all(path, book_ledger, pending, today, at, workbook, attached)
 
     finally:
         excel_io.close_workbook(excel, workbook, attached)
@@ -220,20 +205,20 @@ def run(path, records, today, write, adopt, today_included):
 
 def show_table(proposals):
     print(f"  {pad('格子', 6)}{pad('項目', 30)}{pad('Excel', 16)}{pad('網頁', 16)}"
-          f"{pad('會變成', 16)}{pad('狀態', 10)}")
+          f"{pad('會變成', 16)}")
     for item in proposals:
         mark = "  <= 會改" if item["will_write"] else ""
         proposed = show(item["proposed"]) if item["will_write"] else "—"
         print(
             f"  {pad(item['cell'], 6)}{pad(item['label'], 30)}"
             f"{pad(show(item['current']), 16)}{pad(show(item['web']), 16)}"
-            f"{pad(proposed, 16)}{pad(STATUS_NAMES.get(item['status'], item['status']), 10)}{mark}"
+            f"{pad(proposed, 16)}{mark}"
         )
         if item["note"]:
             print(f"  {' ' * 6}{item['note']}")
 
 
-def write_all(path, book_ledger, pending, adopt_events, today, at, workbook, attached):
+def write_all(path, book_ledger, pending, today, at, workbook, attached):
     """真的寫入：先備份，再寫 Excel，最後才更新紀錄檔與歷程。"""
     writes = [
         (sheet, [(item["row"], item["col"], item["proposed"]) for item in proposals if item["will_write"]])
@@ -254,12 +239,11 @@ def write_all(path, book_ledger, pending, adopt_events, today, at, workbook, att
         workbook.Save()
 
     # 紀錄檔在 Excel 寫完之後才更新。順序反過來的話，Excel 寫入失敗會留下一份
-    # 「以為自己寫過了」的帳本，之後每次比對都判定成人工改動。
+    # 「以為自己寫過了」的帳本，現金基準會跟 Excel 上實際的數字對不起來。
     #
-    # 接上使用者開著的 Excel 時仍然會更新紀錄檔，即使他最後選擇不存檔。
-    # 這不是漏洞：下次執行時 Excel 上的數字跟紀錄檔對不起來，那幾格會被判成手動、
-    # 程式停手等人確認 —— 剛好就是「你自己撤銷了程式的修改」該有的結果。
-    events = list(adopt_events)
+    # 接上使用者開著的 Excel 時仍然會更新紀錄檔，即使他最後選擇不存檔 —— 下次
+    # 執行時股數/成本一律照網頁值重寫，現金則會照紀錄檔的基準再算一次。
+    events = []
     for _, proposals, book, sheet_name in pending:
         events.extend(planner.commit(proposals, book, sheet_name, today, at))
 

@@ -8,7 +8,9 @@ ui.py 底下幾個分頁共用的字級／視窗尺寸換算、表格欄寬計�
 
 import tkinter as tk
 from tkinter import font as tkfont
-from tkinter import messagebox, ttk
+from tkinter import messagebox
+
+import ttkbootstrap as ttk
 
 import planner
 from util import env_int, show, to_num
@@ -56,8 +58,8 @@ def window_size_from_env():
             max(WINDOW_MIN_H, height) if height else None)
 
 
-FONT_SIZE = font_size_from_env()   # 一般文字：按鈕、表格、對話框
-HINT_SIZE = FONT_SIZE - 1          # 次要文字：路徑、提醒、欄位說明
+FONT_SIZE = font_size_from_env()   # 全部文字統一用這個大小，標題／表頭另外加粗做區分，不再另外縮小字級
+HINT_SIZE = FONT_SIZE              # 提示/次要文字：路徑、提醒、欄位說明——跟 FONT_SIZE 同大小，只用顏色/粗細區分，不再縮小
 WINDOW_W, WINDOW_H = window_size_from_env()
 
 
@@ -193,13 +195,11 @@ def ask_opening_balance(parent, family, name, current, item):
     outer.pack(fill="both", expand=True)
 
     ttk.Label(outer, justify="left", text=(
-        f"「{name}」今天開盤前有多少錢 —— 今天第一筆成交之前的現金。\n"
-        f"餘額是它一路加上每天的淨收付算出來的，所以餘額不對的時候，要改的是這個數字。"
+        f"「{name}」今日開盤前的現金餘額"
     )).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-    lines = (("現在記著的今日初始現金餘額", show(current)),
-             (f"今日淨收付（{item['net_rows']} 筆成交）", show(item["net"])),
-             ("Excel 上的現金餘額 " + item["cell"], show(item["current"])))
+    lines = (("今日初始現金餘額", show(current)),
+             (f"今日淨收付（{item['net_rows']} 筆成交）", show(item["net"])))
     for index, (title, value) in enumerate(lines, start=1):
         ttk.Label(outer, text=title, style="Hint.TLabel").grid(row=index, column=0,
                                                               sticky="w", pady=2)
@@ -209,23 +209,7 @@ def ask_opening_balance(parent, family, name, current, item):
     text = tk.StringVar(value="" if current is None else show(current))
     row = len(lines) + 1
 
-    # 會走到這個對話框的路幾乎只有一條：人自己在盤中改過 B8。他改進去的是「現在
-    # 正確的餘額」，那個數字已經含了今天的成交 —— 照抄進來就等於把今天的淨收付
-    # 算進起點裡，待會兒再加一次。扣掉淨收付才是開盤前，算出來擺著並且給一顆
-    # 「帶入」，比請人自己心算可靠：這一格填錯，畫面上不會有任何徵兆。
-    if item["current"] is not None:
-        suggested = round(item["current"] - item["net"], 2)
-        ttk.Label(outer, text=f"{item['cell']} 已經含了今天的成交的話，開盤前是",
-                  style="Hint.TLabel").grid(row=row, column=0, sticky="w", pady=2)
-        pick = ttk.Frame(outer)
-        pick.grid(row=row, column=1, sticky="e", padx=(24, 0), pady=2)
-        ttk.Label(pick, text=show(suggested)).pack(side="left")
-        ttk.Button(pick, text="帶入", width=5,
-                   command=lambda: (text.set(show(suggested)), entry.focus_set(),
-                                    entry.select_range(0, "end"))).pack(side="left", padx=(8, 0))
-        row += 1
-
-    ttk.Label(outer, text="改成（今天開盤前的現金）").grid(row=row, column=0,
+    ttk.Label(outer, text=f"Excel現金餘額 {item['cell']} 改成").grid(row=row, column=0,
                                                           sticky="w", pady=(10, 2))
     entry = ttk.Entry(outer, width=16, font=(family, FONT_SIZE), justify="right",
                       textvariable=text)
@@ -266,17 +250,12 @@ def ask_opening_balance(parent, family, name, current, item):
         answer["opening"] = value
         win.destroy()
 
-    # 填錯只有一種形狀，就直接寫出來。這裡沒有任何檢查擋得住它：
-    # 兩個數字都是合法的金額，錯的那個要到明天的餘額才看得出來。
-    ttk.Label(outer, justify="left", style="Hint.TLabel", text=(
-        "盤中自己改過 " + item["cell"] + " 的話要小心：改進去的通常是「已經含了今天成交」的餘額，\n"
-        "不能直接當成開盤前 —— 那樣今天的淨收付會被算兩次。"
-    )).grid(row=row + 2, column=0, columnspan=2, sticky="w", pady=(10, 0))
-
     buttons = ttk.Frame(outer)
     buttons.grid(row=row + 3, column=0, columnspan=2, sticky="e", pady=(12, 0))
-    ttk.Button(buttons, text="取消", command=win.destroy).pack(side="left", padx=(0, 8))
-    ttk.Button(buttons, text="確定", command=confirm).pack(side="left")
+    ttk.Button(buttons, text="取消", command=win.destroy,
+              bootstyle="secondary").pack(side="left", padx=(0, 8))
+    ttk.Button(buttons, text="確定", command=confirm,
+              bootstyle="primary").pack(side="left")
 
     win.protocol("WM_DELETE_WINDOW", win.destroy)
     win.bind("<Escape>", lambda _e: win.destroy())
@@ -341,8 +320,10 @@ def ask_cash_method(parent, family, current):
 
     buttons = ttk.Frame(outer)
     buttons.grid(row=6, column=0, sticky="e", pady=(12, 0))
-    ttk.Button(buttons, text="取消", command=win.destroy).pack(side="left", padx=(0, 8))
-    ttk.Button(buttons, text="確定", command=confirm).pack(side="left")
+    ttk.Button(buttons, text="取消", command=win.destroy,
+              bootstyle="secondary").pack(side="left", padx=(0, 8))
+    ttk.Button(buttons, text="確定", command=confirm,
+              bootstyle="primary").pack(side="left")
 
     win.protocol("WM_DELETE_WINDOW", win.destroy)
     win.bind("<Escape>", lambda _e: win.destroy())

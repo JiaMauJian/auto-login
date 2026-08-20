@@ -1,10 +1,16 @@
 """
-登入並抓回「未實現損益」與「當日淨收付」的原始資料。只讀網頁，不碰 Excel。
+登入並抓回帳務資料的原始回應。只讀網頁，不碰 Excel。
+
+固定抓兩支：未實現損益、當日淨收付。現金餘額用「銀行餘額推算」那種算法時
+再多抓近期淨收付與銀行餘額（見 docs/現金餘額兩種算法.md）—— 用另一種算法的日子
+一次都用不到，20 個帳號省下 40 次往返。
 
 抓資料的方式是在已登入的分頁裡呼叫網站自己的 AJAX（POST /tbb/MainController），
 沿用頁面現成的 B64_XOR_Encode / XOR_KEY 與 cookie，不做畫面解析 —— 表格是 JS
 動態產生的，解析畫面既慢又容易被改版弄壞。
 """
+
+import datetime
 
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
@@ -12,6 +18,41 @@ from dev_tools import simulate
 from login import do_login
 from profile_tools import CERT_MSG_JS, CERT_PAGE, parse_cert_expiry
 from recon import ACCOUNT_PAGE, SESSION_JS, account_codes, query
+
+
+# 「還沒交割的成交」要往前撈幾個日曆天。T+2 最多只欠三個交易日，但中間可能夾週末
+# 與連假，所以用日曆天多抓一點 —— 撈多了不會算錯（每一筆都要通過 cdate 那道），
+# 撈少了會少算錢。網站自己的上限是 180 天，離得很遠。
+LOOKBACK_DAYS = 10
+
+
+def date_range(today):
+    """「近期淨收付」要送出的起訖日。格式必須是 YYYY/MM/DD，用 - 會被回 602002。"""
+    start = today - datetime.timedelta(days=LOOKBACK_DAYS)
+    return f"{start:%Y/%m/%d}", f"{today:%Y/%m/%d}"
+
+
+def bank_problem(rows, cid):
+    """
+    銀行餘額回應能不能用。可以就回 None，不能就回一句給人看的話。
+
+    這支查詢的回應裡**沒有 bhno/cseq**，所以現有那道「這份資料是不是這個人的」核對
+    用不上，只剩銀行帳號裡含著客戶號這個線索（1112-0108640 的帳號是 71017108640）。
+    銀行餘額是單一數字，抄錯人不會有任何徵兆，所以這道再弱也要做。
+
+    多於一筆的情況沒有人看過（可能是綁了兩個銀行帳戶），不知道該用哪一個就不要猜。
+    """
+    if not rows:
+        return "銀行餘額查詢沒有回傳任何帳戶"
+    if len(rows) > 1:
+        accounts = "、".join(str(row.get("bnkacc") or "?") for row in rows)
+        return f"銀行餘額查詢回傳了 {len(rows)} 個帳戶（{accounts}），不知道該用哪一個"
+
+    account = str(rows[0].get("bnkacc") or "")
+    trimmed = (cid or "").lstrip("0")
+    if trimmed and trimmed not in account:
+        return f"銀行帳號 {account} 裡看不到客戶號 {cid}，這筆餘額可能不是這個人的"
+    return None
 
 
 def new_store():
@@ -227,9 +268,12 @@ def login_only(context, selected, store=None):
     return records
 
 
-def collect(context, selected, store=None):
+def collect(context, selected, store=None, need_bank=False):
     """
     逐一確保登入並抓資料。selected 是 [(第幾組, 帳號設定)]，回傳每組一筆記錄。
+
+    need_bank 是「現金餘額這次要用銀行餘額推算」。只有那時候才多查銀行餘額與近期
+    淨收付兩支 —— 20 個帳號就是 40 次多餘的往返，而用另一種算法的日子一次都用不到。
 
     刻意「登入完立刻抓」而不是全部登入完再回頭抓：所有分頁共用同一個 JSESSIONID，
     後登入的會把前一個的 server session 頂掉，晚一步抓可能拿到別人的資料。
@@ -258,13 +302,32 @@ def collect(context, selected, store=None):
         record["cert_expiry"] = session.get("cert_expiry")
 
         queries = {
-            "未實現損益": {"branchId": "1" + bid, "custId": cid, "range": "stksum,stkdat", "stock_no": ""},
-            "當日淨收付": {
+            "未實現損益": ("queryInstantAccount_new", {
+                "branchId": "1" + bid, "custId": cid,
+                "range": "stksum,stkdat", "stock_no": "",
+            }),
+            "當日淨收付": ("queryInstantAccount_new", {
                 "branchId": "1" + bid, "custId": cid,
                 "his": "y", "queryType": "1",
                 "range": "stksum,stkdat,matsum,matdat", "stock_no": "",
-            },
+            }),
         }
+
+        if need_bank:
+            # 現金餘額第二種算法要的兩支（見 docs/現金餘額兩種算法.md）。
+            #
+            # 近期淨收付撈的是一段日期區間，不是「昨天」—— 因為要補的是「還沒交割的
+            # 那幾筆」，而那不等於固定天數：週一還欠著週五與週一，非交易日跑還欠更多。
+            # 每一筆自己帶著交割日（cdate），所以撈寬一點再按 cdate 篩，不必推算日期。
+            start, end = date_range(datetime.date.today())
+            queries["近期淨收付"] = ("queryInstantAccount_new", {
+                "branchId": "1" + bid, "custId": cid,
+                "his": "y", "queryType": "0",
+                "startDate": start, "endDate": end,
+                "range": "stksum,stkdat,matsum,matdat", "stock_no": "",
+            })
+            queries["銀行餘額"] = ("queryBankBalance",
+                                   {"branchId": "1" + bid, "custId": cid})
 
         # 模擬帳號的資料是從它自己的假頁面即時算出來的，形狀跟真 API 的回應一樣，
         # 所以下面的 retcode 檢查、帳號回顯檢查全部照跑，不特別放水。
@@ -276,11 +339,11 @@ def collect(context, selected, store=None):
                 record["problems"].append(f"讀取模擬頁面失敗：{exc}")
                 continue
 
-        for title, param_info in queries.items():
+        for title, (cmd, param_info) in queries.items():
             if simulated is not None:
                 data, raw = simulated.get(title), "（模擬資料）"
             else:
-                data, raw = query(page, "queryInstantAccount_new", param_info)
+                data, raw = query(page, cmd, param_info)
             if data is None:
                 record["problems"].append(f"{title} 查詢失敗：{str(raw)[:200]}")
                 continue
@@ -295,6 +358,17 @@ def collect(context, selected, store=None):
                     f"{title} 的資料屬於 {'、'.join(sorted(codes))}，"
                     f"與登入的 {record['account_code']} 不符（session 可能被其他帳號頂掉）"
                 )
+                continue
+
+            if title == "銀行餘額":
+                # 這支的回應形狀跟其他的不一樣（data 不是 arrays），而且裡面沒有
+                # bhno/cseq，上面那道核對等於沒做 —— 所以另外檢查一次。
+                rows = data.get("data") or []
+                problem = bank_problem(rows, cid)
+                if problem:
+                    record["problems"].append(problem)
+                    continue
+                record[title] = rows
                 continue
 
             record[title] = data.get("arrays") or []

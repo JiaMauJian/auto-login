@@ -30,13 +30,16 @@ $pkgMode = if ($OneDir) { "--onedir" } else { "--onefile" }
 
 # --collect-all playwright：把 playwright 的 node driver（driver\node.exe 與 package\）一起打包，
 # 少了它 exe 會在啟動 Playwright 時失敗。
+# --collect-all ttkbootstrap：主題定義、圖示等資料檔是套件內的非 .py 檔案，
+# PyInstaller 靜態分析抓不到，得整包收進去，否則執行期主題會跑掉或報錯。
 $pyiArgs = @(
     "--noconfirm",
     "--clean",
     $pkgMode,
     "--console",
     "--name", "tbb-login",
-    "--collect-all", "playwright"
+    "--collect-all", "playwright",
+    "--collect-all", "ttkbootstrap"
 )
 
 # python-dotenv 有一個選用的 IPython 整合，PyInstaller 會順著它把 IPython、matplotlib、
@@ -44,7 +47,10 @@ $pyiArgs = @(
 #
 # tkinter 不能排除：持股同步介面（ui.py）就是用它做的，排掉之後 exe 照樣打包成功，
 # 但一執行 --sync 就當場炸掉 —— 而且只有在目標電腦上才會發現。
-foreach ($m in @("IPython", "matplotlib", "numpy", "pytest", "PIL", "zmq")) {
+#
+# PIL 也不能排除：ttkbootstrap 本身依賴 Pillow（圖示、部分元件渲染要用），
+# 不像以前只是被 IPython 意外拖進來的無用依賴。
+foreach ($m in @("IPython", "matplotlib", "numpy", "pytest", "zmq")) {
     $pyiArgs += @("--exclude-module", $m)
 }
 

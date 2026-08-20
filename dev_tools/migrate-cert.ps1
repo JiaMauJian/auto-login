@@ -37,8 +37,10 @@ $ErrorActionPreference = "Stop"
 # 這支腳本住在 dev_tools\ 底下，但 .env、chrome-profile 都在專案根目錄。
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 
-# leveldb 檔案裡出現這些字串，代表這個 profile 存過 tbbstock 的憑證資料。
-$markers = @("TWCACertIdxRef", "tbbstock")
+# leveldb 檔案裡出現這個字串，代表這個 profile 存過 tbbstock 的憑證資料。
+# 不能拿 "tbbstock" 本身當標記 —— localStorage key 是照 origin 存的，只要開過
+# https://www.tbbstock.com.tw 這個網頁，不管有沒有憑證，這個字串就會寫進去。
+$markers = @("TWCACertIdxRef")
 
 # --- 1. 從 .env 讀出 USER_DATA_DIR，算出目標 profile ---------------------------
 

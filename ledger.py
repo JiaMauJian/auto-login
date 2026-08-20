@@ -1,21 +1,15 @@
 """
-程式自己的記帳本：記住「我上次寫進 Excel 的是什麼」，以及現金的逐日流水。
+程式自己的記帳本：現金的基準與逐日流水。
 
 Excel 完全保持原本的版面，所有輔助資訊都放在這裡，檔案就放在 Excel 旁邊。
 
-紀錄檔不見了不會算錯帳，只會變成「每一格都不認得」—— 全部當成人工維護、
-一格都不敢寫，然後請使用者重新設定基準。壞掉的方向是安全的那一邊。
+紀錄檔不見了不會算錯帳，股數/成本/現金下次讀取或登入都會照 Excel 現值重算，
+現金基準會被當成今天第一次登入重新設定一次。
 
-誰在管這一格
-------------
-每一格各自有狀態，不是整個分頁一起切。判定規則只有一條：
-
-    Excel 現值 == 紀錄檔的 last_written   ->  自動（程式還管著，可以覆蓋）
-    Excel 現值 != 紀錄檔的 last_written   ->  手動（有人改過，程式不准碰）
-    紀錄檔裡沒有這一格                     ->  未接管（要人明確交給程式）
-
-自動轉手動由程式自己偵測、悄悄發生，目的是保護使用者的手改；
-手動轉自動一定要人明確要求（CLI 的 --adopt、介面上的「交還給程式」按鈕）。
+股數與成本：一律覆蓋
+--------------------
+網頁庫存是唯一真相，程式每次都直接把算出來的值寫進 Excel，不記、不比對
+Excel 上原本是什麼。修改 Excel 的風險交給操作的人自己管控。
 
 現金：每天重新起算，不回頭算舊帳
 --------------------------------
@@ -38,17 +32,14 @@ applied 仍然是 {日期: 金額} 的字典，只是裡面永遠只有今天一
 同一天內想改餘額
 ----------------
 基準每天由「當天第一次登入」自己設好，正常情況沒有人要碰它。會碰到的是當天
-第二次以後登入：基準已經設過、不會再跟著 B8 走，這時候手改 B8 只會被判成人工
-改動。要改就直接改介面上那個「今日初始現金餘額」，走的還是 calibrate，
-只是 balance 由人給（見 planner.apply_cash_reset）。
+第二次以後登入：基準已經設過、不會再跟著 B8 走，這時候手改 B8 下次寫入會被
+程式直接蓋掉（餘額是 baseline + 今天淨收付算出來的，不是抄 B8）。要改就直接
+改介面上那個「今日初始現金餘額」，走的還是 calibrate，只是 balance 由人給
+（見 planner.apply_cash_reset）。
 """
 
 import datetime
 import json
-
-from util import values_match
-
-AUTO, MANUAL, UNTRACKED = "auto", "manual", "untracked"
 
 LEDGER_SUFFIX = "-同步紀錄.json"
 HISTORY_SUFFIX = "-同步歷程.jsonl"
@@ -58,15 +49,9 @@ HISTORY_SUFFIX = "-同步歷程.jsonl"
 # 而且不會有任何徵兆 —— 用檔名綁死就沒有這個破口。
 
 
-def new_field():
-    """一格（股數或成本）的狀態。"""
-    return {"mode": UNTRACKED, "last_written": None, "last_written_at": None}
-
-
 def new_cash():
-    """現金的狀態。比一般格子多了基準與流水。"""
+    """現金的狀態：基準與流水。"""
     return {
-        "mode": UNTRACKED,
         "baseline_date": None,
         "baseline_value": None,
         "applied": {},
@@ -76,7 +61,7 @@ def new_cash():
 
 
 def new_sheet():
-    return {"account_code": "", "cash": new_cash(), "holdings": {}}
+    return {"account_code": "", "cash": new_cash()}
 
 
 class Ledger:
@@ -92,11 +77,11 @@ class Ledger:
             try:
                 self.data = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
-                # 讀不到就當作沒有紀錄，全部退回「未接管」。
-                # 不要嘗試修補一個壞掉的帳本，那比沒有帳本更危險。
+                # 讀不到就報錯給人看，不要嘗試修補一個壞掉的帳本，
+                # 那比沒有帳本更危險。
                 raise RuntimeError(
                     f"紀錄檔讀不出來：{self.path}\n{exc}\n"
-                    f"可以把它改名備份起來，程式會重新建立（所有格子要重新交接一次）。"
+                    f"可以把它改名備份起來，程式會重新建立（現金基準下次登入會重設）。"
                 ) from exc
 
     def sheet(self, name):
@@ -104,13 +89,7 @@ class Ledger:
         sheets = self.data.setdefault("sheets", {})
         book = sheets.setdefault(name, new_sheet())
         book.setdefault("cash", new_cash())
-        book.setdefault("holdings", {})
         return book
-
-    def field(self, book, code, which):
-        """取得某一檔股票的 qty / cost 狀態，沒有就建一個。"""
-        holding = book["holdings"].setdefault(code, {})
-        return holding.setdefault(which, new_field())
 
     def setting(self, key, default=None):
         """介面用的偏好設定。跟著這份 Excel 走，不是全域的。"""
@@ -144,7 +123,7 @@ class Ledger:
         是誰改的」問不出來的代價，遠大於多留一個檔案；按錯一顆按鈕就永久失去
         追溯能力，那顆按鈕不該存在。
 
-        只動歷程，不動 self.data：誰在管哪一格、現金基準跟流水都記在紀錄檔那邊，
+        只動歷程，不動 self.data：現金基準跟流水都記在紀錄檔那邊，
         清歷程等於撕掉日記本，不是把帳算掉。
         """
         if not self.history_path.is_file():
@@ -155,37 +134,6 @@ class Ledger:
         dest = folder / f"{self.history_path.stem}_{stamp}{self.history_path.suffix}"
         self.history_path.replace(dest)
         return dest
-
-
-def status_of(state, current):
-    """
-    這一格現在誰在管。current 是 Excel 上的現值。
-
-    以 mode 為準而不是看 last_written 有沒有值：交接一個空白格
-    （例如新加的一列還沒填股數）也要算成已接管，否則它會永遠停在未接管。
-    """
-    mode = (state or {}).get("mode", UNTRACKED)
-    if mode == UNTRACKED:
-        return UNTRACKED
-    if mode == MANUAL:
-        return MANUAL
-    if not values_match(state.get("last_written"), current):
-        return MANUAL          # 這次才偵測到的手改
-    return AUTO
-
-
-def mark_written(state, value, at):
-    """程式寫進去之後，把「我記得寫了什麼」更新掉。"""
-    state["mode"] = AUTO
-    state["last_written"] = value
-    state["last_written_at"] = at
-    state.pop("since", None)
-
-
-def mark_manual(state, at):
-    """偵測到人工改動，轉為手動並記下時間（是偵測到的時間，不是實際改動的時間）。"""
-    state["mode"] = MANUAL
-    state["since"] = at
 
 
 def cash_after(cash, day, net):
@@ -226,7 +174,5 @@ def calibrate(cash, balance, day, net, today_included, at):
     cash["baseline_date"] = day.isoformat()
     cash["baseline_value"] = round(balance - net, 2) if today_included else round(balance, 2)
     cash["applied"] = {day.isoformat(): round(net, 2)}
-    cash["mode"] = AUTO
     cash["last_written"] = round(balance, 2)
     cash["last_written_at"] = at
-    cash.pop("since", None)

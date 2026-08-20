@@ -1,6 +1,5 @@
-"""同步分頁的顯示與操作：左邊名單、右邊明細、現金那一條、接管。"""
+"""同步分頁的顯示與操作：左邊名單、右邊明細、現金那一條。"""
 
-import datetime
 import tkinter as tk
 
 import ledger as ledger_mod
@@ -21,25 +20,11 @@ def stock_title(label):
     return inside or label
 
 
-def group_status(qty, cost):
-    """
-    一列的狀態。兩格同一種狀態就寫一次，不同才拆開講。
-
-    同一檔股票的股數還在自動、成本被手改成手動是可能的，這種時候寫「自動」
-    或「手動」都是錯的 —— 而這一列到底哪一格不會被覆蓋，正是使用者要判斷的事。
-    """
-    names = {which: planner.STATUS_NAMES.get(item["status"], item["status"])
-             for which, item in (("股數", qty), ("成本", cost)) if item is not None}
-    if len(set(names.values())) <= 1:
-        return next(iter(names.values()), "")
-    return "／".join(f"{which}{name}" for which, name in names.items())
-
-
 def group_note(qty, cost):
     """
     一列的說明。兩格講的是同一件事就寫一次，否則各自標明是哪一格。
 
-    只有一格有話說的時候也要標 —— 「手動改過，不會覆蓋」沒說是股數還是成本，
+    只有一格有話說的時候也要標 —— 「網頁庫存已無此檔」沒說是股數還是成本，
     等於沒說。
     """
     notes = [(which, item["note"])
@@ -79,7 +64,7 @@ class UiSyncMixin:
         那一個反而被埋掉了。有話要說的時候才寫兩個：
 
             1,000 → 2,000        等著寫的，或這一輪剛寫進去的
-            1,000（網頁 2,000）  跟網頁不一樣，但程式不會動它（手動／未接管）
+            1,000（網頁 2,000）  跟網頁不一樣，但這一輪沒被寫（例如現金被擋）
             1,000                跟網頁一致，這一輪也沒動過
 
         舊值取的是這批網頁資料讀進來時 Excel 上原本的數字（self.before）。
@@ -128,19 +113,6 @@ class UiSyncMixin:
         number = to_num(value, None)
         return writes, warns, show(value), number is not None and number < 0
 
-    def _filtered_sheets(self):
-        """
-        名單上該有誰。
-
-        勾了「只看有差異的」就只留要動的那幾位，但正在看的那一位一定留著 ——
-        不然勾下去的瞬間畫面會跳到別人身上，而使用者只是想少看幾個人而已。
-        """
-        names = list(self.proposals)
-        if not self.only_diff.get():
-            return names
-        return [name for name in names
-                if name == self.current_sheet or any(self._summary(name)[:2])]
-
     def _shown(self):
         """名單上現在真的有誰。上一位／下一位都照這個走，才會跟眼睛看到的一致。"""
         return list(self.people.get_children())
@@ -148,7 +120,7 @@ class UiSyncMixin:
     def _fill_people(self):
         self.people.delete(*self.people.get_children())
 
-        names = self._filtered_sheets()
+        names = list(self.proposals)
         # 正在看的那位不見了（換了檔、重讀、改了篩選）就退回第一位。
         # 右邊不能停在一個名單上已經沒有的人身上。
         if self.current_sheet not in names:
@@ -222,9 +194,8 @@ class UiSyncMixin:
         對照的時候不必在心裡再翻譯一次。
 
         一個分頁只有第 4~8 列五個位置，一列一檔、股號不會重複。真的重複了的話
-        這裡照樣會畫成兩列，但底下撐不住：紀錄檔是拿股號當 key 的
-        （holdings[股號][qty]），兩列共用同一份「程式記得多少」，結果是寫了第一列、
-        第二列就被判成人工改動，而網頁那一檔的總股數還會整個寫進其中一列。
+        這裡照樣會畫成兩列，但底下撐不住：兩列都查到同一檔的網頁值，
+        股數/成本會整個複製貼到兩列，不會照原本的比例拆開。
         所以那不是一種支援的排法，是一種要避開的排法。
         """
         groups, order, cash = {}, [], None
@@ -271,11 +242,8 @@ class UiSyncMixin:
                 tags.append("done")
             # 前景色一列只給一個 —— 同時掛兩個管顏色的標籤，最後誰贏是 Tk 的
             # 內部順序決定的，看起來就會時橘時灰。
-            if any(item["status"] == ledger_mod.MANUAL for item in both):
-                tags.append("manual")
-            elif any(item["status"] in (ledger_mod.UNTRACKED, planner.WEB_MISSING)
-                     for item in both):
-                tags.append("untracked")
+            if any(item.get("missing") for item in both):
+                tags.append("missing")
 
             self.tree.insert(
                 "", "end",
@@ -283,7 +251,7 @@ class UiSyncMixin:
                     " ".join(item["cell"] for item in both),
                     stock_title(both[0]["label"]),
                     texts["qty"], texts["cost"],
-                    group_status(qty, cost), group_note(qty, cost),
+                    group_note(qty, cost),
                 ),
                 tags=tuple(tags),
             )
@@ -295,7 +263,7 @@ class UiSyncMixin:
 
     def _fill_cash(self, name, item):
         """
-        表格底下那一條現金：現金餘額 B8　舊值 → 新值　狀態：…　說明：…
+        表格底下那一條現金：現金餘額 B8　舊值 → 新值　說明：…
 
         一段一段插，負的數字自己上紅字。沒資料就整條清掉 ——
         換到還沒讀過的人時留著上一位的餘額，是這畫面上最危險的一種殘影。
@@ -312,9 +280,6 @@ class UiSyncMixin:
             if not values_match(before, after):
                 segments.append(("　→　", None))
                 segments.append((show(after), _neg_tag(after)))
-
-            segments.append(("　　狀態：", "dim"))
-            segments.append((planner.STATUS_NAMES.get(item["status"], item["status"]), None))
 
             # 「餘額轉負」擺在說明最前面 —— 後面那句「今日淨收付…」每天都在，
             # 由正變負卻是難得一次，排在後面會被當成例行文字滑過去。
@@ -363,11 +328,8 @@ class UiSyncMixin:
         剛按過「修改」還沒落帳的時候寫成「舊 → 新」，跟上面那一條同一個寫法：
         按完卻還顯示舊數字，看起來就像沒按到。
 
-        沒有網頁資料就不給改：新的餘額是「開盤前 + 今日淨收付」，
-        沒有淨收付算不出來，也就沒有東西可以寫回 Excel。
-
-        今天用銀行餘額推算的話，那顆按鈕根本不出現（見 _show_opening_button），
-        但這個數字照樣寫出來 —— 基準每天照樣設，只是今天沒被拿去算餘額。
+        整組（數字＋「修改」）只在用「初始餘額累加」時顯示（見 _show_opening_row）
+        —— 銀行餘額推算的日子每次讀取直接算好寫回 B8，這組今天用不到。
         """
         cash = self.ledger.sheet(name)["cash"] if (self.ledger is not None and name) else None
         opening = ledger_mod.opening_balance(cash) if cash is not None else None
@@ -378,58 +340,29 @@ class UiSyncMixin:
         if item is not None and item["reset_to"] is not None:
             text = f"{text} → {show(round(item['reset_to'] - item['net'], 2))}"
 
-        # 平常寫的是「這個數字打哪來」。它是整條算式裡唯一可能錯的一項，
-        # 而它怎麼來的決定了它什麼時候會錯 —— 講出來，比只擺一個數字有用。
-        # 按鈕按不動（灰的）或不見了的時候換成理由：沒有按鈕又沒有理由，
-        # 看起來就像壞了。
-        reason = ""
-        if self.ledger is None or not name:
-            reason = ""
-        elif item is None:
-            reason = "按「讀取網頁資料」之後才改得動"
-        elif item["blocked"]:
-            # 淨收付本身信不過的時候連基準都不該讓人按（見 planner._cash）：
-            # 拿一個已知是錯的淨收付去算，等於把今天的成交永久算進基準裡。
-            reason = "今日淨收付對不上，這個數字先不要動"
-        elif self.cash_method.get() != planner.METHOD_OPENING:
-            # 這顆按鈕算的是「開盤前 + 今日淨收付」，也就是初始餘額累加那一種的答案。
-            # 現在既然用銀行餘額推算，按下去等於拿另一種算法的數字去蓋 B8 ——
-            # 兩種都是合法金額，蓋錯了畫面上不會有任何徵兆，所以按鈕整顆收起來，
-            # 這句話就是它不見了的說明。
-            reason = f"現在用「{planner.METHOD_NAMES[planner.METHOD_BANK]}」，這個數字不會寫進 B8"
-        else:
-            # 後半句是「什麼時候該按那顆按鈕」的完整答案：那個時間點的 B8 已經
-            # 含了今天的成交（自己盤中改過），才需要按。平常不必管它。
-            reason = "＝ 今天第一次登入時 Excel 的現金餘額"
-
         number = to_num(opening, None)
         self.opening_value.configure(
-            text=text, foreground="#c00000" if number is not None and number < 0 else "")
-        self.opening_hint.configure(text=reason)
+            text=text, foreground=self.colors.danger if number is not None and number < 0 else "")
         self.opening_ready = (self.ledger is not None and item is not None
                               and not item["blocked"]
                               and self.cash_method.get() == planner.METHOD_OPENING)
-        self._show_opening_button(self.cash_method.get() == planner.METHOD_OPENING)
+        self._show_opening_row(self.cash_method.get() == planner.METHOD_OPENING)
         self._sync_buttons()
 
-    def _show_opening_button(self, show_it):
+    def _show_opening_row(self, show_it):
         """
-        用銀行餘額推算的日子，「修改」整顆藏起來，不是留一顆灰的在那裡。
+        用銀行餘額推算的日子，基準數字跟「修改」整組收起來，不占畫面。
 
-        它改的是初始餘額累加那一種的基準，今天既然不用那種算法，擺著只會讓人
-        以為餘額不對的時候該按它 —— 灰掉擋得住按下去，擋不住「這是不是壞了」
-        這個誤會。旁邊那句理由留著：按鈕不見了，更要看得到為什麼。
-
-        數字本身不藏。基準每天照樣設，明天切回初始餘額累加就要用它，
-        看不看得到是兩回事。
+        它們講的是初始餘額累加那一種算法的基準，今天既然不用那種算法，
+        擺著只是佔位置。數字本身不會消失，只是沒顯示：基準每天照樣設，
+        明天切回初始餘額累加就要用它。
         """
-        if show_it == bool(self.opening_button.winfo_manager()):
+        if show_it == bool(self.opening_row.winfo_manager()):
             return
         if show_it:
-            # pack 照呼叫順序排，藏起來再放回去會跑到理由後面 —— 明講位置才回得了原位。
-            self.opening_button.pack(side="left", padx=(12, 0), before=self.opening_hint)
+            self.opening_row.pack(side="left")
         else:
-            self.opening_button.pack_forget()
+            self.opening_row.pack_forget()
 
     def edit_opening(self):
         """
@@ -560,50 +493,8 @@ class UiSyncMixin:
         self.fetch_button.configure(state="normal" if ready else "disabled")
         # 「修改」不看 Excel 開著沒 —— 它改的是紀錄檔裡的基準，要寫 Excel 的時候
         # 寫入那邊自己會把檔案開起來。能不能按只看「這一位有沒有網頁資料」，
-        # 那是 _fill_opening 判的。用銀行餘額推算的日子它整顆被藏起來
-        # （_show_opening_button），這裡照樣設 state —— 藏著的按鈕設得動，
+        # 那是 _fill_opening 判的。用銀行餘額推算的日子整組被藏起來
+        # （_show_opening_row），這裡照樣設 state —— 藏著的按鈕設得動，
         # 放回來的時候就已經是對的狀態了。
         self.opening_button.configure(
             state="normal" if self.opening_ready and not self.busy else "disabled")
-
-    def _auto_adopt(self):
-        """
-        自動模式下，把還沒交給程式的格子直接接管，接管完重新算一次提案。
-
-        登入時的初始化（見 _initialize）已經把 Excel 上有的東西都收下來了，
-        這裡是補網：登入之後才新增的列、登入當下沒讀到的分頁、以及使用者中途
-        手改過的格子。規則跟初始化同一條 —— Excel 上的現值就是新的起點。
-
-        現金的基準一天只設一次。今天已經設過（很可能也已經寫進 B8 了），再設一次
-        會讓今天的淨收付被加第二次，所以今天設過的就跳過。
-        """
-        if self.ledger is None:
-            return
-
-        at = datetime.datetime.now().isoformat(timespec="seconds")
-        today = self.today.isoformat()
-        events = []
-
-        for name, items in self.proposals.items():
-            # 接管是「拿 Excel 現值當新起點」，只能對這一輪剛讀過的那幾位做：
-            # 別人手上的現值是上一輪讀的，中間有可能已經被人改過。
-            if name not in self.round_scope:
-                continue
-            book = self.ledger.sheet(name)
-            for item in items:
-                if item["kind"] == "cash" and book["cash"].get("baseline_date") == today:
-                    continue
-                # 狀態不是「未接管／手動」的話 adopt_one 自己會跳過，這裡不必再判一次。
-                _message, event, _needs = planner.adopt_one(
-                    item, book, name, self.today, False, at)
-                if event:
-                    events.append(event)
-
-        if not events:
-            return
-
-        self.ledger.save()
-        self.ledger.append_history(events)
-        self.replan()
-        self.refresh_history()
-        self._say(f"已接管 {len(events)} 格。")

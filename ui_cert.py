@@ -31,7 +31,7 @@ class UiCertMixin:
         if self.profile_busy:
             return
 
-        raw = self.profile_name.get().strip() or profile_tools.DEFAULT_NAME
+        raw = self.profile_name.get().strip()
         path = profile_tools.resolve_path(raw)
         if path is None:
             messagebox.showerror("名稱不能是空的", "請輸入 Profile 名稱。", parent=self.root)
@@ -48,13 +48,6 @@ class UiCertMixin:
                 messagebox.showerror(
                     "資料夾正在使用中",
                     f"這個資料夾正被 Chrome 開著，請先把它關掉再試一次：\n{path}", parent=self.root)
-                return
-            if profile_tools.has_cert(path) and not messagebox.askyesno(
-                "資料夾裡已經有憑證",
-                f"這個資料夾裡有 tbbstock 的數位憑證：\n{path}\n\n"
-                "刪掉重建的話，那張憑證就沒了，之後要重新申請一次。\n確定要刪除重建嗎？",
-                icon="warning", default="no", parent=self.root,
-            ):
                 return
             try:
                 profile_tools.delete_profile(path)
@@ -129,7 +122,6 @@ class UiCertMixin:
             item = self.migrate_tree.insert(
                 "", "end",
                 values=(candidate["browser"], candidate["name"], "有", str(candidate["path"])),
-                tags=("found",),
             )
             self._migrate_candidates[item] = candidate
 

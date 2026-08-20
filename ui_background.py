@@ -467,7 +467,7 @@ class UiBackgroundMixin:
 
     def _initialize(self, records):
         """
-        登入成功的當下，把 Excel 上的股數、成本、現金餘額收成程式的起點。
+        登入成功的當下，把 Excel 上的現金餘額收成今日基準。
         回傳收了幾格，狀態列要報這個數字。
 
         敢一句話都不問，是因為時間點：登入完成、還沒讀網頁資料之前，Excel 上的
@@ -475,10 +475,9 @@ class UiBackgroundMixin:
         所以現金基準直接取 B8、今天的流水先記 0，等「讀取網頁資料」再往上加。
         「B8 含不含今天的淨收付」這個最容易答錯的問題，在這個時間點根本不存在。
 
-        判斷全在 planner.initialize()：一天只設一次現金基準、已經是自動的格子
-        不再重收，都在那裡，介面不另外複製一份規則。這裡只負責挑出「這一組登入
-        成功、而且 Excel 那一頁也真的讀到了」的分頁 —— 登入失敗或找不到分頁的
-        一律跳過，沒讀到的東西不能拿來當起點。
+        判斷全在 planner.initialize()：一天只設一次現金基準，介面不另外複製一份
+        規則。這裡只負責挑出「這一組登入成功、而且 Excel 那一頁也真的讀到了」的
+        分頁 —— 登入失敗或找不到分頁的一律跳過，沒讀到的東西不能拿來當起點。
         """
         if self.ledger is None:
             return 0
@@ -550,7 +549,7 @@ class UiBackgroundMixin:
             self.read_at[name] = now
             fresh.append(name)
 
-        # 這一輪只准碰這幾位。寫入、落帳、接管全部照它 —— 別人手上那份是舊資料，
+        # 這一輪只准碰這幾位。寫入、落帳全部照它 —— 別人手上那份是舊資料，
         # 拿舊資料去寫 Excel 是「一次只更新一位」最貴的一種錯。
         self.round_scope = set(fresh)
         self.sheet_data.update(payload["sheets"])
@@ -584,13 +583,11 @@ class UiBackgroundMixin:
 
         # 讀完直接接著寫，中間不再問一次。按「讀取網頁資料」本身就是意願的表達，
         # 再跳一個確認只是重複問同一件事。
-        self._auto_adopt()
         writes, total = self._collect_writes()
         if total:
             self._begin_write(writes, total)
         else:
-            # 一格都不必寫，不代表沒事發生：剛接管的格子、剛偵測到的人工改動、
-            # 今天的淨收付，都是在這條路上落帳的。
+            # 一格都不必寫，不代表沒事發生：今天的淨收付，是在這條路上落帳的。
             recorded = self._commit_round()
             self.replan()
             self.refresh_history()
@@ -607,8 +604,8 @@ class UiBackgroundMixin:
 
     def _commit_round(self):
         """
-        把這一輪的結果落實到紀錄檔：程式寫過的格子、偵測到的人工改動、現金的
-        基準與流水。回傳追加了幾筆歷程。
+        把這一輪的結果落實到紀錄檔：程式寫過的格子、現金的基準與流水。
+        回傳追加了幾筆歷程。
 
         寫入成功之後一定要跑，而且只能在成功之後（見 _on_written）。但「一格都
         不必寫」的時候也一樣要跑 —— 那一輪照樣可能有話要記，最重要的一種是
@@ -643,7 +640,7 @@ class UiBackgroundMixin:
             return
 
         # 紀錄檔一定在 Excel 寫成功之後才更新。順序反過來的話，寫入失敗會留下
-        # 一份「以為自己寫過了」的帳本，之後每次比對都判定成人工改動。
+        # 一份「以為自己寫過了」的帳本，現金基準會跟 Excel 上實際的數字對不起來。
         self._commit_round()
 
         # Excel 已經被改過了，手上的現值是舊的，重新讀一次才會準。
@@ -705,7 +702,7 @@ class UiBackgroundMixin:
         self.excel_button.configure(state="disabled" if busy else "normal")
         self._sync_clear_button()
         if busy:
-            self.progress.pack(fill="x", padx=12, pady=(4, 0), before=self.tabs)
+            self.progress.pack(side="right", padx=(8, 12), pady=6)
             self.progress.start(12)
             self._say(message)
         else:
@@ -736,9 +733,9 @@ class UiBackgroundMixin:
         由使用者親手把檔開起來，程式接上他那個視窗：看得見、讀到的是畫面上的
         即時內容、寫完他也馬上看得到。沒開起來就不給登入，把問題擋在最前面。
 
-        紀錄檔（現金基準、每格自動／手動）是跟著檔名走的，所以換一份檔等於換掉
-        整個狀態來源 —— 手上這批網頁資料與提案全是上一份檔算出來的，一律清掉
-        重來，不能讓 A 檔的提案留在畫面上等著寫進 B 檔。
+        紀錄檔（現金基準）是跟著檔名走的，所以換一份檔等於換掉整個狀態來源
+        —— 手上這批網頁資料與提案全是上一份檔算出來的，一律清掉重來，
+        不能讓 A 檔的提案留在畫面上等著寫進 B 檔。
         """
         if self.busy:
             return
@@ -801,7 +798,8 @@ class UiBackgroundMixin:
         self.fill_sync_tree()
         self.refresh_history()
         if not ledger.existed:
-            self._say(f"已換成 {path.name}（這份檔還沒有紀錄檔，所有格子都要重新接管）")
+            self._say(f"已換成 {path.name}（這份檔還沒有紀錄檔，下次登入會以 Excel "
+                      f"現在的數字設定今日現金基準）")
         self._open_in_excel(path)
 
     def _open_in_excel(self, path, tries=0):
@@ -894,28 +892,56 @@ class UiBackgroundMixin:
     def _refresh_method_label(self):
         """
         現金餘額那一行左邊的「現金算法」：要不要顯示，以及顯示哪一個。
-        順便決定右邊那顆「修改」在不在（見 _show_opening_button）。
+        順便決定右邊那組基準數字＋「修改」在不在（見 _show_opening_row）。
 
         這次執行還沒問過就不顯示。算法是這次程式開起來、第一次按「讀取網頁資料」時
         跳視窗問的，在那之前畫面上寫一個名字，看起來就像已經選好了 —— 而那時候顯示的
         其實是上次沿用下來的預設值。問過之後才寫，寫的就是這次的答案。
 
-        「修改」跟這個名字相反，還沒問過也要照沿用下來的算法決定 —— 名字可以先不講
-        （那只是還沒有答案），但一顆按下去會蓋掉 B8 的按鈕不能等到問完才收起來。
+        基準數字＋「修改」跟這個名字相反，還沒問過也要照沿用下來的算法決定 ——
+        名字可以先不講（那只是還沒有答案），但一組按下去會蓋掉 B8 的東西不能
+        等到問完才收起來。
         """
-        self._show_opening_button(self.cash_method.get() == planner.METHOD_OPENING)
         asked = self.path in self.cash_method_asked
         if not asked:
             self.method_box.pack_forget()
+        else:
+            self.method_value.configure(text=planner.METHOD_NAMES[self.cash_method.get()])
+            # before 指定的對象要「當下」還在畫面上才有效——opening_row 可能在
+            # 上一輪被 _show_opening_row 藏起來了，這裡先確保它在，pack 完
+            # method_box 之後才輪到下面那行去決定它最終該不該露臉。
+            if not self.opening_row.winfo_manager():
+                self.opening_row.pack(side="left")
+            # before：pack 是照呼叫順序排的，藏起來再放回去會跑到最右邊，
+            # 明講它要在「今日初始現金餘額」那一組前面才回得到原位。
+            self.method_box.pack(side="left", padx=(0, 18), before=self.opening_row)
+        self._show_opening_row(self.cash_method.get() == planner.METHOD_OPENING)
+
+    def _toggle_cash_method(self):
+        """
+        點一下「現金算法」那個名字：換成另一種。只有已經問過、名字露臉之後才點得到。
+
+        先跳一個確認視窗 —— 這顆管全部 20 位、換錯會直接蓋掉現金那一格的算法，
+        誤觸的代價比多一次點擊高。預設答案是「取消」，跟 ui_history 清除歷程
+        那顆同一個規矩：有風險的操作，手滑按下 Enter 也不該真的動到。
+        """
+        other = (planner.METHOD_OPENING if self.cash_method.get() == planner.METHOD_BANK
+                  else planner.METHOD_BANK)
+        if not messagebox.askyesno(
+                "切換現金算法",
+                f"現金算法要從「{planner.METHOD_NAMES[self.cash_method.get()]}」"
+                f"換成「{planner.METHOD_NAMES[other]}」嗎？\n\n"
+                "這是全部帳號共用的一個開關，換了立刻重算，20 位一起改。\n"
+                f"全額交割當天要留在「{planner.METHOD_NAMES[planner.METHOD_OPENING]}」"
+                f"（「{planner.METHOD_NAMES[planner.METHOD_BANK]}」那天會扣兩次）。",
+                icon="warning", default="no", parent=self.root):
             return
-        self.method_value.configure(text=planner.METHOD_NAMES[self.cash_method.get()])
-        # before：pack 是照呼叫順序排的，藏起來再放回去會跑到最右邊，
-        # 明講它要在「今日初始現金餘額」前面才回得到原位。
-        self.method_box.pack(side="left", padx=(0, 18), before=self.opening_label)
+        self._set_method(other, asked=True)
 
     def _set_method(self, method, asked=False):
         """
-        換現金算法：記進紀錄檔、重算、重畫。asked=True 代表這次是那個對話框問來的。
+        換現金算法：記進紀錄檔、重算、重畫。asked=True 代表這次是使用者自己選的
+        （對話框的「確定」或工具列點一下切換都算），不必等下次讀取再跳一次視窗問。
 
         「這次問過了」跟「選了哪一個」分開記：問過了只存在記憶體，是為了不要這次執行
         期間跳第二次；選了哪一個要寫進紀錄檔跨天沿用（下次開程式、第一次讀取時

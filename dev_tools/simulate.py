@@ -363,6 +363,11 @@ def initial_cash(name):
     return 0
 
 
+def bank_balance(name):
+    """假帳號的銀行餘額。用現金餘額當預設值，理由見 render_html 裡的註解。"""
+    return (FIXED_ACCOUNTS.get(name) or {}).get("cash", 0)
+
+
 def tick_size(price):
     """台股的最小跳動單位。假資料也照這個規則，畫面上才不會出現 63.4271 這種價位。"""
     if price < 10:
@@ -461,6 +466,13 @@ def render_html(account, data):
         "cseq": account["cust_id"],
         "code": account_code(account),
         "cash": initial_cash(account["name"]),
+        # 銀行餘額的預設值刻意等於這個帳號的現金餘額：兩種算法算出來就會一樣，
+        # 畫面上不會平白冒出差額。要測「兩種算法對不上」的情境，就改這一格，
+        # 或把某一筆成交改成「已交割」。
+        "bank": bank_balance(account["name"]),
+        # 真的那個是 71017108640（含客戶號 0108640），fetch.bank_problem 會拿
+        # 客戶號去比對，所以假的也要含著它，否則模擬帳號會全部被擋下來。
+        "bnkacc": "7101" + account["cust_id"],
     }
 
     rows = "\n".join(
@@ -513,8 +525,21 @@ def render_html(account, data):
   <h1>{meta['name']}</h1>
   <div class="meta">帳號代碼 {meta['code']}
     起始現金（Excel B8）{meta['cash']:,}
-    日期 <span id="today"></span></div>
+    日期 <span id="today"></span>
+    交割日 <span id="settle"></span></div>
 </header>
+
+<section>
+  <h2>銀行餘額</h2>
+  <div>銀行帳號 {meta['bnkacc']}　餘額（元）
+    <input id="bank" class="num" value="{meta['bank']}"></div>
+  <div class="hint">
+    現金餘額的第二種算法用的就是這個數字：<b>銀行餘額 + 還沒交割的成交淨收付</b>。<br>
+    預設值等於這個帳號的現金餘額，所以兩種算法會算出一樣的結果。
+    要測「兩種對不上」（真實情境是全額交割），就改這一格，
+    或把下面某一筆成交改成「已交割」。
+  </div>
+</section>
 
 <section>
   <h2>未實現損益</h2>
@@ -533,7 +558,7 @@ def render_html(account, data):
 <section>
   <h2>當日淨收付</h2>
   <table id="mat"><thead><tr>
-    <th>代號</th><th>買賣</th><th>股數</th><th>單價</th>
+    <th>代號</th><th>買賣</th><th>股數</th><th>單價</th><th>交割</th>
     <th>價金</th><th>手續費</th><th>交易稅</th><th>淨收付</th><th></th>
   </tr></thead><tbody></tbody></table>
   <div class="total">淨收付合計：<span id="net">0</span></div>
@@ -557,6 +582,21 @@ const STAMP = today.getFullYear() +
     String(today.getMonth() + 1).padStart(2, '0') +
     String(today.getDate()).padStart(2, '0');
 document.getElementById('today').textContent = STAMP;
+
+// 交割日：往後兩個交易日（碰到週末再往後挪）。真的網站是 T+2，
+// 假頁面也照著給，方法二那條「cdate 比今天晚才要補」才測得到。
+function stampOf(d) {{
+  return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') +
+      String(d.getDate()).padStart(2, '0');
+}}
+const settleDay = new Date(today);
+for (let left = 2; left > 0; ) {{
+  settleDay.setDate(settleDay.getDate() + 1);
+  const week = settleDay.getDay();
+  if (week !== 0 && week !== 6) left -= 1;
+}}
+const SETTLE = stampOf(settleDay);
+document.getElementById('settle').textContent = SETTLE;
 
 function tickUnit(p) {{
   if (p < 10) return 0.01;
@@ -595,9 +635,12 @@ function tradeRow(trade) {{
     '<td><select class="bs"><option value="B">買</option><option value="S">賣</option></select></td>' +
     '<td><input class="tqty num" value="' + trade.qty + '"></td>' +
     '<td><input class="tprice num" value="' + trade.price + '"></td>' +
+    '<td><select class="settled">' +
+      '<option value="0">未交割</option><option value="1">已交割</option></select></td>' +
     '<td class="priceqty"></td><td class="fee"></td><td class="tax"></td><td class="payn"></td>' +
     '<td><button class="del">刪除</button></td>';
   tr.querySelector('.bs').value = trade.bs;
+  tr.querySelector('.settled').value = trade.settled ? '1' : '0';
   tr.querySelector('.del').addEventListener('click', () => {{ tr.remove(); refresh(); }});
   document.querySelector('#mat tbody').appendChild(tr);
 }}
@@ -610,6 +653,7 @@ function trades() {{
       bs: tr.querySelector('.bs').value,
       qty: num(tr.querySelector('.tqty')),
       price: num(tr.querySelector('.tprice')),
+      settled: tr.querySelector('.settled').value === '1',
     }};
     const amount = Math.round(trade.qty * trade.price);
     trade.priceqty = amount;
@@ -626,7 +670,9 @@ function detailOf(t, index) {{
   return {{
     tagName: 'stkdat', bhno: META.bhno, cseq: META.cseq,
     stkno: t.code, stkna: t.name, trade: '0', bs: t.bs,
-    tdate: STAMP, cdate: STAMP,
+    // 交割日是方法二的關鍵：cdate 比今天晚才代表這筆錢還沒離開銀行帳戶。
+    // 真的網站是 T+2，這裡照樣往後推兩個交易日（遇到週末再往後挪）。
+    tdate: STAMP, cdate: t.settled ? STAMP : SETTLE,
     qty: String(t.qty), price: String(t.price), priceqty: String(t.priceqty),
     fee: String(t.fee), tax: String(t.tax), payn: String(t.payn),
     ordno: 'S' + String(index + 1).padStart(4, '0'),
@@ -654,15 +700,30 @@ function build() {{
   const settle = list.map((t, i) => ({{
     tagName: 'matsum', bhno: META.bhno, cseq: META.cseq,
     stkno: t.code, stkna: t.name, trade: '0', bs: t.bs, stype: 'H',
-    tdate: STAMP, cdate: STAMP,
+    tdate: STAMP, cdate: t.settled ? STAMP : SETTLE,
     qty: String(t.qty), priceavg: String(t.price), priceqty: String(t.priceqty),
     matdat: [Object.assign(detailOf(t, i), {{ tagName: 'matdat' }})],
   }}));
 
   const ok = {{ retcode: '000000', retmsg: '' }};
+  // Amount 的單位是分（真的回應長這樣：0000000089300 = 893.00），
+  // 假的也要照給，不然模擬跑得過、真帳號一上線就差 100 倍。
+  // 負數要把負號留在最前面，不能連負號一起補零（補成 000-793672200 就沒有人讀得懂了）。
+  // 真的網站會不會出現負的銀行餘額沒有人看過，這裡照「負號 + 補零」給，
+  // 至少讀得回來；真的遇到再照實際格式改。
+  const raw = Math.round(num(document.getElementById('bank')) * 100);
+  const cents = (raw < 0 ? '-' : '') + String(Math.abs(raw)).padStart(13, '0');
   return {{
     '未實現損益': Object.assign({{ arrays: pnl }}, ok),
     '當日淨收付': Object.assign({{ arrays: settle }}, ok),
+    // 近期淨收付在真的網站上是一段日期區間，模擬頁只有「今天」這一批成交，
+    // 所以內容跟當日一樣 —— 差別在每一筆的 cdate，那才是方法二要看的東西。
+    '近期淨收付': Object.assign({{ arrays: settle }}, ok),
+    '銀行餘額': Object.assign({{ data: [{{
+      qry_date: STAMP, qry_times: '090000',
+      bnkno: '050', bnkacc: META.bnkacc,
+      Amount: cents,
+    }}] }}, ok),
   }};
 }}
 
