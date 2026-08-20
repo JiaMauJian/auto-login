@@ -1,0 +1,960 @@
+"""
+背景工作：瀏覽器執行緒的生命週期、登入／讀取／寫入、Excel 開啟狀態輪詢、
+現金算法的問答。全部丟到背景執行緒的東西都在這裡協調。
+"""
+
+import datetime
+import os
+import queue
+import threading
+import traceback
+from pathlib import Path
+from tkinter import filedialog, messagebox
+
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import sync_playwright
+
+import excel_io
+import ledger as ledger_mod
+import planner
+import fetch as fetch_mod
+from fetch import collect, login_only
+from login import app_dir, configure_browsers_path, open_context
+from ui_common import ask_cash_method
+
+# 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
+STEP_NAMES = {"logged_in": "登入", "fetched": "讀取網頁資料", "written": "寫入"}
+
+# 瀏覽器起不來時，錯誤視窗最上面那段人話。traceback 講的是 Playwright 的內部狀況，
+# 對使用者沒有意義，真正能動手的只有下面這兩件事。
+BROWSER_HINT = (
+    "瀏覽器沒能開起來，所以這次的動作沒有做。常見的原因有兩個：\n"
+    "・這台電腦上找不到指定的瀏覽器（.env 的 BROWSER_CHANNEL 指到沒裝的版本），"
+    "或 Playwright 的 Chromium 還沒下載完\n"
+    "・USER_DATA_DIR 那個資料夾正被另一個 Chrome 視窗開著 —— 同一個資料夾不能同時"
+    "給兩個 Chrome 用，請把 Chrome 全部關掉再按一次"
+)
+
+
+def _browser_alive(context):
+    """瀏覽器是不是還開著（使用者有沒有自己把它關掉）。"""
+    try:
+        return any(not pg.is_closed() for pg in context.pages)
+    except PlaywrightError:
+        return False
+
+
+def _read_excel_after_fetch(records, path):
+    """背景執行緒用：登入抓完網頁資料後，順便把 Excel 現值讀出來。只回傳純資料，不回傳任何 COM 物件。"""
+    import pythoncom
+
+    excel = workbook = None
+    pythoncom.CoInitialize()
+    try:
+        excel, workbook, attached = excel_io.open_workbook(path, False)
+        try:
+            sheets, sheet_errors = {}, {}
+            for record in records:
+                name = record.get("sheet_name")
+                if not name or record["problems"]:
+                    continue
+                sheet, error = excel_io.find_sheet(workbook, name)
+                if sheet is None:
+                    sheet_errors[name] = error
+                else:
+                    sheets[name] = excel_io.read_sheet(sheet)
+        finally:
+            excel_io.close_workbook(excel, workbook, attached)
+    finally:
+        # COM 參考要在 CoUninitialize 之前放掉。反過來的話，物件會在
+        # 「已經沒有 COM 的執行緒」上被回收，那是未定義行為。
+        sheet = excel = workbook = None
+        pythoncom.CoUninitialize()
+
+    return {"records": records, "sheets": sheets, "sheet_errors": sheet_errors, "attached": attached}
+
+
+def _error_text(payload):
+    """錯誤視窗的內容。看得懂的說明放最上面，原始 traceback 留在下面備查。"""
+    detail = payload["error"][-1500:]
+    hint = payload.get("hint")
+    return f"{hint}\n\n────────────────\n{detail}" if hint else detail
+
+
+class UiBackgroundMixin:
+    # ---------- 背景工作 ----------
+
+    def _selected_accounts(self):
+        choice = self.account_choice.current()
+        numbered = list(enumerate(self.accounts, start=1))
+        return numbered if choice <= 0 else [numbered[choice - 1]]
+
+    def _account_choices(self):
+        """範圍選單上的每一列。名字知道了就寫名字 —— 20 組時光看「第 7 組」不知道是誰。"""
+        choices = ["全部"]
+        for i, account in enumerate(self.accounts, start=1):
+            name = self.trader_of.get(i)
+            label = f"第 {i} 組"
+            if name:
+                label += f"　{name}" + ("（模擬）" if account.get("fake") else "")
+            choices.append(label)
+        return choices
+
+    def _refresh_account_choices(self):
+        """登入或讀取之後名字才知道，選單上那幾列要跟著補上去。選中的那一列不動。"""
+        keep = max(self.account_choice.current(), 0)
+        self.account_choice.configure(values=self._account_choices())
+        self.account_choice.current(keep)
+        self._refresh_fetch_button()
+
+    def _scope_order(self):
+        """這次要做第幾組；None 代表全部。"""
+        choice = self.account_choice.current()
+        return choice if choice > 0 else None
+
+    def _scope_name(self):
+        """這次要做的是哪一位交易人；全部、或名字還不知道時是 None。"""
+        order = self._scope_order()
+        return None if order is None else self.trader_of.get(order)
+
+    def _refresh_fetch_button(self):
+        """
+        按鈕上的字就是「按下去會動到誰」。
+
+        名字還不知道（那一組沒登入過）時寫「第 3 組」而不是硬掰一個名字：
+        這種時候按下去確實只做那一組，只是程式還說不出他是誰。
+        """
+        order = self._scope_order()
+        if order is None:
+            text = "讀取網頁資料"
+        else:
+            name = self.trader_of.get(order)
+            text = f"更新（{name}）" if name else f"讀取網頁資料（第 {order} 組）"
+        self.fetch_button.configure(text=text)
+
+    def _on_scope_changed(self, _event=None):
+        """上面換了範圍，左邊名單也跳到那一位 —— 兩邊是同一個選擇的兩個入口。"""
+        self._refresh_fetch_button()
+        name = self._scope_name()
+        if name and name != self.current_sheet and name in self._shown():
+            self.current_sheet = name
+            self.people.selection_set(name)
+            self.people.see(name)
+            self._fill_detail()
+
+    def _sync_scope_to_person(self):
+        """
+        左邊名單換人，上面的範圍跟著換成他。
+
+        對不到帳號時範圍不動（名單是網頁資料長出來的，正常情況一定對得到）
+        —— 硬把範圍留在別人身上也不會說謊，按鈕上寫的一直是範圍裡的那個人。
+        """
+        order = next((i for i, name in self.trader_of.items() if name == self.current_sheet), None)
+        if order is not None and order <= len(self.accounts):
+            if self.account_choice.current() != order:
+                self.account_choice.current(order)
+        self._refresh_fetch_button()
+
+    def _ensure_browser_thread(self):
+        if self.browser_thread is None or not self.browser_thread.is_alive():
+            self.browser_thread = threading.Thread(target=self._browser_worker, daemon=True)
+            self.browser_thread.start()
+
+    def start_login(self):
+        if self.busy or not self._require_excel():
+            return
+        if not self.accounts:
+            messagebox.showerror("沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
+            return
+        if self.ledger_error:
+            messagebox.showerror("紀錄檔有問題", self.ledger_error)
+            return
+
+        self._ensure_browser_thread()
+        self._set_busy(True, "登入中，瀏覽器會自己開起來，請不要關掉它…")
+        self.browser_waiting += 1
+        self.browser_cmd_queue.put(("login", (self._selected_accounts(), self.path)))
+
+    def start_fetch(self):
+        if self.busy or not self._require_excel():
+            return
+        if not self.accounts:
+            messagebox.showerror("沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
+            return
+        if self.ledger_error:
+            messagebox.showerror("紀錄檔有問題", self.ledger_error)
+            return
+
+        # 這一輪要做的是誰，按下去的當下就記起來：等結果回來的這幾十秒裡，
+        # 使用者隨時可能在左邊名單上點別人（範圍會跟著換），報告卻是在講剛才那一輪。
+        # 先問今天用哪一種算法（每天第一次），因為它決定這一輪要不要多查銀行餘額。
+        self.today = datetime.date.today()
+        self._maybe_ask_cash_method()
+
+        who = self.round_target = self._scope_name()
+        self._ensure_browser_thread()
+        self._set_busy(True, f"讀取{f'（{who}）' if who else ''}中，"
+                             f"還沒登入的話瀏覽器會自己開起來，請不要關掉它…")
+        self.browser_waiting += 1
+        self.browser_cmd_queue.put((
+            "fetch",
+            (self._selected_accounts(), self.path,
+             self.cash_method.get() == planner.METHOD_BANK),
+        ))
+
+    def _browser_worker(self):
+        """
+        背景：整個瀏覽器 session 的生命週期都在這個執行緒裡，一直活到使用者自己把
+        瀏覽器關掉，或整個介面關閉為止。
+
+        每組帳號的分頁與 cookie 都收在這個執行緒手上的 store 裡（見 fetch.new_store）
+        —— 「只更新某一位」能不重登就查得到資料，靠的就是它活得跟瀏覽器一樣久。
+
+        不能每次按鈕都開新執行緒各開各的瀏覽器 —— Playwright 的同步 API 底層用
+        greenlet 綁死建立它的那個執行緒，換一個執行緒去操作同一個 context 會直接
+        壞掉（cannot switch to a different thread）。所以瀏覽器只能養在「一個專屬、
+        活得夠久」的執行緒裡，「登入」「讀取網頁資料」都只是丟一個指令進 queue
+        給它處理，差別只在要不要順便查資料、更新 Excel。
+
+        每一個指令都一定要回一則結果，這個執行緒也一定不能因為某次失敗就結束。
+        主執行緒是收到那則結果才解除「登入中…」的 —— 不回話等於介面永遠卡在那裡，
+        登入與讀取兩顆按鈕都是灰的，使用者只能關掉重開。所以 Playwright 改用
+        start() 而不是 with：連「它自己起不來」（瀏覽器沒裝好、profile 正被另一個
+        Chrome 佔著）都要變成一則看得到的「登入失敗」，而不是一個在背景執行緒裡
+        炸掉、誰也看不到的例外。裝好瀏覽器之後再按一次就會重試，不必重開程式。
+
+        登入與讀取只差在呼叫哪一個函式、回話時說自己是哪一種，所以走同一段程式碼
+        —— 錯誤處理只有一份，不會有「登入那條路修好了、讀取那條還留著舊寫法」。
+        """
+        playwright = context = browser = None
+        # 每組帳號的分頁、cookie、身分，還有「現在瀏覽器帶著誰的 cookie」。
+        # 「一次只更新一位」全靠它：換人時把那一組登入時收下來的 cookie 換回去，
+        # 不必重登（見 fetch.new_store）。跟著瀏覽器一起生、一起死。
+        store = fetch_mod.new_store()
+
+        def ensure_browser():
+            nonlocal playwright, context, browser, store
+            if playwright is None:
+                # 瀏覽器的位置要在 driver 起來之前決定好，它是靠環境變數傳下去的。
+                configure_browsers_path()
+                playwright = sync_playwright().start()
+            if context is not None and not _browser_alive(context):
+                context = browser = None      # 使用者自己把它關掉了，重開一個
+            if context is None:
+                context, browser = open_context(playwright)
+                store = fetch_mod.new_store()
+
+        # 指令 -> (要呼叫誰, 回話時說自己是哪一種)
+        jobs = {"login": (login_only, "logged_in"), "fetch": (collect, "fetched")}
+
+        try:
+            while True:
+                cmd, arg = self.browser_cmd_queue.get()
+                if cmd == "stop":
+                    break
+
+                fetch_records, kind = jobs[cmd]
+                # 「讀取」那條路多帶一個 need_bank（這次要不要查銀行餘額，見
+                # fetch.collect）；「登入」沒有這個東西，所以用 *extra 收。
+                selected, path, *extra = arg
+                try:
+                    ensure_browser()
+                    # 登入完也順便把 Excel 現值讀出來，主執行緒要拿它當程式的起點。
+                    records = fetch_records(context, selected, store, *extra)
+                    payload = _read_excel_after_fetch(records, path)
+                except Exception as exc:
+                    payload = {"error": traceback.format_exc()}
+                    if excel_io.is_dead_object(exc):
+                        payload["hint"] = excel_io.DEAD_EXCEL_HINT
+                    elif context is None:
+                        # 連瀏覽器都還沒開起來就失敗，那是這台電腦的環境問題，
+                        # 不是網站或帳號的問題，講清楚才不會有人去重打密碼。
+                        payload["hint"] = BROWSER_HINT
+                self.queue.put((kind, payload))
+        finally:
+            try:
+                if context is not None:
+                    context.close()
+                if browser is not None:
+                    browser.close()
+                if playwright is not None:
+                    playwright.stop()
+            # 收尾失敗沒有任何補救的餘地，而這裡通常是「介面正在關閉」——
+            # 為了關不乾淨的瀏覽器再丟一個例外出去只會蓋掉真正的死因。
+            except Exception:
+                pass
+
+    def _collect_writes(self):
+        """
+        把提案整理成「分頁 -> 要寫哪幾格」。
+
+        要寫哪幾格完全由 planner 的 will_write 決定，介面不再插手。以前介面會把
+        沒勾的就地改成不寫，那是紀錄檔跟 Excel 對不起來的唯一破口 —— 現在沒有
+        這條路了，寫進 Excel 的跟記進紀錄檔的必定是同一批。
+
+        只收 round_scope 裡那幾位。名單上其他人可能也有「要寫」的格子，但那是
+        用上一輪的網頁資料算出來的 —— 按「更新（王小明）」只會去查王小明，
+        這時候順手把別人那幾格也寫進去，寫的是舊資料，而且沒有人要求過。
+        """
+        writes, total = {}, 0
+        for name, items in self.proposals.items():
+            if name not in self.round_scope:
+                continue
+            cells = [(item["row"], item["col"], item["proposed"])
+                     for item in items if item["will_write"]]
+            if cells:
+                writes[name] = cells
+                total += len(cells)
+        return writes, total
+
+    def _begin_write(self, writes, total):
+        self.write_count = total
+        self._set_busy(True, f"寫入 {total} 格…")
+        threading.Thread(target=self._write_worker, args=(self.path, writes), daemon=True).start()
+
+    def _write_worker(self, path, writes):
+        import pythoncom
+
+        payload = {}
+        excel = workbook = sheet = None
+        pythoncom.CoInitialize()
+        try:
+            # 備份在開 Excel 之前做：這時候檔案還沒有人開著，複製到的一定是
+            # 乾淨的內容；而且萬一後面整段失敗，備份已經先拿到手了。
+            saved = excel_io.backup(path)
+
+            excel, workbook, attached = excel_io.open_workbook(path, True)
+            try:
+                for name, cells in writes.items():
+                    sheet, error = excel_io.find_sheet(workbook, name)
+                    if sheet is None:
+                        raise RuntimeError(error)
+                    excel_io.write_cells(sheet, cells)
+                # 一律存檔，接上使用者開著的 Excel 時也一樣。
+                #
+                # 原本接上時刻意不存、留給人自己按 Ctrl+S 當作多一道確認，但那道
+                # 確認換來的是一個更糟的破口：紀錄檔在寫入「成功」之後就記成寫過了，
+                # 人只要沒按 Ctrl+S（或關檔時選「不要儲存」），帳本就跟檔案分家，
+                # 而且畫面上不會有任何徵兆。反悔的路已經有更好的一條 —— 寫入前
+                # 一定會備份。
+                workbook.Save()
+            finally:
+                excel_io.close_workbook(excel, workbook, attached)
+            payload = {"backup": str(saved), "attached": attached}
+        except Exception as exc:
+            payload = {"error": traceback.format_exc()}
+            if excel_io.is_dead_object(exc):
+                payload["hint"] = excel_io.DEAD_EXCEL_HINT
+        finally:
+            sheet = excel = workbook = None
+            pythoncom.CoUninitialize()
+
+        self.queue.put(("written", payload))
+
+    def _drain(self):
+        """
+        主執行緒每 120ms 看一次背景有沒有結果。widget 只在這裡被碰。
+
+        每一筆各自包一層 try，而且「排下一次」放在 finally 裡。這個迴圈是背景與
+        畫面之間唯一的通道：處理某一筆時丟出例外的話，Tk 只會把 traceback 印在
+        console（打包成 exe 之後連 console 都沒有），然後最後那行排程就跳過了 ——
+        取件迴圈從此停擺，之後每一次登入、讀取、寫入都會停在「進行中…」，
+        而背景其實早就做完、結果就躺在 queue 裡沒有人取。與其這樣，寧可把出錯的
+        那一筆報成失敗，讓迴圈活下去。
+        """
+        handlers = {"logged_in": self._on_logged_in, "fetched": self._on_fetched,
+                    "written": self._on_written}
+        try:
+            while True:
+                kind, payload = self.queue.get_nowait()
+                try:
+                    handlers[kind](payload)
+                except Exception:
+                    self._on_handler_error(kind)
+        except queue.Empty:
+            pass
+        finally:
+            self._check_browser_thread()
+            self.root.after(120, self._drain)
+
+    def _on_handler_error(self, kind):
+        """
+        收到背景結果之後，自己在處理時出錯（多半是程式的臭蟲）。
+
+        一定要解除 busy：出錯的是「收尾」那一步，使用者按下的那顆按鈕還在等回音，
+        不解除的話兩顆按鈕會一直是灰的，跟當掉沒有兩樣。
+
+        也一定要說出來。這種錯發生在「已經做了一半」的時候 —— 網頁資料讀完了、
+        Excel 可能也寫過了 —— 所以除了 traceback，還要請人去對一下歷程，
+        那是唯一能看出實際做了什麼的地方。
+        """
+        detail = traceback.format_exc()
+        step = STEP_NAMES.get(kind, kind)
+        self._set_busy(False)
+        self._say(f"「{step}」的後續處理出錯")
+        messagebox.showerror(
+            "程式出錯",
+            f"「{step}」的結果處理到一半出錯，這一批沒有做完。\n"
+            f"Excel 與紀錄檔可能只完成了一部分，請切到「歷程」看實際做了哪幾格。\n\n"
+            f"────────────────\n{detail[-1500:]}")
+
+    def _check_browser_thread(self):
+        """
+        還在等背景回話、負責瀏覽器的那個執行緒卻已經不在了，就自己收尾。
+
+        _browser_worker 已經把每一種失敗都包成一則結果回報了，這裡擋的是它自己
+        也擋不住的那種（例如連 except 都還沒走完就整個結束）。沒有這道網的話，
+        畫面會停在「登入中…」、登入與讀取都是灰的，使用者只能關掉重開 ——
+        而關的時候還會被問一次「還在忙，確定要關嗎」。
+
+        沒被取走的指令要一起倒掉。留著的話，下次按登入會先跑到那個舊指令
+        （舊的檔案路徑、舊的帳號選擇），做了一件使用者這次沒有要求的事。
+        """
+        if not self.browser_waiting:
+            return
+        if self.browser_thread is not None and self.browser_thread.is_alive():
+            return
+
+        self.browser_waiting = 0
+        while True:
+            try:
+                self.browser_cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self._set_busy(False)
+        self._say("背景作業中斷，這次的動作沒有做完")
+        messagebox.showerror(
+            "背景作業中斷",
+            "負責瀏覽器的背景作業結束了，這次的動作沒有做完。\n\n"
+            f"{BROWSER_HINT}\n\n再按一次「登入」會重新開一個瀏覽器。")
+
+    def _on_logged_in(self, payload):
+        self.browser_waiting = max(0, self.browser_waiting - 1)
+        self._set_busy(False)
+
+        if "error" in payload:
+            self._say("登入失敗")
+            messagebox.showerror("登入失敗", _error_text(payload))
+            return
+
+        names, problems = [], []
+        for record in payload["records"]:
+            # 名字是登入才拿得到的東西，拿到就記著 —— 上面那個範圍選單、
+            # 「更新（某某）」那顆按鈕都靠這份對照。
+            if record.get("sheet_name"):
+                self.trader_of[record["order"]] = record["sheet_name"]
+            if record["problems"]:
+                problems.append(f"第 {record['order']} 組：" + "；".join(record["problems"]))
+            elif record.get("sheet_name"):
+                names.append(record["sheet_name"])
+        problems.extend(payload.get("sheet_errors", {}).values())
+        self._refresh_account_choices()
+        self._update_cert_status(payload["records"])
+
+        # 只登入一組時，其他人上次讀到的 Excel 現值要留著，不能整份換掉。
+        self.sheet_data.update(payload.get("sheets", {}))
+        self.today = datetime.date.today()
+        count = self._initialize(payload["records"])
+
+        if problems:
+            messagebox.showerror("登入失敗", "\n".join(problems))
+            self._say("登入失敗")
+            return
+
+        done = f"，並以 Excel 現在的數字初始化了 {count} 格" if count else ""
+        self._say(f"已登入：{'、'.join(names)}{done}。要更新資料時再按「讀取網頁資料」。")
+
+    def _initialize(self, records):
+        """
+        登入成功的當下，把 Excel 上的股數、成本、現金餘額收成程式的起點。
+        回傳收了幾格，狀態列要報這個數字。
+
+        敢一句話都不問，是因為時間點：登入完成、還沒讀網頁資料之前，Excel 上的
+        數字必定是「今天買賣之前」的狀態 —— 今天成交了什麼還在網頁那邊沒查。
+        所以現金基準直接取 B8、今天的流水先記 0，等「讀取網頁資料」再往上加。
+        「B8 含不含今天的淨收付」這個最容易答錯的問題，在這個時間點根本不存在。
+
+        判斷全在 planner.initialize()：一天只設一次現金基準、已經是自動的格子
+        不再重收，都在那裡，介面不另外複製一份規則。這裡只負責挑出「這一組登入
+        成功、而且 Excel 那一頁也真的讀到了」的分頁 —— 登入失敗或找不到分頁的
+        一律跳過，沒讀到的東西不能拿來當起點。
+        """
+        if self.ledger is None:
+            return 0
+
+        at = datetime.datetime.now().isoformat(timespec="seconds")
+        events = []
+        for record in records:
+            name = record.get("sheet_name")
+            data = self.sheet_data.get(name)
+            if record["problems"] or not data:
+                continue
+            book = self.ledger.sheet(name)
+            # 帳號代號在登入的當下就知道了，順手記進紀錄檔 ——
+            # 使用者有可能登入完就沒有再按讀取。
+            book["account_code"] = record.get("account_code", "")
+            events.extend(planner.initialize(data, book, name, self.today, at))
+
+        if not events:
+            return 0
+
+        # 順序跟寫入那邊一樣：紀錄檔先落地，再追加歷程。
+        self.ledger.save()
+        self.ledger.append_history(events)
+        self.refresh_history()
+        return len(events)
+
+    def _cash_item(self, name):
+        """某個分頁的現金那一列提案，沒有就 None。"""
+        return next((item for item in self.proposals.get(name, [])
+                     if item["kind"] == "cash"), None)
+
+    def _on_fetched(self, payload):
+        self.browser_waiting = max(0, self.browser_waiting - 1)
+        self._set_busy(False)
+
+        if "error" in payload:
+            self._say("讀取失敗")
+            messagebox.showerror("讀取失敗", _error_text(payload))
+            return
+
+        # 這一輪讀到的一律是「補上去」，不是「整份換掉」：一次只更新一位的時候，
+        # 名單上其他人手上那份是上一輪的資料，清掉他們等於整份名單只剩一個人。
+        # 留著的代價是畫面上同時有好幾個時間點的資料，所以每一位都記下讀取時間，
+        # 右邊標頭寫得出「讀取於 10:32」（見 _fill_head）。
+        now = datetime.datetime.now()
+        errors = payload["sheet_errors"]
+        fresh = []
+        for record in payload["records"]:
+            order, name = record["order"], record.get("sheet_name")
+            if name:
+                self.trader_of[order] = name
+
+            if record["problems"]:
+                problem = f"第 {order} 組：" + "；".join(record["problems"])
+            elif not name:
+                problem = f"第 {order} 組：讀不出這是哪一位交易人"
+            elif name in errors:
+                problem = errors[name]
+            else:
+                problem = None
+
+            # 失敗原因跟著組別走：這一組這次成功就把上次的原因收掉，
+            # 沒讀到的那幾組維持原樣 —— 別人的問題不會因為我這次讀成功就消失。
+            if problem:
+                self.problem_of[order] = problem
+                continue
+            self.problem_of.pop(order, None)
+            self.records[name] = record
+            self.read_at[name] = now
+            fresh.append(name)
+
+        # 這一輪只准碰這幾位。寫入、落帳、接管全部照它 —— 別人手上那份是舊資料，
+        # 拿舊資料去寫 Excel 是「一次只更新一位」最貴的一種錯。
+        self.round_scope = set(fresh)
+        self.sheet_data.update(payload["sheets"])
+        self._refresh_problems()
+        self._refresh_account_choices()
+        self._update_cert_status(payload["records"])
+        self.today = datetime.date.today()
+        self.replan()
+        # 舊值要在任何寫入之前收好。寫入成功後 sheet_data 會被換成新數字，
+        # 那時候再問「原本是多少」就沒有人記得了。只換這一輪讀到的那幾位：
+        # 別人畫面上的「舊 → 新」是上一輪剛寫進去的結果，不該被這一輪抹掉。
+        self.before = {key: value for key, value in self.before.items() if key[0] not in fresh}
+        self.before.update({(name, item["cell"]): item["current"]
+                            for name in fresh for item in self.proposals.get(name, [])})
+
+        who = self.round_target
+        note = self._problem_note()
+        # 一位都沒讀成功的時候絕對不能說「已讀取」——「更新（王小明）」按下去、
+        # 他那一組登入逾時，畫面上其他人的數字全都還在，最像結論的那一句要是
+        # 寫著「已讀取」，看的人不會知道自己看的是半小時前的東西。
+        if not self.round_scope:
+            self._say((f"{who} 這一次沒讀到，什麼都沒做。" if who
+                       else "這一輪沒有一位對照得起來，什麼都沒做。") + note)
+            return
+
+        head = f"已讀取（{who}）。" if who else "已讀取。"
+        if payload.get("attached"):
+            self._say(head + "這個 Excel 正開著，程式會直接接上那個視窗寫入並存檔。" + note)
+        else:
+            self._say(head + note)
+
+        # 讀完直接接著寫，中間不再問一次。按「讀取網頁資料」本身就是意願的表達，
+        # 再跳一個確認只是重複問同一件事。
+        self._auto_adopt()
+        writes, total = self._collect_writes()
+        if total:
+            self._begin_write(writes, total)
+        else:
+            # 一格都不必寫，不代表沒事發生：剛接管的格子、剛偵測到的人工改動、
+            # 今天的淨收付，都是在這條路上落帳的。
+            recorded = self._commit_round()
+            self.replan()
+            self.refresh_history()
+
+            # 有人沒完成的時候，「一致」的範圍只到對照得起來的那幾位為止。
+            # 主詞跟著縮小，這句話才不會替沒完成的那幾位背書。
+            #
+            # 看的是 proposals 不是 records：網頁讀到了、Excel 卻找不到那個
+            # 分頁時 records 有東西、畫面上卻一位都沒有，這種時候說「一致」
+            # 是把「沒得比」講成了「比過了」。
+            scope = who if who else ("對照得起來的那幾位" if self.problems else "Excel 的數字")
+            kept = f"紀錄檔更新了 {recorded} 筆（見歷程）。" if recorded else ""
+            self._say(f"{head}{scope}跟網頁一致，沒有需要寫的格子。{kept}{note}")
+
+    def _commit_round(self):
+        """
+        把這一輪的結果落實到紀錄檔：程式寫過的格子、偵測到的人工改動、現金的
+        基準與流水。回傳追加了幾筆歷程。
+
+        寫入成功之後一定要跑，而且只能在成功之後（見 _on_written）。但「一格都
+        不必寫」的時候也一樣要跑 —— 那一輪照樣可能有話要記，最重要的一種是
+        使用者剛在「重設現金餘額」填的答案：他填的開盤前金額加上今日淨收付，
+        算出來剛好等於 B8 上的數字時（也就是 B8 早就含了今天的成交，正是那個
+        對話框最該接住的情況），沒有任何一格需要寫。那個答案這時只存在提案裡，
+        不落帳就會跟著整輪一起丟掉，下一次讀取拿沒被修正的基準再算一次，
+        今天的淨收付就被加了第二次 —— 而畫面上不會有任何徵兆。
+        """
+        if self.ledger is None:
+            return 0
+
+        at = datetime.datetime.now().isoformat(timespec="seconds")
+        events = []
+        for name, items in self.proposals.items():
+            # 跟 _collect_writes 同一個範圍。落帳記的是「這一輪發生了什麼」，
+            # 沒去查的那幾位這一輪什麼也沒發生，尤其不能替他們記今天的淨收付。
+            if name not in self.round_scope:
+                continue
+            book = self.ledger.sheet(name)
+            events.extend(planner.commit(items, book, name, self.today, at))
+        self.ledger.save()
+        self.ledger.append_history(events)
+        return len(events)
+
+    def _on_written(self, payload):
+        self._set_busy(False)
+
+        if "error" in payload:
+            self._say("寫入失敗")
+            messagebox.showerror("寫入失敗", _error_text(payload))
+            return
+
+        # 紀錄檔一定在 Excel 寫成功之後才更新。順序反過來的話，寫入失敗會留下
+        # 一份「以為自己寫過了」的帳本，之後每次比對都判定成人工改動。
+        self._commit_round()
+
+        # Excel 已經被改過了，手上的現值是舊的，重新讀一次才會準。
+        # 只回填這一輪真的寫過的那幾位（範圍跟 _collect_writes 同一個）——
+        # 別人那些「要寫」的格子這次沒寫進去，跟著改就會變成畫面說寫了、檔案沒有。
+        for name, items in self.proposals.items():
+            data = self.sheet_data.get(name)
+            if not data or name not in self.round_scope:
+                continue
+            for item in items:
+                if item["will_write"]:
+                    if item["kind"] == "cash":
+                        data["balance"] = item["proposed"]
+                    else:
+                        for line in data["rows"]:
+                            if line["row"] == item["row"]:
+                                line["qty" if item["which"] == "qty" else "cost"] = item["proposed"]
+
+        self.replan()
+        self.refresh_history()
+
+        where = "（就寫進你開著的那個 Excel 視窗）" if payload["attached"] else ""
+        # 刻意不跳視窗：一顆按鈕從頭做到尾，不要在最後又叫人按確定。程式做的
+        # 變更沒辦法用 Ctrl+Z 復原，要反悔只能用備份，所以備份的位置要寫在
+        # 狀態列上，人才找得到。
+        # 提醒擺在備份路徑前面：路徑很長，接在後面的字會被擠出狀態列外面。
+        self._say(f"已自動寫入 {self.write_count} 格並存檔{where}。"
+                  f"{self._problem_note()}備份在 {payload['backup']}")
+
+    def _refresh_problems(self):
+        """
+        把「第幾組 -> 失敗原因」攤平成畫面上那一串。
+
+        原因記在組別上而不是每讀一次就整串重來：一次只更新一位的時候，別人上一輪
+        沒完成的事並沒有因此解決 —— 那些 ⚠ 要留在畫面上，直到那一組自己再讀一次
+        成功為止。照組別排序，畫面上的順序才不會每讀一次就跳一次。
+        """
+        self.problems = [self.problem_of[order] for order in sorted(self.problem_of)]
+
+    def _problem_note(self):
+        """
+        這一輪有幾個帳戶沒完成。沒有就回空字串，直接串在狀態列後面。
+
+        狀態列上任何一句「已讀取」「跟網頁一致」「已寫入」都要帶著它。20 組裡有
+        一組登入逾時、或 Excel 少一個分頁時，那一位會直接從左邊名單上消失，而
+        畫面上其他每一個數字看起來都正常 —— 提醒框裡雖然列著 ⚠，但狀態列同時
+        說「跟網頁一致」的話，那句話會蓋過它：最像結論的那一句才是人會相信的。
+
+        只報數量、不報細節。是哪幾組、為什麼失敗都在提醒框裡，狀態列只有一行，
+        20 組全爛的時候塞不下，而且真正要看的細節本來就不該擠在那裡。
+        """
+        if not self.problems:
+            return ""
+        return f"⚠ 有 {len(self.problems)} 個帳戶沒完成，看下面的提醒。"
+
+    def _set_busy(self, busy, message=""):
+        self.busy = busy
+        # 寫到一半換檔沒有意義，這一輪要動哪個檔早就決定了。
+        self.excel_button.configure(state="disabled" if busy else "normal")
+        self._sync_clear_button()
+        if busy:
+            self.progress.pack(fill="x", padx=12, pady=(4, 0), before=self.tabs)
+            self.progress.start(12)
+            self._say(message)
+        else:
+            self.progress.stop()
+            self.progress.pack_forget()
+        self._sync_buttons()
+
+    def _say(self, message):
+        self.status.configure(text=message)
+
+    def _path_text(self):
+        if self.path is None:
+            return "還沒選檔案 —— 按左邊「開啟EXCEL」挑一份"
+        # 路徑後面直接講「現在開著沒」。登入是灰的時候，人第一個問題就是為什麼，
+        # 答案擺在他正在看的那一行，比藏在狀態列或跳出來的視窗裡好找。
+        return f"{self.path}　—— " + ("已開在 Excel 裡" if self.excel_open
+                                      else "還沒開著，按「開啟EXCEL」")
+
+    def open_excel(self):
+        """
+        選一份要同步的 Excel，用 Excel 把它開起來，路徑寫回 .env 下次直接用。
+
+        為什麼是「開啟」不是「載入」
+        --------------------------
+        程式自己也開得起來（沒開著時 excel_io 會在背景 DispatchEx 一個隱形的），
+        但 Office 沒啟用的機器上，那個背景 Excel 會在啟用檢查失敗後把自己收掉，
+        同步是跑到一半才炸的 —— 那時備份做了、搞不好還寫了幾格。所以這裡改成
+        由使用者親手把檔開起來，程式接上他那個視窗：看得見、讀到的是畫面上的
+        即時內容、寫完他也馬上看得到。沒開起來就不給登入，把問題擋在最前面。
+
+        紀錄檔（現金基準、每格自動／手動）是跟著檔名走的，所以換一份檔等於換掉
+        整個狀態來源 —— 手上這批網頁資料與提案全是上一份檔算出來的，一律清掉
+        重來，不能讓 A 檔的提案留在畫面上等著寫進 B 檔。
+        """
+        if self.busy:
+            return
+
+        start = self.path.parent if (self.path and self.path.parent.is_dir()) else app_dir()
+        chosen = filedialog.askopenfilename(
+            parent=self.root,
+            title="選擇要同步的持股管理表",
+            initialdir=str(start),
+            initialfile=self.path.name if self.path else "",
+            filetypes=[("Excel 活頁簿", "*.xls *.xlsx *.xlsm"), ("所有檔案", "*.*")],
+        )
+        if not chosen:
+            return
+
+        path = Path(chosen)
+        # 選同一份檔不必重來一遍，但還是要確認它開著 —— 使用者按這顆按鈕，
+        # 想要的就是「把它打開」，不是「什麼都沒發生」。
+        if path == self.path:
+            self._open_in_excel(path)
+            return
+
+        try:
+            ledger = ledger_mod.Ledger(path)
+        except RuntimeError as exc:
+            messagebox.showerror("紀錄檔有問題", str(exc))
+            return
+
+        try:
+            excel_io.remember_excel_path(path)
+        except OSError as exc:
+            messagebox.showwarning("沒寫進 .env",
+                                   f"這次可以用，但路徑沒記起來，下次要再選一次：\n{exc}")
+        self.path = path
+        self.ledger = ledger
+        self.ledger_error = None
+        self.ledger_fresh = not ledger.existed
+        # excel_open 記的還是上一份檔的答案（通常是 True），而輪詢要三秒後才會發現
+        # 換人了。中間那幾秒畫面在說謊：路徑列寫著新檔的路徑、後面卻接「已開在
+        # Excel 裡」，登入也還亮著。那時候按下去，程式會自己開一個看不見的 Excel
+        # 來讀這個檔，而 os.startfile 正在把同一個檔開進使用者看得見的那個 Excel
+        # —— 兩邊搶同一個檔案，總有一邊拿到唯讀。
+        # 亮回來是 _open_in_excel 的事：它每半秒確認一次，真的看到開起來才放行。
+        self._set_excel_open(False)
+        self.path_label.configure(text=self._path_text())
+
+        self.records, self.sheet_data, self.proposals = {}, {}, {}
+        self.warnings, self.problems = {}, []
+        self.before = {}
+        # 這幾樣都是「上一份檔的這一輪」，跟著整批作廢。trader_of 例外：
+        # 那是帳號與交易人的對照，跟開哪一份 Excel 無關。
+        self.problem_of, self.read_at, self.round_scope = {}, {}, set()
+        self.round_target = None
+        self.current_sheet = None
+        # 算法是跟著這份 Excel 的紀錄檔走的，換檔就換設定；「這次執行問過了」也一樣
+        # 按路徑記，所以換到這次執行還沒問過的檔，下次讀取會再問一次。
+        self.cash_method.set(self._saved_method())
+        self._refresh_method_label()
+
+        self.fill_sync_tree()
+        self.refresh_history()
+        if not ledger.existed:
+            self._say(f"已換成 {path.name}（這份檔還沒有紀錄檔，所有格子都要重新接管）")
+        self._open_in_excel(path)
+
+    def _open_in_excel(self, path, tries=0):
+        """
+        把檔案交給 Excel 打開，然後等它真的開起來。
+
+        用 os.startfile 而不是 COM：這等於使用者自己雙擊那個檔，Excel 是他的、
+        視窗是看得見的，程式手上不留任何 COM 物件。真要同步時 excel_io 會用
+        GetObject 接上這個視窗。
+
+        不能開下去就當作成功 —— startfile 只是把檔案丟給系統，Excel 起來要幾秒，
+        中間還可能卡在受保護的檢視或啟用巨集的提示上。所以這裡每半秒問一次檔案鎖，
+        真的看到它被鎖住才把登入放行。等待期間不能用 sleep 卡住主執行緒，
+        不然整個介面會凍在那裡，連「正在開啟」那行字都畫不出來。
+        """
+        if path != self.path:
+            return                        # 等待期間又換了檔，這條等待就作廢
+        if excel_io.is_open_in_excel(path):
+            self._set_excel_open(True)
+            self._say(f"{path.name} 已經開在 Excel 裡，可以按「登入」了。")
+            return
+
+        if tries == 0:
+            try:
+                os.startfile(str(path))
+            except OSError as exc:
+                self._set_excel_open(False)
+                messagebox.showerror("開不起來", f"沒辦法用 Excel 打開這個檔：\n{path}\n\n{exc}")
+                return
+            self._say(f"正在用 Excel 開啟 {path.name}…")
+        if tries >= 60:                   # 30 秒
+            self._set_excel_open(False)
+            self._say(f"還沒看到 {path.name} 開起來。")
+            messagebox.showwarning(
+                "沒看到 Excel 開起來",
+                f"{path.name} 交給 Excel 了，但 30 秒過去還沒看到它被開啟。\n\n"
+                f"Excel 可能卡在「受保護的檢視」或啟用提示上，也可能還在啟動。\n"
+                f"請看一下 Excel 那邊；等它真的開好，登入就會自己亮起來。",
+                parent=self.root,
+            )
+            return
+        self.root.after(500, lambda: self._open_in_excel(path, tries + 1))
+
+    def _poll_excel(self):
+        """
+        每三秒確認一次「這份 Excel 現在開著沒」，然後排下一次。
+
+        為什麼要一直問：使用者隨時可能把 Excel 關掉，而按鈕的亮暗說的是「現在」
+        能不能做，不是「按開啟那一刻」的狀態。檔案鎖很便宜（開一個檔案代號就關掉），
+        也不碰 COM，所以固定輪詢比在十幾個地方各補一次檢查可靠。
+        """
+        try:
+            here = self.path is not None and self.path.is_file() and excel_io.is_open_in_excel(self.path)
+        except OSError:
+            here = self.excel_open        # 判斷不出來就沿用上次，不要亂閃
+        self._set_excel_open(here)
+        self.root.after(3000, self._poll_excel)
+
+    def _set_excel_open(self, value):
+        """狀態有變才動畫面 —— 每三秒重畫一次按鈕會讓游標懸停的效果一直閃。"""
+        if value == self.excel_open:
+            return
+        self.excel_open = value
+        self.path_label.configure(text=self._path_text())
+        self._sync_buttons()
+
+    def _require_excel(self):
+        """登入／讀取前的最後一道關卡。按鈕平常是灰的，這裡擋的是鍵盤觸發那種漏網。"""
+        if self.path is None:
+            messagebox.showerror("還沒選檔案", "請先按左上角「開啟EXCEL」選一份持股管理表。")
+            return False
+        if not self.path.is_file():
+            messagebox.showerror("找不到 Excel", f"{self.path}\n\n可以在 .env 用 EXCEL_PATH 指定位置。")
+            return False
+        if not self.excel_open:
+            messagebox.showwarning("Excel 沒開著",
+                                   f"請先按左上角「開啟EXCEL」把 {self.path.name} 打開。\n\n"
+                                   f"程式要接上你那個 Excel 視窗才會同步。",
+                                   parent=self.root)
+            return False
+        return True
+
+    def _saved_method(self):
+        """紀錄檔裡記著的現金算法。沒有紀錄檔（還沒選 Excel）就用原本那種。"""
+        if self.ledger is None:
+            return planner.METHOD_OPENING
+        method = self.ledger.setting("cash_method", planner.METHOD_OPENING)
+        return method if method in planner.METHOD_NAMES else planner.METHOD_OPENING
+
+    def _refresh_method_label(self):
+        """
+        現金餘額那一行左邊的「現金算法」：要不要顯示，以及顯示哪一個。
+        順便決定右邊那顆「修改」在不在（見 _show_opening_button）。
+
+        這次執行還沒問過就不顯示。算法是這次程式開起來、第一次按「讀取網頁資料」時
+        跳視窗問的，在那之前畫面上寫一個名字，看起來就像已經選好了 —— 而那時候顯示的
+        其實是上次沿用下來的預設值。問過之後才寫，寫的就是這次的答案。
+
+        「修改」跟這個名字相反，還沒問過也要照沿用下來的算法決定 —— 名字可以先不講
+        （那只是還沒有答案），但一顆按下去會蓋掉 B8 的按鈕不能等到問完才收起來。
+        """
+        self._show_opening_button(self.cash_method.get() == planner.METHOD_OPENING)
+        asked = self.path in self.cash_method_asked
+        if not asked:
+            self.method_box.pack_forget()
+            return
+        self.method_value.configure(text=planner.METHOD_NAMES[self.cash_method.get()])
+        # before：pack 是照呼叫順序排的，藏起來再放回去會跑到最右邊，
+        # 明講它要在「今日初始現金餘額」前面才回得到原位。
+        self.method_box.pack(side="left", padx=(0, 18), before=self.opening_label)
+
+    def _set_method(self, method, asked=False):
+        """
+        換現金算法：記進紀錄檔、重算、重畫。asked=True 代表這次是那個對話框問來的。
+
+        「這次問過了」跟「選了哪一個」分開記：問過了只存在記憶體，是為了不要這次執行
+        期間跳第二次；選了哪一個要寫進紀錄檔跨天沿用（下次開程式、第一次讀取時
+        那個對話框的預設值就是它）。
+        """
+        self.cash_method.set(method)
+        if asked:
+            self.cash_method_asked.add(self.path)
+        self._refresh_method_label()
+        if self.ledger is not None:
+            try:
+                self.ledger.set_setting("cash_method", method)
+            except OSError as exc:
+                messagebox.showwarning("設定沒存起來",
+                                       f"這次有效，但沒能寫進紀錄檔：{exc}")
+        if self.proposals:
+            self.replan()
+
+    def _maybe_ask_cash_method(self):
+        """
+        這次程式開起來、第一次按「讀取網頁資料」時，先問今天要用哪一種算法。
+
+        問在抓資料之前：算法決定要不要去查銀行餘額那兩支，選在後面就得再讀一次。
+        它也不需要任何資料才問得出口 —— 判斷依據是「今天有沒有買全額交割股」，
+        那是人自己知道的事。
+
+        故意不記進紀錄檔、只放記憶體：問過一次是為了同一次執行裡不要每讀一次就跳
+        一次（變成一個要人閉著眼睛按掉的東西），但關掉程式重開就當作沒問過 ——
+        使用者可能在中間發現今天有全額交割、想換答案，不必先去改 Excel 備份。
+
+        取消也算問過了（這次執行內）。
+        """
+        if self.ledger is None or self.path in self.cash_method_asked:
+            return
+
+        picked = ask_cash_method(self.root, self.family, self.cash_method.get())
+        if picked is None:
+            self.cash_method_asked.add(self.path)
+            # 取消也算問過了，用的是沿用下來的那一種。
+            self._refresh_method_label()
+            return
+        self._set_method(picked, asked=True)
