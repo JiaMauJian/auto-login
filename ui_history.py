@@ -6,7 +6,7 @@ import json
 from tkinter import messagebox
 
 from util import show
-from ui_common import ALL_CHOICE, WHEN_TODAY
+from ui_common import ALL_CHOICE, WHEN_TODAY, ask_confirm
 
 # 「補登」這個來源已經沒有入口了（現金帳本分頁拿掉時一起收掉），
 # 但舊的歷程檔裡還有這種紀錄，名字要留著才不會顯示成一個英文代號。
@@ -162,12 +162,12 @@ class UiHistoryMixin:
         if not self.ledger or not self.history_rows:
             return
 
-        if not messagebox.askyesno(
+        if not ask_confirm(
+                self.root,
                 "清除歷程",
                 f"要清掉全部 {len(self.history_rows)} 筆歷程嗎？\n\n"
                 "舊的歷程檔會改名收進「備份」資料夾，不是真的刪掉。\n"
-                "每一格歸誰管、現金的基準都記在另一個紀錄檔裡，不受影響。",
-                icon="warning", default="no", parent=self.root):
+                "每一格歸誰管、現金的基準都記在另一個紀錄檔裡，不受影響。"):
             return
 
         try:

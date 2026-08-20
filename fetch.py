@@ -65,7 +65,7 @@ def new_store():
         codes   第幾組 -> 那一組的帳號代號（1分行-客戶號），換 cookie 後要拿來對身分
         owner   現在瀏覽器帶著的是哪一組的 cookie
 
-    不帶 store 就是最原始的行為：每次都重新登入（命令列的 update_excel 走這條）。
+    不帶 store 就是最原始的行為：每次都重新登入。
     """
     return {"pages": {}, "jars": {}, "codes": {}, "owner": None}
 

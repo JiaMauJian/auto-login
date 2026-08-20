@@ -1,12 +1,12 @@
 """
-自動登入 tbbstock.com.tw（支援多組帳號）
-流程：自動開啟瀏覽器 -> 依 .env 內的每組帳號各開一個分頁 -> 自動填入身分證、密碼與驗證碼 -> 送出登入。
+登入 tbbstock.com.tw 的核心邏輯，供持股同步 GUI（ui.py，經由 fetch.py）呼叫。
 
+do_login()：開一個分頁，自動填入身分證、密碼與驗證碼並送出登入，回傳該分頁。
 多組帳號設定：.env 用 TBB_ID_1/TBB_PASSWORD_1、TBB_ID_2/TBB_PASSWORD_2... 依序編號（見 .env.example）。
-每組帳號開在同一個瀏覽器視窗的不同分頁（共用同一個 browser context，因此也共用同一組 cookie/session）。
-注意：這個網站是 Java/Servlet 架構，登入狀態通常是用 JSESSIONID 這類 cookie 辨識；
-共用 context 代表多帳號同時登入時，有可能其中一個分頁登入後把另一個分頁的 session 頂掉。
-如果實測發現會互踢，需要改回每組帳號各自獨立 context（browser.new_context()）。
+多帳號共用同一個瀏覽器 context（因此也共用同一組 cookie/session）：這個網站是
+Java/Servlet 架構，登入狀態靠 JSESSIONID 這類 cookie 辨識，換帳號登入會把前一個
+的 session 頂掉。GUI 靠 fetch.ensure_logged_in 在换帳號前先把上一組的 cookie
+收下來，需要用時再換回去，才不必每次都重新跑一遍登入流程。
 
 瀏覽器設定：預設用 Playwright 自己下載的 Chromium、每次都是全新的空白 profile（沒有任何登入狀態）。
 想改用電腦上已安裝的 Chrome，在 .env 設 BROWSER_CHANNEL=chrome；
@@ -21,11 +21,11 @@ import os
 import subprocess
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 from playwright.sync_api import (
-    sync_playwright,
     Error as PlaywrightError,
     TimeoutError as PlaywrightTimeoutError,
 )
@@ -69,6 +69,21 @@ def pause(message):
         input(message)
     except EOFError:
         pass
+
+
+def log_crash(detail):
+    """
+    把啟動階段的例外寫進 exe 旁邊的 crash.log。
+
+    exe 打包成 --windowed 後沒有主控台，print()/pause() 使用者完全看不到，
+    只能寫成檔案，事後請使用者把這個檔案的內容貼給你。
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(app_dir() / "crash.log", "a", encoding="utf-8") as f:
+            f.write(f"\n[{timestamp}]\n{detail}\n")
+    except OSError:
+        pass  # 連寫檔都失敗（例如資料夾沒有寫入權限），沒有更後路了
 
 
 def _enter_pressed():
@@ -359,97 +374,44 @@ def do_login(context, tbb_id, tbb_password, page=None):
     return page
 
 
-def main():
-    accounts = load_accounts()
-    if not accounts:
-        print(f"找不到帳號設定。請在 {app_dir()} 放一個 .env 檔（可複製 .env.example），")
-        print("並依 TBB_ID_1/TBB_PASSWORD_1、TBB_ID_2/TBB_PASSWORD_2... 填入至少一組帳號。")
-        sys.exit(1)
-
-    configure_browsers_path()
-
-    with sync_playwright() as p:
-        context, browser = open_context(p)
-
-        def close_browser():
-            context.close()
-            if browser is not None:
-                browser.close()
-
-        # persistent context 啟動時會自帶一個空白分頁，第一組帳號直接沿用，避免多留一個空白分頁。
-        spare_page = context.pages[0] if context.pages else None
-
-        count = 0
-        fakes = 0
-        try:
-            for account in accounts:
-                if account.get("fake"):
-                    # 假帳號沒有東西可以登入，只是在同一個瀏覽器多開一頁模擬頁面。
-                    simulate.open_page(context, account, spare_page)
-                    print(f"[{account['id']}] 已開啟模擬頁面（不連任何網站）")
-                    fakes += 1
-                else:
-                    do_login(context, account["id"], account["password"], spare_page)
-                    count += 1
-                spare_page = None
-        except PlaywrightTimeoutError:
-            print("找不到登入欄位，網站版面可能已變更，請檢查 login.py 中的選擇器。")
-            close_browser()
-            sys.exit(1)
-
-        print("=" * 60)
-        print(f"共 {count} 組帳號已自動送出登入。" + (f"另有 {fakes} 個模擬帳號的假頁面。" if fakes else ""))
-        print("=" * 60)
-        wait_until_finished(context)
-
-        try:
-            close_browser()
-        except PlaywrightError:
-            pass    # 使用者已經自己關掉瀏覽器了
-
-
 def route():
     """
     只打包一個 exe，靠參數決定要做什麼：
 
-        tbb-login.exe              自動登入（不帶參數就是它，跟以前一樣）
-        tbb-login.exe --sync       開持股同步的介面視窗
-        tbb-login.exe --update     持股同步的命令列版，後面的參數原樣傳下去
+        tbb-login.exe              持股同步介面（不帶參數就是它，雙擊直接開 GUI）
         tbb-login.exe --sim-excel  在 Excel 補上模擬用的分頁（測試用，見 dev_tools/sim_excel.py）
 
     不做成好幾個 exe，是因為 Playwright 那包東西會被各塞一份，dist 直接肥好幾倍，
     而部署方式是整包資料夾複製到目標電腦。
 
-    ui / update_excel 刻意在函式裡才 import：它們都會反過來 import 這個模組，
-    寫在檔案最上面會變成循環匯入。
+    GUI 是預設行為，因為登入、抓網頁、寫 Excel 現在全部都在 GUI 裡做（見
+    ui_background.py），GUI 錯誤也全部走 messagebox、不靠印在主控台上，exe
+    也打包成 --windowed，讓使用者可以直接雙擊 tbb-login.exe 開介面。
+
+    ui 刻意在函式裡才 import：它反過來 import 這個模組，寫在檔案最上面會變成
+    循環匯入。
     """
     args = sys.argv[1:]
 
-    if args and args[0] == "--sync":
-        import ui
-        ui.main()
-    elif args and args[0] == "--update":
-        import update_excel
-        sys.argv = [sys.argv[0]] + args[1:]
-        update_excel.main()
-    elif args and args[0] == "--sim-excel":
+    if args and args[0] == "--sim-excel":
         from dev_tools import sim_excel
         sys.argv = [sys.argv[0]] + args[1:]
         sim_excel.main()
     else:
-        main()
+        import ui
+        ui.main()
 
 
 if __name__ == "__main__":
-    # 打包成 exe 用滑鼠雙擊執行時，程式一結束視窗就會關掉，
-    # 所以出錯時要停下來讓使用者看得到訊息。
+    # exe 打包成 --windowed（沒有主控台），route() 丟出來、沒被 ui.py 自己的
+    # messagebox 接住的例外（例如還沒進到 GUI 就炸掉），只能寫進 crash.log，
+    # print()/pause() 在這裡使用者根本看不到。
     try:
         route()
     except SystemExit as exc:
         if exc.code:
-            pause("按 Enter 關閉視窗...")
+            log_crash(f"SystemExit: {exc.code!r}")
         raise
     except Exception:
-        traceback.print_exc()
-        pause("發生未預期的錯誤，按 Enter 關閉視窗...")
+        log_crash(traceback.format_exc())
         sys.exit(1)

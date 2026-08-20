@@ -5,7 +5,7 @@
 #   .\dev_tools\setup-profile.ps1 -Reset   # 先把整個資料夾砍掉重建，再開起來
 #                                          # （資料夾裡已經有 tbbstock 憑證時會擋下來，要再加 -Force）
 #
-# 現在 GUI（tbb-login.exe --sync 的「憑證」分頁）已經把這支腳本的功能做成按鈕，
+# 現在 GUI（tbb-login.exe 的「憑證」分頁）已經把這支腳本的功能做成按鈕，
 # 這支留著當 GUI 壞了時的備用手動工具。
 #
 # 兩個用途：

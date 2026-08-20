@@ -298,7 +298,7 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
         return proposal
 
     if method == METHOD_OPENING and cash.get("baseline_value") is None:
-        proposal["note"] = "還沒有今日初始現金餘額，登入一次就會自動設定"
+        proposal["note"] = "還沒有今日初始現金餘額，這組讀到網頁資料就會自動設定"
         return proposal
 
     if method == METHOD_BANK:

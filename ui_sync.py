@@ -430,58 +430,30 @@ class UiSyncMixin:
 
     def _fill_notes(self, name):
         """
-        提醒只講選中的這一位。
+        提醒只講選中的這一位，而且只在「有事」的時候出聲。
 
         20 個人的提醒全部堆在同一個框裡等於沒有提醒 —— 別人的事左邊名單上
         已經用 ⚠ 標出來了，要看就換過去看。整組失敗（problems）例外，
         那跟選中誰無關，一定要講。
+
+        沒有警告的時候框就留空 —— 「還沒有資料」「已經一致」這種話下面
+        狀態列都講過（見 ui.py／ui_background.py 的 _say），這裡再寫一次
+        只是同一件事說兩遍，不是真正的提醒。
         """
         text = [f"• {warning}" for warning in self.warnings.get(name, [])]
         for problem in self.problems:
             text.append(f"⚠ {problem}")
 
-        if self.ledger_fresh and self.proposals:
-            # 只有這一天要講。紀錄檔存在的日子裡，現金起點是「今天第一次登入時的
-            # B8」，而那個時間點今天還沒開盤 —— 沒有猜的成分。紀錄檔是新的（第一次
-            # 用這支程式、換了電腦、Excel 改過檔名或搬過資料夾）就不一樣了：
-            # 起點只能取「現在的 B8」，它含不含今天的成交，程式看不出來，
-            # 唯一看得出來的人是使用者。
-            text.append("這份 Excel 還沒有紀錄檔（第一次用、換電腦，或檔名／資料夾"
-                        "改過），今天的「今日初始現金餘額」是拿 B8 現在的數字當起點的。"
-                        "今天如果已經有成交、而 B8 已經含了它，請按現金底下的「修改」"
-                        "改成今天開盤前的金額，否則今天的淨收付會被算兩次。")
-
-        others = sum(1 for other, warns in self.warnings.items() if warns and other != name)
-        if others:
-            text.append(f"另外有 {others} 位交易人也有提醒，左邊名單上標著 ⚠。")
-
-        if not self.proposals:
-            text.append("還沒有資料。按上面的「讀取網頁資料」，這裡就會列出每個交易人要改哪幾格。")
-        elif not self._pending_count():
-            # 同一句話，主詞跟著上面那幾行 ⚠ 縮小 —— 有人沒完成的時候，
-            # 「已經一致」只能替畫面上有的那幾位講。
-            text.append("目前沒有任何格子需要寫入 —— "
-                        + ("上面 ⚠ 之外的交易人，Excel 上的數字跟網頁已經一致。"
-                           if self.problems else "Excel 上的數字跟網頁已經一致。"))
-
-        if not text:
-            text.append("沒有需要注意的事。")
-
-        # 每天都成立的兩條規矩，擺在最後一行。這個框只有五行高又沒有捲軸，
+        # 每天都成立的規矩，擺在最後一行。這個框只有五行高又沒有捲軸，
         # 常駐的字排在前面就會把當天真正的警告推出視線 —— 排最後的話，
         # 沒事的日子看得到（框是空的），有事的日子被擠掉的正好是它。
         if self.proposals:
-            text.append("操作中不要改 Excel 的檔名和現金餘額")
+            text.append("操作中不要改 Excel 的現金餘額")
 
         self.warn_box.configure(state="normal")
         self.warn_box.delete("1.0", "end")
         self.warn_box.insert("1.0", "\n".join(text))
         self.warn_box.configure(state="disabled")
-
-    def _pending_count(self):
-        """所有交易人加起來要寫幾格。寫入是一次寫全部，所以要照全部算，不能只算眼前這位。"""
-        return sum(1 for items in self.proposals.values()
-                   for item in items if item["will_write"])
 
     def _sync_buttons(self):
         """上面那兩顆能不能按。畫面上會變灰的按鈕現在只剩它們。"""

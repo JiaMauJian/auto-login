@@ -33,7 +33,7 @@ import random
 
 from playwright.sync_api import Error as PlaywrightError
 
-# 假帳號的名字。Excel 的分頁名稱要跟這個一模一樣（分頁名 = 帳戶名，見 update_excel.py）。
+# 假帳號的名字。Excel 的分頁名稱要跟這個一模一樣（分頁名 = 帳戶名，見 excel_io.find_sheet）。
 FAKE_NAMES = [f"交易人{letter}" for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
 
 # 模擬用的股票：代號、名稱、基準價。基準價只是隨機的中心點，不代表真實股價。

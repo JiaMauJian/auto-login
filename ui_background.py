@@ -20,7 +20,7 @@ import planner
 import fetch as fetch_mod
 from fetch import collect, login_only
 from login import app_dir, configure_browsers_path, open_context
-from ui_common import ask_cash_method
+from ui_common import ask_cash_method, ask_confirm
 
 # 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
 STEP_NAMES = {"logged_in": "登入", "fetched": "讀取網頁資料", "written": "寫入"}
@@ -108,7 +108,15 @@ class UiBackgroundMixin:
         self._refresh_fetch_button()
 
     def _scope_order(self):
-        """這次要做第幾組；None 代表全部。"""
+        """這次要做第幾組；None 代表全部。
+
+        只有一位交易人時，「全部」跟「他」是同一件事 —— 選單留著「全部」
+        給使用者看沒關係，但範圍要直接當成選了那一位，按鈕才寫得出
+        「更新（某某）」，不會因為選單還停在「全部」就一直顯示泛用的
+        「讀取網頁資料」。
+        """
+        if len(self.accounts) == 1:
+            return 1
         choice = self.account_choice.current()
         return choice if choice > 0 else None
 
@@ -259,9 +267,13 @@ class UiBackgroundMixin:
                 selected, path, *extra = arg
                 try:
                     ensure_browser()
-                    # 登入完也順便把 Excel 現值讀出來，主執行緒要拿它當程式的起點。
                     records = fetch_records(context, selected, store, *extra)
-                    payload = _read_excel_after_fetch(records, path)
+                    if cmd == "login":
+                        # 登入按鈕只做登入，不碰 Excel —— 現值要留給「讀取網頁資料」去讀，
+                        # 那邊本來就要讀一次，今日現金基準也是靠那次讀到的值設定（見 _on_fetched）。
+                        payload = {"records": records}
+                    else:
+                        payload = _read_excel_after_fetch(records, path)
                 except Exception as exc:
                     payload = {"error": traceback.format_exc()}
                     if excel_io.is_dead_object(exc):
@@ -448,36 +460,30 @@ class UiBackgroundMixin:
                 problems.append(f"第 {record['order']} 組：" + "；".join(record["problems"]))
             elif record.get("sheet_name"):
                 names.append(record["sheet_name"])
-        problems.extend(payload.get("sheet_errors", {}).values())
         self._refresh_account_choices()
         self._update_cert_status(payload["records"])
-
-        # 只登入一組時，其他人上次讀到的 Excel 現值要留著，不能整份換掉。
-        self.sheet_data.update(payload.get("sheets", {}))
-        self.today = datetime.date.today()
-        count = self._initialize(payload["records"])
 
         if problems:
             messagebox.showerror("登入失敗", "\n".join(problems))
             self._say("登入失敗")
             return
 
-        done = f"，並以 Excel 現在的數字初始化了 {count} 格" if count else ""
-        self._say(f"已登入：{'、'.join(names)}{done}。要更新資料時再按「讀取網頁資料」。")
+        self._say(f"已登入：{'、'.join(names)}。要更新資料時再按「讀取網頁資料」。")
 
     def _initialize(self, records):
         """
-        登入成功的當下，把 Excel 上的現金餘額收成今日基準。
-        回傳收了幾格，狀態列要報這個數字。
+        把 Excel 上的現金餘額收成今日基準。回傳收了幾格。
 
-        敢一句話都不問，是因為時間點：登入完成、還沒讀網頁資料之前，Excel 上的
-        數字必定是「今天買賣之前」的狀態 —— 今天成交了什麼還在網頁那邊沒查。
-        所以現金基準直接取 B8、今天的流水先記 0，等「讀取網頁資料」再往上加。
-        「B8 含不含今天的淨收付」這個最容易答錯的問題，在這個時間點根本不存在。
+        在「讀取網頁資料」回呼裡呼叫，緊接在這一輪 Excel 現值讀回來（sheet_data
+        更新）之後、真正拿網頁資料去算現金（replan）之前 —— 這一輪還沒寫過 Excel，
+        所以這裡讀到的數字必定是「今天買賣之前」的狀態，現金基準可以直接取 B8、
+        今天的流水先記 0，等 replan 再把這一輪查到的淨收付往上加。「B8 含不含
+        今天的淨收付」這個最容易答錯的問題，在這個時間點根本不存在。
 
-        判斷全在 planner.initialize()：一天只設一次現金基準，介面不另外複製一份
-        規則。這裡只負責挑出「這一組登入成功、而且 Excel 那一頁也真的讀到了」的
-        分頁 —— 登入失敗或找不到分頁的一律跳過，沒讀到的東西不能拿來當起點。
+        判斷全在 planner.initialize()：一天只設一次現金基準，之後每一輪讀取都會
+        呼叫這裡，但只有第一輪真的動得了 —— 介面不必自己記「今天設過了沒」。
+        這裡只負責挑出「這一組這次讀到、而且 Excel 那一頁也真的讀到了」的分頁 ——
+        這次沒讀到的一律跳過，沒讀到的東西不能拿來當起點。
         """
         if self.ledger is None:
             return 0
@@ -557,6 +563,9 @@ class UiBackgroundMixin:
         self._refresh_account_choices()
         self._update_cert_status(payload["records"])
         self.today = datetime.date.today()
+        # 今日現金基準就在這裡定形（見 _initialize）：這一輪的 Excel 現值剛讀回來、
+        # 還沒被這一輪的寫入動過，是「今天買賣之前」的最後一刻。
+        self._initialize(payload["records"])
         self.replan()
         # 舊值要在任何寫入之前收好。寫入成功後 sheet_data 會被換成新數字，
         # 那時候再問「原本是多少」就沒有人記得了。只換這一輪讀到的那幾位：
@@ -927,14 +936,12 @@ class UiBackgroundMixin:
         """
         other = (planner.METHOD_OPENING if self.cash_method.get() == planner.METHOD_BANK
                   else planner.METHOD_BANK)
-        if not messagebox.askyesno(
+        if not ask_confirm(
+                self.root,
                 "切換現金算法",
                 f"現金算法要從「{planner.METHOD_NAMES[self.cash_method.get()]}」"
                 f"換成「{planner.METHOD_NAMES[other]}」嗎？\n\n"
-                "這是全部帳號共用的一個開關，換了立刻重算，20 位一起改。\n"
-                f"全額交割當天要留在「{planner.METHOD_NAMES[planner.METHOD_OPENING]}」"
-                f"（「{planner.METHOD_NAMES[planner.METHOD_BANK]}」那天會扣兩次）。",
-                icon="warning", default="no", parent=self.root):
+                f"全額交割當天要留在「{planner.METHOD_NAMES[planner.METHOD_OPENING]}」。"):
             return
         self._set_method(other, asked=True)
 

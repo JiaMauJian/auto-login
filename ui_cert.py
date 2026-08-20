@@ -5,6 +5,7 @@ import datetime
 from tkinter import messagebox
 
 import profile_tools
+from ui_common import ask_confirm
 
 
 class UiCertMixin:
@@ -176,11 +177,12 @@ class UiCertMixin:
                 "請先用上面的「建立 Profile」把資料夾初始化，再回來複製憑證。", parent=self.root)
             return
 
-        if not messagebox.askyesno(
+        if not ask_confirm(
+            self.root,
             "複製憑證",
             f"把「{source['browser']} / {source['name']}」的憑證複製到自動登入用的 Profile？\n\n"
             "目標現有的資料會先備份。來源那張憑證不受影響（這只是複製檔案，不是重新申請）。",
-            parent=self.root,
+            danger=False,
         ):
             return
 

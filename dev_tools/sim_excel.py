@@ -190,8 +190,8 @@ def add_sheets(path, workbook, count, write):
 
     print()
     print(f"共新增 {len(todo)} 個分頁。這些分頁已經填好 FIXED_ACCOUNTS 的固定股數與成本，")
-    print("直接跑一次同步就會照網頁值覆蓋、現金基準也會在第一次登入時設定好：")
-    print("    python update_excel.py --write")
+    print("直接開持股同步介面按一次同步就會照網頁值覆蓋、現金基準也會在第一次登入時設定好：")
+    print("    tbb-login.exe（或 python ui.py）")
 
 
 def fill_sheet(sheet, name):

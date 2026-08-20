@@ -5,7 +5,7 @@
 #   .\dev_tools\migrate-cert.ps1 -From "<profile路徑>"  # 實際複製（路徑是含 Local Storage 的那層，例如 ...\User Data\Default）
 #   .\dev_tools\migrate-cert.ps1 -From "..." -Force  # 瀏覽器有背景程序殘留、確認過沒在用時強制執行
 #
-# 現在 GUI（tbb-login.exe --sync 的「憑證」分頁）已經把這支腳本的功能做成按鈕，
+# 現在 GUI（tbb-login.exe 的「憑證」分頁）已經把這支腳本的功能做成按鈕，
 # 這支留著當 GUI 壞了時的備用手動工具。
 #
 # 憑證在另一台電腦時：

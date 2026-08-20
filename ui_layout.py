@@ -322,7 +322,7 @@ class UiLayoutMixin:
                                  background=panel, relief="flat", highlightthickness=0,
                                  insertwidth=0, cursor="arrow", state="disabled")
         self.cash_line.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.cash_line.tag_configure("dim", foreground=self.colors.secondary)
+        self.cash_line.tag_configure("dim", foreground="black")
         self.cash_line.tag_configure("neg", foreground=self.colors.danger)
         # 「餘額轉負」跟負數同一個紅 —— 它講的就是那個負數，兩種顏色會讓人
         # 以為是兩件事。

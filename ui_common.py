@@ -269,6 +269,60 @@ def ask_opening_balance(parent, family, name, current, item):
     return answer.get("opening")
 
 
+def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否", danger=True):
+    """
+    是非確認對話框，取代 messagebox.askyesno。
+
+    原生 messagebox 跳出來的是 Windows 系統對話框，字級、配色都不跟著介面走——
+    使用者剛看完 tkbootstrap 畫面，下一秒切成灰底系統對話框，容易分心誤判，
+    這種要人謹慎看清楚才按下去的場合反而幫倒忙。
+
+    danger=True（預設）對應原本 icon="warning", default="no" 那幾顆：焦點鎖在
+    「否」、Enter 也觸發取消，確定鍵漆成警示色——這幾顆通常管的是「立刻生效、
+    蓋掉既有資料」，手滑按下 Enter 不該真的動到東西。
+
+    danger=False 對應原本沒設 default 的那幾顆（例如複製憑證，目標會先備份，
+    風險比較低）：焦點在確定鍵、Enter 直接確認、按鈕用一般強調色，行為跟
+    messagebox.askyesno 預設的「Enter＝是」一致。
+    """
+    win = tk.Toplevel(parent)
+    win.title(title)
+    win.transient(parent)
+    win.resizable(False, False)
+
+    answer = {"ok": False}
+
+    outer = ttk.Frame(win, padding=16)
+    outer.pack(fill="both", expand=True)
+
+    ttk.Label(outer, justify="left", text=message).pack(anchor="w")
+
+    def confirm(*_args):
+        answer["ok"] = True
+        win.destroy()
+
+    def cancel(*_args):
+        win.destroy()
+
+    buttons = ttk.Frame(outer)
+    buttons.pack(fill="x", pady=(16, 0))
+    cancel_btn = ttk.Button(buttons, text=cancel_text, command=cancel, bootstyle="secondary")
+    cancel_btn.pack(side="right")
+    confirm_btn = ttk.Button(buttons, text=confirm_text, command=confirm,
+                             bootstyle="warning" if danger else "primary")
+    confirm_btn.pack(side="right", padx=(0, 8))
+
+    default_btn = cancel_btn if danger else confirm_btn
+    win.protocol("WM_DELETE_WINDOW", cancel)
+    win.bind("<Escape>", cancel)
+    win.bind("<Return>", lambda _e: default_btn.invoke())
+    center_on(win, parent)
+    win.grab_set()
+    default_btn.focus_set()
+    parent.wait_window(win)
+    return answer["ok"]
+
+
 def ask_cash_method(parent, family, current):
     """
     今天的現金餘額要用哪一種算法。回傳選定的算法，取消就回 None（沿用原本的）。
