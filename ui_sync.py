@@ -463,6 +463,7 @@ class UiSyncMixin:
         ready = self.excel_open and not self.busy
         self.login_button.configure(state="normal" if ready else "disabled")
         self.fetch_button.configure(state="normal" if ready else "disabled")
+        self._apply_scope_state()
         # 「修改」不看 Excel 開著沒 —— 它改的是紀錄檔裡的基準，要寫 Excel 的時候
         # 寫入那邊自己會把檔案開起來。能不能按只看「這一位有沒有網頁資料」，
         # 那是 _fill_opening 判的。用銀行餘額推算的日子整組被藏起來

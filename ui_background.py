@@ -105,18 +105,31 @@ class UiBackgroundMixin:
         keep = max(self.account_choice.current(), 0)
         self.account_choice.configure(values=self._account_choices())
         self.account_choice.current(keep)
+        self._apply_scope_state()
         self._refresh_fetch_button()
+
+    def _scope_ready(self):
+        """範圍下拉能不能讓人手動切到某一組。
+
+        名字不到齊之前不給選：「登入」跟「更新全部帳戶」選在「全部」時
+        本來就會把每一組都登入一輪、順便知道名字（見 _on_logged_in），
+        這裡等的正是那一輪做完 —— 不然使用者可能在誰都還沒登入過的時候，
+        手動切到一個從沒動過的組別，按鈕只能落到「更新（第 N 組）帳戶」
+        那種叫不出名字的備援文字。模擬帳號一開機名字就有了，天生就緒。
+        """
+        return self.excel_open and not self.busy and all(
+            i in self.trader_of for i in range(1, len(self.accounts) + 1))
+
+    def _apply_scope_state(self):
+        self.account_choice.configure(state="readonly" if self._scope_ready() else "disabled")
 
     def _scope_order(self):
         """這次要做第幾組；None 代表全部。
 
-        只有一位交易人時，「全部」跟「他」是同一件事 —— 選單留著「全部」
-        給使用者看沒關係，但範圍要直接當成選了那一位，按鈕才寫得出
-        「更新（某某）」，不會因為選單還停在「全部」就一直顯示泛用的
-        「讀取網頁資料」。
+        不管只有一組還是有很多組，選單停在「全部」就是全部 —— 第一次
+        一定是全部讀取，之後要各別讀取得自己把選單切到那一組，按鈕文字
+        才會跟著換成「更新（某某）帳戶」或「更新（第 N 組）帳戶」。
         """
-        if len(self.accounts) == 1:
-            return 1
         choice = self.account_choice.current()
         return choice if choice > 0 else None
 
@@ -127,17 +140,18 @@ class UiBackgroundMixin:
 
     def _refresh_fetch_button(self):
         """
-        按鈕上的字就是「按下去會動到誰」。
+        按鈕上的字就是「按下去會動到誰」，一律用「更新」這個動詞。
 
         名字還不知道（那一組沒登入過）時寫「第 3 組」而不是硬掰一個名字：
-        這種時候按下去確實只做那一組，只是程式還說不出他是誰。
+        這種時候按下去確實只做那一組，只是程式還說不出他是誰。正常流程會先
+        按「登入」，那一步就會把名字補上，所以這條路很少真的走到。
         """
         order = self._scope_order()
         if order is None:
-            text = "讀取網頁資料"
+            text = "更新全部帳戶"
         else:
             name = self.trader_of.get(order)
-            text = f"更新（{name}）" if name else f"讀取網頁資料（第 {order} 組）"
+            text = f"更新（{name}）帳戶" if name else f"更新（第 {order} 組）帳戶"
         self.fetch_button.configure(text=text)
 
     def _on_scope_changed(self, _event=None):

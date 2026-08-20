@@ -217,12 +217,12 @@ class UiLayoutMixin:
         self.account_choice.grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
         self.account_choice.bind("<<ComboboxSelected>>", self._on_scope_changed)
 
-        # 按鈕上的字跟著範圍走：全部是「讀取網頁資料」，選了一位就是「更新（王小明）」
+        # 按鈕上的字跟著範圍走：全部是「更新全部帳戶」，選了一位就是「更新（王小明）帳戶」
         # —— 按下去會動到誰，寫在按鈕上，不必回頭去看那個下拉選單（見 _refresh_fetch_button）。
-        self.fetch_button = ttk.Button(top, text="讀取網頁資料", bootstyle="primary", command=self.start_fetch)
+        self.fetch_button = ttk.Button(top, text="更新全部帳戶", bootstyle="primary", command=self.start_fetch)
         self.fetch_button.grid(row=2, column=0, sticky="ew", pady=(6, 0))
 
-        # 提醒貼在「讀取網頁資料」旁邊：它講的正是按下那顆按鈕之後會發生的事，
+        # 提醒貼在「更新」按鈕旁邊：它講的正是按下那顆按鈕之後會發生的事，
         # 擺在一起才看得出因果，放到別的分頁或選單裡就沒人記得自己是哪一邊。
         # 這裡原本是一個「程式自動更新」開關，可以關掉改成人工維護；拿掉了 ——
         # 會開這支程式，就是要讓程式自動更新，這句話固定不變，不必再看開關。
