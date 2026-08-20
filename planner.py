@@ -330,7 +330,7 @@ def _cash_blocked(record, today, method, net, bank, unknown, has_today):
 
     if method == METHOD_BANK:
         if bank is None:
-            return "銀行餘額沒有讀到（剛換算法的話要再按一次「讀取網頁資料」），現金這格先不動"
+            return "銀行餘額沒有讀到（剛換算法的話要再按一次「讀取網頁資料」）"
         if "近期淨收付" not in record:
             return "近期淨收付沒有讀到，算不出還有哪幾筆沒交割，現金這格先不動"
         if unknown:

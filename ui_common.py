@@ -33,6 +33,8 @@ WIDTH_ENV_KEY, HEIGHT_ENV_KEY = "UI_WIDTH", "UI_HEIGHT"
 # 視窗再小就不叫小視窗，而是壞掉的版面：左邊名單擠成一條、右邊那幾格全是省略號。
 WINDOW_MIN_W, WINDOW_MIN_H = 640, 400
 
+CASH_METHOD_TOGGLE_ENV_KEY = "CASH_METHOD_TOGGLE"
+
 
 def font_size_from_env():
     """
@@ -56,6 +58,17 @@ def window_size_from_env():
     width, height = env_int(WIDTH_ENV_KEY, None), env_int(HEIGHT_ENV_KEY, None)
     return (max(WINDOW_MIN_W, width) if width else None,
             max(WINDOW_MIN_H, height) if height else None)
+
+
+def cash_method_toggle_enabled():
+    """
+    工具列上「現金算法」那個名字點一下能不能換算法。沒設、或設 1 就是開著
+    （原本的行為）；設 0 就關掉 —— 名字還在，但不綁點擊、游標也不會變手指，
+    看起來就是純顯示。2026/08/20 加點名字切換是為了測試方便，測得差不多之後
+    使用者要求能整個關掉，正式使用時避免手滑誤觸；要換算法就回到 .env
+    改設定重開程式，或關掉這個開關讓每天讀取前的那個對話框繼續問。
+    """
+    return env_int(CASH_METHOD_TOGGLE_ENV_KEY, 1) != 0
 
 
 FONT_SIZE = font_size_from_env()   # 全部文字統一用這個大小，標題／表頭另外加粗做區分，不再另外縮小字級

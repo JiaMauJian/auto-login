@@ -7,7 +7,7 @@ import ttkbootstrap as ttk
 import profile_tools
 from ui_common import (
     ALL_CHOICE, FONT_SIZE, HINT_SIZE, WHEN_TODAY, WHEN_WEEK, WINDOW_H, WINDOW_W,
-    build_columns, pick_font, wide, work_area,
+    build_columns, cash_method_toggle_enabled, pick_font, wide, work_area,
 )
 
 # 明細表的五欄：(欄名, 標題, 比重, 下限, 對齊)。比重與下限都照 10 級字的像素給，
@@ -351,12 +351,18 @@ class UiLayoutMixin:
         # 2026/08/20 加回「點一下可以改」（見 _toggle_cash_method）：問過、顯示出來
         # 之後，這個名字本身也是一個開關，點下去會先跳確認視窗再換，不必等重開程式
         # 或還原 Excel 備份。跳視窗問答的原本流程（每次重開程式、第一次讀取前）留著沒動。
+        #
+        # 測得差不多之後這顆開關本身也能關（.env 的 CASH_METHOD_TOGGLE，見
+        # ui_common.cash_method_toggle_enabled）：關掉時名字還在、但不綁點擊、
+        # 游標也不變手指，看起來純顯示，避免正式使用時手滑誤觸。
         self.method_box = ttk.Frame(opening)
         ttk.Label(self.method_box, text="現金算法", style="Hint.TLabel").pack(side="left")
+        toggle_on = cash_method_toggle_enabled()
         self.method_value = ttk.Label(self.method_box, style="Method.TLabel", text="",
-                                      cursor="hand2")
+                                      cursor="hand2" if toggle_on else "")
         self.method_value.pack(side="left", padx=(8, 0))
-        self.method_value.bind("<Button-1>", lambda _e: self._toggle_cash_method())
+        if toggle_on:
+            self.method_value.bind("<Button-1>", lambda _e: self._toggle_cash_method())
 
         # 基準數字＋「修改」包成一組，只在用「初始餘額累加」時顯示（見
         # _show_opening_row）——銀行餘額推算的日子每次讀取直接算好寫回 B8，
