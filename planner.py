@@ -105,9 +105,9 @@ def bank_balance(rows):
     return round(amount / 100, 2)
 
 
-def pending_total(rows, today):
+def pending_rows(rows, today):
     """
-    還沒交割的錢。回傳 (合計, 有金額的天數, 今天那一列的金額)。
+    還沒交割的錢，一個成交日一項。回傳 (項目清單, 合計, 今天那一列的金額)。
 
     來源是交割金額查詢（query610），一天一列，金額已經是那一天的淨額：
 
@@ -117,23 +117,30 @@ def pending_total(rows, today):
     交割日等於今天的那一列不補 —— 那筆錢今天早上就扣掉了（見 docs 裡的「前提」）。
     日期是 YYYYMMDD，直接比字串就是比大小。
 
+    項目清單每一項是 (標籤, 金額)，照成交日由新到舊排：最新的那一個成交日是
+    `T+0`（正常情況就是今天），往回一個交易日 `T+1`，依此類推。標籤是照回應裡
+    的列數往回數的，不是照日曆 —— 中間隔著週末或連假時，日曆算不出「前一個
+    交易日」，而這支查詢本來就一個交易日給一列。金額是 0 的那幾天照樣列出來，
+    算式上少一項比多一個 0 難懂（畫面與 B8 的公式都直接照這個清單攤開）。
+
     今天那一列（trade 等於今天）另外回傳給呼叫方做交叉檢查用：未實現損益說
     今天有成交、這裡卻是 0 或根本沒有今天，就是這份資料有問題（見 _cash_blocked）。
     沒有今天那一列時回 None —— 「今天沒有這一列」跟「今天是 0」要分得出來。
     """
     stamp = today.strftime("%Y%m%d")
-    total, days, today_amount = 0.0, 0, None
+    items, total, today_amount = [], 0.0, None
 
-    for row in rows:
+    ordered = sorted(rows, key=lambda row: str(row.get("trade") or "").strip(),
+                     reverse=True)
+    for age, row in enumerate(ordered):
         amount = to_num(row.get("pay_amt"))
         if str(row.get("trade") or "").strip() == stamp:
             today_amount = amount
         if str(row.get("cdate") or "").strip() > stamp:
+            items.append((f"T+{age}", amount))
             total += amount
-            if amount:
-                days += 1
 
-    return round(total, 2), days, today_amount
+    return items, round(total, 2), today_amount
 
 
 def traded_today(pnl_arrays, today):
@@ -275,24 +282,26 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
     proposal["blocked"] = False
 
     bank = pending = today_amount = None
-    pending_days = 0
+    pending_items = []
     if method == METHOD_BANK:
         bank = bank_balance(record.get("銀行餘額"))
-        pending, pending_days, today_amount = pending_total(
+        pending_items, pending, today_amount = pending_rows(
             record.get("交割金額", []), today)
     proposal["bank"] = bank
     proposal["pending"] = pending
-    proposal["pending_days"] = pending_days
+    proposal["pending_items"] = pending_items
 
     if balance is None:
         proposal["note"] = "B8 是空的或不是數字，請先填一個現金餘額"
         return proposal
 
     reason = _cash_blocked(record, today, method, net, bank, today_amount)
-    if reason:
+    if reason is not None:
         proposal["note"] = reason
         proposal["blocked"] = True
-        warnings.append("[現金] " + reason)
+        # 空字串 = 擋，但不多講一句（見 _cash_blocked 裡銀行餘額那一道）。
+        if reason:
+            warnings.append("[現金] " + reason)
         return proposal
 
     if method == METHOD_OPENING and cash.get("baseline_value") is None:
@@ -300,29 +309,85 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
         return proposal
 
     if method == METHOD_BANK:
+        amounts = [amount for _label, amount in pending_items]
         proposal["proposed"] = round(bank + pending, 2)
-        proposal["formula"] = cash_formula(bank, pending)
-        proposal["note"] = (
-            f"銀行餘額 {show(bank)} + 還沒交割的 {show(pending)}（{pending_days} 天的成交還沒扣款）"
-            if pending_days else
-            f"銀行餘額 {show(bank)}（沒有還沒交割的成交）"
-        )
+        proposal["formula"] = cash_formula(bank, *amounts)
+        proposal["note"] = _bank_note(bank, pending_items)
     else:
         proposal["proposed"] = ledger.cash_after(cash, today, net)
         proposal["formula"] = cash_formula(cash.get("baseline_value"), net)
-        proposal["note"] = f"今日淨收付 {show(net)}（{rows} 筆成交）"
+        # 不接「（N 筆成交）」（2026/08/21 使用者要求）。這一句要回答的是
+        # 「這個餘額怎麼來的」，筆數不在算式上，接在後面只是把一句已經很長的
+        # 話再拉長。筆數還在 net_rows 裡，「修改今日初始現金餘額」那個視窗有列。
+        proposal["note"] = _formula_note(
+            "今日初始現金餘額", cash.get("baseline_value"),
+            [("今日淨收付", net)], proposal["proposed"])
 
-    proposal["will_write"] = (
-        proposal["proposed"] is not None
-        and not same_number(balance, proposal["proposed"])
-    )
+    # 現金這一格只要算得出來就寫，兩種算法都一樣（2026/08/21 使用者要求）。
+    #
+    # 股數/成本那幾格還是「數字跟現在不一樣才寫」，現金不跟這條規則，
+    # 因為它寫進去的是公式（=893-238+0），不是一個數字。拿 same_number 擋，
+    # 擋掉的是「今天算出來剛好也是 655」—— 但格子裡那條公式可能是昨天的
+    # =900-245，數字對、明細過期，看起來卻像今天剛算的。人看 B8 不只看那個數字，
+    # 還看它是怎麼來的，所以每讀一次就把今天的算式覆蓋上去。
+    #
+    # 前面幾道「先不動」（讀不到資料、對不起來、還沒有基準）都已經在上面 return 掉了，
+    # 能走到這裡代表這個數字是算得出來、而且信得過的。
+    proposal["will_write"] = proposal["proposed"] is not None
     proposal["record_net"] = True
     return proposal
+
+
+def _bank_note(bank, items):
+    """
+    銀行餘額推算那一句：算式在前、數字在後，一個交割日一項。
+
+        銀行餘額 + 淨收付(T+0) + 淨收付(T+1) = 893 - 238 + 0 = 655
+
+    左邊是「這個數字是怎麼來的」，中間是「這次各是多少」，最後一個等號是算出來的
+    餘額 —— 就是要寫進 B8 的那個數字，不必自己心算才知道這串加起來是多少。
+    攤成一天一項是使用者 2026/08/21 要求的 —— 原本寫成「銀行餘額 893 + 還沒交割的
+    -238（1 天的成交還沒扣款）」，合計看不出是哪幾天湊的，對不上時只能回網頁
+    一列一列數。
+    """
+    if not items:
+        return _formula_note("銀行餘額", bank, [], None,
+                             "（沒有還沒交割的成交）")
+    labelled = [(f"淨收付({label})", amount) for label, amount in items]
+    total = round(bank + sum(amount for _label, amount in items), 2)
+    return _formula_note("銀行餘額", bank, labelled, total)
+
+
+def _formula_note(base_label, base, items, total, tail=""):
+    """
+    「這個數字是怎麼來的」那一句：名字在前、數字在中、算出來的餘額在最後。
+
+        銀行餘額 + 淨收付(T+0) + 淨收付(T+1) = 893 - 238 + 0 = 655
+        今日初始現金餘額 + 今日淨收付 = 893 - 238 = 655
+
+    兩種算法共用同一個形狀（2026/08/21 使用者要求）。今日初始那一種原本只寫
+    「今日淨收付 -238（1 筆成交）」—— 只講得出「今天動了多少」，講不出
+    「從多少開始、算完是多少」，而那两個數字才是要拿去跟 B8 對的。
+
+    中間那段數字跟寫進 B8 的公式是同一串（見 util.cash_formula），只差在這裡
+    加了空白與千分位逗點。畫面跟 Excel 對不起來的時候，兩邊講的是同一句話。
+
+    total 由呼叫方給，不在這裡加 —— 要顯示的正是真正要寫進 B8 的那個數字，
+    自己再加一次等於另外算一遍，算法一改就會跟實際寫進去的值分家。
+    """
+    if not items:
+        return f"{base_label} = {show(base)}{tail}"
+    names = " + ".join(label for label, _amount in items)
+    numbers = show(base) + "".join(
+        f" {'-' if amount < 0 else '+'} {show(abs(amount))}"
+        for _label, amount in items)
+    return f"{base_label} + {names} = {numbers} = {show(total)}{tail}"
 
 
 def _cash_blocked(record, today, method, net, bank, today_amount):
     """
     現金這一格該不該整個擋住不寫。要擋就回一句給人看的話，不擋回 None。
+    回空字串也是擋，只是不多講那一句 —— 用在「別的地方已經講過了」的情況。
 
     兩種算法各有各的破口，但形狀一樣：某一項資料其實是「查不到」，
     而查不到跟「就是 0」在數字上長得一模一樣。分不出來的時候一律不寫 ——
@@ -333,7 +398,12 @@ def _cash_blocked(record, today, method, net, bank, today_amount):
 
     if method == METHOD_BANK:
         if bank is None:
-            return "銀行餘額沒有讀到（剛換算法的話要再按一次「讀取」）"
+            # 擋住但不說話（2026/08/21 使用者要求）。這一道只剩兩種觸發方式，
+            # 兩種都不需要這句話：查詢真的失敗時，fetch 已經把具體原因寫進
+            # record["problems"]（見 fetch.bank_problem），畫面上那句講得比這句清楚；
+            # 剩下的情況是讀完才用點名字換算法（測試用入口，.env 關得掉），
+            # 那是自己剛手動改的，不必再被提醒一次。
+            return ""
         if "交割金額" not in record:
             return "交割金額查詢沒有讀到，算不出還有哪幾天沒交割，現金這格先不動"
         # 交叉檢查：未實現損益說今天有成交，交割金額查詢卻說今天沒有錢要交割。

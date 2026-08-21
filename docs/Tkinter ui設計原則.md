@@ -194,7 +194,99 @@ pyinstaller --name MyApp --onedir --collect-all ttkbootstrap --icon=app.ico your
 
 ---
 
-## 十二、參考資源
+## 十二、Treeview 要畫格線（Excel 那種灰線）
+
+ttk 的 `Treeview` **沒有**任何「畫格線」的選項。實測（Tk 8.6.12 + ttkbootstrap 2.2.2）確認以下三條路都不通：
+
+| 試過的做法                                    | 結果                                                     |
+| --------------------------------------------- | -------------------------------------------------------- |
+| `style.layout("Treeview.Separator", …)`       | `Layout Treeview.Separator not found`，Tk 根本沒這個 layout |
+| `style.configure("X.Treeview.Cell", relief="solid", borderwidth=1)` | 設得下去，畫面上什麼都沒有（padding 元素不畫框）        |
+| `fieldbackground` 設成線色                    | 只是整片底色，被每一列的 row 底色蓋掉                    |
+
+唯一可行的是 **image element**：做一張 1 像素寬的透明 `PhotoImage`，把要當線的那一條塗成灰色，用 `element_create(..., "image", ...)` 掛進 `Row` / `Cell` / `Item` 的 layout。
+
+```python
+line = style.colors.border                      # 用主題自己的灰，跟外框同一個顏色
+row_img = tk.PhotoImage(width=1, height=rowheight)
+row_img.put(line, to=(0, rowheight - 1, 1, rowheight))   # 只塗最底下那一列 → 橫線
+col_img = tk.PhotoImage(width=1, height=rowheight)
+col_img.put(line, to=(0, 0, 1, rowheight))               # 整條塗滿 → 直線
+self._grid_line_images = (row_img, col_img)     # ★ 一定要留參照，見第七章
+
+style.element_create("grid.row", "image", row_img, border=(0, 0, 0, 1), sticky="nswe")
+style.element_create("grid.col", "image", col_img, border=(0, 1, 0, 1), sticky="ns")
+
+style.layout("Treeview.Row", [
+    ("Treeitem.row", {"sticky": "nswe", "children": [("grid.row", {"sticky": "nswe"})]})])
+style.layout("Treeview.Cell", [
+    ("grid.col", {"side": "right", "sticky": "ns"}),
+    ("Treedata.padding", {"sticky": "nswe", "children": [
+        ("Treeitem.text", {"sticky": "nswe"})]})])
+```
+
+幾個一定要注意的點：
+
+- **`border` 是 9-patch 的固定邊**（left, top, right, bottom）。橫線給 `(0, 0, 0, 1)`：拉伸時只拉中間，最底下那 1 像素原樣不動。直線給 `(0, 1, 0, 1)`，高度才跟著格子拉伸（表頭比資料列矮，不給的話壓不到底）。
+- **要掛成 `Treeitem.row` 的「子元素」，不要取代它**。`Treeitem.row` 負責畫底色（tag 的底色、選取列的藍），取代掉就整片不見了。圖除了那條線以外是透明的，底色照樣透出來。
+- **`show="tree headings"` 的第一欄（`#0`）走的是 `Treeview.Item` 不是 `Treeview.Cell`**，要另外補一份，不然只有那一欄沒有右邊那條線。
+- **表頭（`Treeview.Heading`）的直線補不上去，別試**。Tk 給表頭跟給資料格的方框差 4 像素，兩段線接不起來，看起來是一節一節歪的；線排在 layout 的哪個位置、`Treeview.Cell` 的 `padding` 怎麼調都改不掉（實測 `padding=0`、`(4,0,0,0)`、`(4,2,0,2)` 全都差 4）。量法：`tree.bbox(iid, col)` 拿資料格的方框，再用 `ImageGrab` 抓圖數線落在哪個 x。表頭本來就有自己的底線跟資料分開，直線從第一列才開始並不奇怪。
+- 改的是 `Treeview.Row` / `Treeview.Cell` 這種**基底樣式的 layout**，全部 Treeview 一次到位，不必每張表各自設定。
+- 空白列（資料列數少於表格高度）畫不出線 —— Treeview 只畫存在的列，這點跟 Excel 不一樣，改不了。
+
+> **這個專案實際跑過之後又拿掉了（2026/08/21）**：畫面對，但**效能很差** —— 每一列、每一格都多一個 image element 要合成，捲動與重畫明顯變鈍（持股同步的表格不大都感覺得出來，20 個帳號的名單更明顯）。ttk 的 image element 沒有快取，每次重畫都是一次縮放合成。要格線的話，先確認表格夠小，或改用**斑馬紋**：`tree.tag_configure("stripe", background="#f2f2f2")`，填資料時奇數列掛上這個 tag （本專案改用這個做法，見 `ui_common.stripe`）。它只是換底色，沒有額外的元素要畫，重畫成本跟沒有它一樣；ttkbootstrap 的 `Tableview` 內建的 `stripecolor=("#f2f2f2", None)` 也是同一件事 —— 但 `Tableview` 是另一個元件（自帶搜尋列、分頁、排序，欄寬與列數也由它管），已經用 `ttk.Treeview` 寫好的表格不值得為了斑馬紋整組換過去，自己掛 tag 就有一樣的效果。
+
+> 一個要注意的地方：**已經有底色的列不要再加斑馬紋**。那些底色通常在講事情（這一列要寫、剛寫過、這一位要處理），被斑馬紋蓋掉就沒了；而一列同時掛兩個管底色的 tag，誰贏是 Tk 的內部順序決定的，看起來會時有時無。
+
+---
+
+## 十三、Treeview 沒有「照內容自動調欄寬」
+
+`ttk.Treeview` 的欄位只有三個旋鈕，三個都跟內容無關：
+
+| 選項                | 實際作用                                                     |
+| ------------------- | ------------------------------------------------------------ |
+| `width`             | 目前欄寬，寫死的數字，不會因為內容變長而變                   |
+| `minwidth`          | 使用者拖欄位邊界時的下限，同樣跟內容無關                     |
+| `stretch`           | 表格變寬時這一欄要不要分到多出來的空間，不是「照字長大」     |
+
+沒有 `resizeColumnsToContents` 這種東西（Tk 8.6.12 + ttkbootstrap 2.2.2 實測）。字比欄位寬的時候 **ttk 直接切，不補省略號**，而 Treeview 又沒有橫向捲軸，切掉的部分捲也捲不出來 —— 畫面上只會看到一個斷在半個字中間的數字，沒有任何跡象說它被切過。
+
+要照內容調就得自己量。本專案的做法在 `ui_common.fit_to_content` / `fit_columns`（同步分頁那兩張表），有三個地方是踩過才知道的：
+
+**1. 欄寬要補的不只是 padding，還有 ttk 自己吃掉的邊**
+
+一欄要多寬才不切字：
+
+```
+欄寬 = font.measure(要顯示的字) + 2 × (Treeview.Cell 的 padding + 4)
+```
+
+那個 `+4` 是每一格左右各自被 `Treeitem.text` 吃掉的邊，樣式調不掉。實測（12 級 Microsoft JhengHei UI、`padding=(8, 0)`）：`"104.6 → 10,400"` 量出來 113px，欄寬要 **137px** 字才畫得完整，而 113 + 8 + 8 只有 129 —— 少的 8px 剛好切掉最後一個字的一半。
+
+量法：`tree.bbox(iid, col)` 拿格子的方框，`ImageGrab.grab` 抓那一塊，數哪幾個 x 有墨跡。欄寬夠的時候墨跡寬度會停在一個定值（等於 `measure` 減掉字的邊距），不夠的時候會跟著欄寬一起縮 —— 那個轉折點就是最小不切欄寬。
+
+**2. 量測不能放進 `<Configure>`**
+
+`font.measure()` 是一次 Tcl 呼叫，**一個字串約 0.2ms**（跟字長幾乎無關，貴的是跨語言呼叫本身）。拖分隔線時 `<Configure>` 一秒噴幾十次，量測放進去就是每次重畫都重量整張表。
+
+正確的切法是把兩件事分開：**內容變了才量**（填完表叫一次，結果記在 widget 上），`<Configure>` 只拿現成的數字重攤。實測本專案：填完表重量 3.13ms／次，`<Configure>` 那條路 0.001ms／次。
+
+| 表格                            | 要量幾個字串 | 一次要多久 |
+| ------------------------------- | ------------ | ---------- |
+| 5 檔 × 3 欄（持股明細）         | 15           | ~3ms       |
+| 60 列 × 6 欄（歷程「今天」）    | 360          | ~70ms      |
+| 2000 列 × 6 欄（歷程「全部」）  | 12,000       | ~2.4 秒    |
+
+列數沒有上限的表格別直接套 —— 要嘛不量（照固定比重攤），要嘛先用 Python 的 `len()`（中日文字算 2）挑出每欄最長的幾個候選，只對候選呼叫 `measure`，這樣不管幾千列都是固定的十幾次。
+
+**3. 量出來的寬度加起來一定會有塞不下的時候**
+
+自動量只是把「理想寬度」算準，不會變出寬度。所以每一欄要有兩個數字：**理想**（裝得下現在的內容）與**下限**（還讀得出來的底線）。放得下就從理想起跳、多的照比重分；放不下就從理想往下限等比縮，縮到下限才開始切字。只有理想寬度、沒有下限的話，視窗一縮最右邊那一欄會被擠出畫面外，而那一欄不會留下任何存在過的痕跡。
+
+---
+
+## 十四、參考資源
 
 | 資源                           | 說明                                                    |
 | ------------------------------ | ------------------------------------------------------- |
@@ -204,7 +296,7 @@ pyinstaller --name MyApp --onedir --collect-all ttkbootstrap --icon=app.ico your
 
 ---
 
-## 十三、給 AI 的實作提醒
+## 十五、給 AI 的實作提醒
 
 當協助使用者撰寫 / 修改 tkinter 介面程式碼時：
 

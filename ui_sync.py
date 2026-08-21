@@ -1,11 +1,9 @@
-"""同步分頁的顯示與操作：左邊名單、右邊明細、現金那一條。"""
-
-import tkinter as tk
+"""同步分頁的顯示與操作：左邊名單、右邊明細、現金那張表。"""
 
 import ledger as ledger_mod
 import planner
 from util import show, to_num, values_match
-from ui_common import ask_opening_balance
+from ui_common import ask_opening_balance, fit_to_content, stripe
 
 
 def _neg_tag(value):
@@ -18,24 +16,6 @@ def stock_title(label):
     """從「股數（2059 川湖）」取出「2059 川湖」。取不到就原樣顯示。"""
     inside = label.partition("（")[2].rstrip("）")
     return inside or label
-
-
-def group_note(qty, cost):
-    """
-    一列的說明。兩格講的是同一件事就寫一次，否則各自標明是哪一格。
-
-    只有一格有話說的時候也要標 —— 「網頁庫存已無此檔」沒說是股數還是成本，
-    等於沒說。
-    """
-    notes = [(which, item["note"])
-             for which, item in (("股數", qty), ("成本", cost))
-             if item is not None and item["note"]]
-    if not notes:
-        return ""
-    present = len([item for item in (qty, cost) if item is not None])
-    if len(notes) == present and len({note for _which, note in notes}) == 1:
-        return notes[0][1]
-    return "；".join(f"{which}：{note}" for which, note in notes)
 
 
 class UiSyncMixin:
@@ -125,16 +105,17 @@ class UiSyncMixin:
         # 右邊不能停在一個名單上已經沒有的人身上。
         #
         # 名單一有人就一定要選中一位，不能等使用者自己點：名單是網頁資料長出來的
-        # （沒讀到的人不會在上面），讀完卻誰都沒選中的話，右邊會停在
-        # 「還沒有資料 —— 按上面的『讀取全部帳戶』」（見 _fill_head），
-        # 明明剛讀完、左邊也看得到人，那句話等於在說謊。
+        # （沒讀到的人不會在上面），讀完卻誰都沒選中的話，右邊會整片空白
+        # （見 _fill_detail），明明剛讀完、左邊也看得到人，右邊卻像什麼都沒讀到。
         # 剛開程式什麼都還沒讀的時候名單是空的，這行自己會落到 None，
         # 不必另外擋「還沒選過人」。
         if self.current_sheet not in names:
             self.current_sheet = names[0] if names else None
 
         need = 0
-        for name in names:
+        for index, name in enumerate(names):
+            # 現金餘額現在是隱藏欄（見 _build_people），值照樣填 —— 隱藏的意思是
+            # 「先不顯示」，不是「不算」，那一欄要回來的時候不必再回頭補這裡。
             writes, warns, cash, negative = self._summary(name)
             tags = []
             if writes:
@@ -151,7 +132,8 @@ class UiSyncMixin:
             self.people.insert(
                 "", "end", iid=name,
                 text=name + ("（模擬）" if name in self.fake_sheets else ""),
-                values=(cash, flag), tags=tuple(tags),
+                values=(cash, flag),
+                tags=tuple(tags) + stripe(index, "attention" in tags),
             )
 
         total = len(self.proposals)
@@ -222,13 +204,14 @@ class UiSyncMixin:
         name = self.current_sheet
         groups, cash = self._grouped(name)
 
-        # 高度照這位有幾檔算，但至少留八列 —— 每換一個人表格就跳一次高度、
-        # 底下的現金跟著上下移動，比空幾列還難看，所以下限抓在「手上大概會有
-        # 幾檔」而不是「這一位現在有幾檔」；上限只是防呆（真有人塞了三十檔，
-        # 那就讓它捲）。
-        self.tree.configure(height=max(8, min(len(groups), 18)))
+        # 高度照這位有幾檔算，但至少留五列。下限原本是八列 —— 那時候現金貼在這張表
+        # 底下，表格一跳高度現金就跟著上下移動，寧可空著幾列也不要它動。現金搬到
+        # 左邊並排之後（2026/08/21），它不再跟著這張表的高度走，下限就跟著改成
+        # 「左邊那一欄有多高」：現金表三列加底下那顆按鈕，差不多就是這裡五列，
+        # 兩邊收在同一段高度裡。上限只是防呆（真有人塞了三十檔，那就讓它捲）。
+        self.tree.configure(height=max(5, min(len(groups), 18)))
 
-        for group in groups:
+        for index, group in enumerate(groups):
             qty, cost = group.get("qty"), group.get("cost")
             both = [item for item in (qty, cost) if item is not None]
             if not both:
@@ -252,123 +235,152 @@ class UiSyncMixin:
             if any(item.get("missing") for item in both):
                 tags.append("missing")
 
+            # 說明欄拿掉了（2026/08/21，見 ui_layout.DETAIL_COLUMNS）——股票這邊
+            # 唯一寫得出來的那句「網頁庫存已無此檔」，訊息框裡本來就有一條講得更
+            # 清楚的提醒（第幾列、哪一檔、要不要刪）。這裡只剩「灰字＝網頁沒有它」。
             self.tree.insert(
                 "", "end",
                 values=(
                     stock_title(both[0]["label"]),
                     texts["qty"], texts["cost"],
-                    group_note(qty, cost),
                 ),
-                tags=tuple(tags),
+                tags=tuple(tags) + stripe(index, bool({"write", "done"} & set(tags))),
             )
 
-        self._fill_head(name)
+        # 欄寬照這一位的內容重算：股票名字有長有短（「2059 川湖」對「006208 富邦台50」），
+        # 值有時是一個數字、有時是「104.6 → 10,400」，固定欄寬一定有人被切到。
+        fit_to_content(self.tree)
+
         self._fill_cash(name, cash)
-        self._fill_opening(name, cash)
+        self._fill_notes(name)
+
+    def _refill_cash(self):
+        """只重畫現金那張表。人跟提案都從現在的狀態拿，換算法時用得到。"""
+        name = self.current_sheet
+        self._fill_cash(name, self._cash_item(name))
+        # 現金的說明現在寫在訊息框裡（見 _fill_cash），換算法整句話都會變，
+        # 只重畫表格的話那句話會留在上一種算法的版本。
         self._fill_notes(name)
 
     def _fill_cash(self, name, item):
         """
-        表格底下那一條現金：現金餘額　舊值 → 新值　說明：…
+        股票表旁邊那張現金表：一件事一列，欄位跟上面那張表對齊。
 
-        一段一段插，負的數字自己上紅字。沒資料就整條清掉 ——
-        換到還沒讀過的人時留著上一位的餘額，是這畫面上最危險的一種殘影。
+            現金                     金額
+            現金餘額            893 → 655
+            今日初始現金餘額          893
+            現金算法             銀行餘額推算
+
+        說明欄 2026/08/21 拿掉了（見 ui_layout.CASH_COLUMNS）：這幾列的說明
+        ——「銀行餘額 + 淨收付(T+0) + 淨收付(T+1) = 893 - 238 + 0 = 655」——是整個畫面上
+        最長的句子，擠在半個畫面寬的表格裡一定被切尾巴。它們收在 self.cash_notes
+        裡，由 _fill_notes 寫進底下的訊息框，那裡會自動換行。
+
+        沒資料的列就不畫（不是留一列空的）—— 換到還沒讀過的人時留著上一位的餘額，
+        是這畫面上最危險的一種殘影。負的數字整列上紅字（理由見 ui_layout 建這張表
+        那一段）。
+
+        今日初始現金餘額直接讀紀錄檔的現金基準（見 ledger.opening_balance），不是
+        提案算出來的 —— 它講的是「今天從多少錢開始」，跟這一輪要不要寫哪一格無關，
+        就算這位今天一格都不必動也要看得到。基準每天由當天第一次登入設成 B8，
+        所以正常情況它就是今天早上的那個數字。剛按過「修改」還沒落帳的時候寫成
+        「舊 → 新」，跟餘額那一列同一個寫法：按完卻還顯示舊數字，看起來就像沒按到。
+
+        現金算法這次執行還沒問過就不畫那一列。算法是這次程式開起來、第一次按
+        「讀取全部帳戶」時跳視窗問的，在那之前寫一個名字上去，看起來就像已經選好了
+        —— 而那時候顯示的其實是上次沿用下來的預設值。
         """
-        segments = []
+        rows = []
+
         if item is not None:
             before = self.before.get((name, item["cell"]), item["current"])
             after = item["proposed"] if item["will_write"] else item["current"]
-            turned = self._cash_turned(item, before)
-
-            segments.append(("現金餘額", "dim"))
-            segments.append(("　", None))
-            segments.append((show(before), _neg_tag(before)))
-            if not values_match(before, after):
-                segments.append(("　→　", None))
-                segments.append((show(after), _neg_tag(after)))
+            value = (show(after) if values_match(before, after)
+                     else f"{show(before)} → {show(after)}")
 
             # 「餘額轉負」擺在說明最前面 —— 後面那句「今日淨收付…」每天都在，
             # 由正變負卻是難得一次，排在後面會被當成例行文字滑過去。
             note = item["note"]
-            if note or turned:
-                segments.append(("　　說明：", "dim"))
-                if turned:
-                    segments.append(("餘額轉負", "turned"))
-                    if note:
-                        segments.append(("；", None))
-                if note:
-                    segments.append((note, None))
+            if self._cash_turned(item, before):
+                note = f"餘額轉負；{note}" if note else "餘額轉負"
+            rows.append(("balance", "現金餘額", value, note, _neg_tag(after)))
 
-        self.cash_line.configure(state="normal")
-        self.cash_line.delete("1.0", "end")
-        for text, tag in segments:
-            self.cash_line.insert("end", text, (tag,) if tag else ())
-        self.cash_line.configure(state="disabled")
-        # 高度要等版面算完寬度才知道換不換行，所以排到 idle 再量。
-        self.cash_line.after_idle(self._fit_cash_line)
+        if self.cash_method.get() == planner.METHOD_OPENING:
+            rows.append(("opening", "今日初始現金餘額", self._opening_text(name, item), "",
+                         _neg_tag(self._opening(name))))
 
-    def _fit_cash_line(self):
-        """
-        讓那一條剛好包住內容。說明偶爾會長到換行，固定一列會被切掉。
+        if self.path in self.cash_method_asked:
+            # 不寫「（點一下換）」：那個入口本來就是給測試用的（.env 關得掉），
+            # 在正式畫面上等於一句每天都在、卻幾乎不會用到的提示。滑鼠移過去
+            # 游標會變手指（見 _on_cash_motion），要用的人找得到。
+            rows.append(("method", "現金算法",
+                         planner.METHOD_NAMES[self.cash_method.get()], "", "method"))
 
-        高度沒變就什麼都不做 —— 這個函式也綁在 <Configure> 上，每改一次高度就是
-        一次新的 Configure，照改不誤的話兩個值會互相觸發、來回抖個不停。
-        """
-        try:
-            lines = self.cash_line.count("1.0", "end", "displaylines")[0]
-        except (tk.TclError, TypeError, IndexError):
-            lines = 1
-        height = max(1, min(lines, 3))
-        if height != int(self.cash_line["height"]):
-            self.cash_line.configure(height=height)
+        # 說明留給訊息框，表格只放名字跟值。空的說明不進去 —— 訊息框裡一行
+        # 「今日初始現金餘額：」後面什麼都沒有，比不寫還難懂。
+        self.cash_notes = [(title, note) for _key, title, _value, note, _tag in rows if note]
 
-    def _fill_opening(self, name, item):
-        """
-        現金那一條底下那一行：今日初始現金餘額，加一顆改它的按鈕。
+        self.cash_tree.delete(*self.cash_tree.get_children())
+        for index, (key, title, value, note, tag) in enumerate(rows):
+            self.cash_tree.insert("", "end", iid=key, values=(title, value),
+                                  tags=((tag,) if tag else ()) + stripe(index))
+        # 高度照實際有幾列給，多的空白留給底下的訊息框。一列都沒有的時候還是留 1
+        # ——Treeview 高度 0 在畫面上只剩一條表頭，看起來像壞掉。
+        self.cash_tree.configure(height=max(len(rows), 1))
+        # 欄寬照內容重算。這張表的列數會變（今日初始那一列只有一種算法有、
+        # 現金算法那一列問過才有），最長的字跟著換，所以每次填完都要重算一次。
+        fit_to_content(self.cash_tree)
 
-        數字直接讀紀錄檔的現金基準（見 ledger.opening_balance），不是提案算出來的
-        —— 它講的是「今天從多少錢開始」，跟這一輪要不要寫哪一格無關，就算這位
-        今天一格都不必動也要看得到。基準每天由當天第一次登入設成 B8，所以正常
-        情況它就是今天早上的那個數字。
-
-        剛按過「修改」還沒落帳的時候寫成「舊 → 新」，跟上面那一條同一個寫法：
-        按完卻還顯示舊數字，看起來就像沒按到。
-
-        整組（數字＋「修改」）只在用「初始餘額累加」時顯示（見 _show_opening_row）
-        —— 銀行餘額推算的日子每次讀取直接算好寫回 B8，這組今天用不到。
-        """
-        cash = self.ledger.sheet(name)["cash"] if (self.ledger is not None and name) else None
-        opening = ledger_mod.opening_balance(cash) if cash is not None else None
-
-        # 一位都還沒選（還沒讀過網頁資料）時寫破折號而不是「還沒設定」——
-        # 那時候是「不知道要看誰」，不是「這個人沒有基準」。
-        text = "—" if not name else ("(還沒設定)" if opening is None else show(opening))
-        if item is not None and item["reset_to"] is not None:
-            text = f"{text} → {show(round(item['reset_to'] - item['net'], 2))}"
-
-        number = to_num(opening, None)
-        self.opening_value.configure(
-            text=text, foreground=self.colors.danger if number is not None and number < 0 else "")
         self.opening_ready = (self.ledger is not None and item is not None
                               and not item["blocked"]
                               and self.cash_method.get() == planner.METHOD_OPENING)
         self._show_opening_row(self.cash_method.get() == planner.METHOD_OPENING)
         self._sync_buttons()
 
+    def _opening(self, name):
+        """某一位現在的現金基準（紀錄檔裡的今日初始現金餘額）。沒有就 None。"""
+        cash = self.ledger.sheet(name)["cash"] if (self.ledger is not None and name) else None
+        return ledger_mod.opening_balance(cash) if cash is not None else None
+
+    def _opening_text(self, name, item):
+        """今日初始現金餘額那一格要寫什麼字。"""
+        opening = self._opening(name)
+        # 一位都還沒選（還沒讀過網頁資料）時寫破折號而不是「還沒設定」——
+        # 那時候是「不知道要看誰」，不是「這個人沒有基準」。
+        text = "—" if not name else ("(還沒設定)" if opening is None else show(opening))
+        if item is not None and item["reset_to"] is not None:
+            text = f"{text} → {show(round(item['reset_to'] - item['net'], 2))}"
+        return text
+
+    def _on_cash_click(self, event):
+        """
+        現金表上點到「現金算法」那一列就換另一種算法（會先跳確認視窗）。
+        點別列不做事 —— 這張表其他列是純顯示。
+        """
+        if self.cash_tree.identify_row(event.y) == "method":
+            self._toggle_cash_method()
+
+    def _on_cash_motion(self, event):
+        """滑過「現金算法」那一列時游標變手指，不然沒有東西看得出那一列點得動。"""
+        want = "hand2" if self.cash_tree.identify_row(event.y) == "method" else ""
+        # 每次滑鼠移動都設一次的話，Tk 會不停重設游標，滑過表格時會閃。
+        if self.cash_tree.cget("cursor") != want:
+            self.cash_tree.configure(cursor=want)
+
     def _show_opening_row(self, show_it):
         """
-        用銀行餘額推算的日子，基準數字跟「修改」整組收起來，不占畫面。
+        用銀行餘額推算的日子，「修改今日初始現金餘額」那顆收起來，不占畫面。
 
-        它們講的是初始餘額累加那一種算法的基準，今天既然不用那種算法，
-        擺著只是佔位置。數字本身不會消失，只是沒顯示：基準每天照樣設，
+        它改的是初始餘額累加那一種算法的基準，今天既然不用那種算法，
+        擺著只是佔位置。基準本身不會消失，只是沒顯示：每天照樣設，
         明天切回初始餘額累加就要用它。
         """
         if show_it == bool(self.opening_row.winfo_manager()):
             return
         if show_it:
-            self.opening_row.pack(side="left")
+            self.opening_row.grid()
         else:
-            self.opening_row.pack_forget()
+            self.opening_row.grid_remove()
 
     def edit_opening(self):
         """
@@ -413,32 +425,44 @@ class UiSyncMixin:
                   "跟 Excel 上的數字剛好一樣，沒有格子要寫。"
                   + (f"紀錄檔更新了 {recorded} 筆（見歷程）。" if recorded else ""))
 
-    def _fill_head(self, name):
+    def _head_line(self, name):
         """
-        表格上方那一行：是誰、資料是幾點讀的。
+        「這份資料是誰的、什麼時候讀的」那一句：`簡嘉懋　讀取於 19:54:23`。
 
-        第幾位、現金多少、要寫幾格——2026/08/21 起併進下面的訊息框
-        （見 _fill_notes）當第一行。表頭跟提醒擠成同一種份量的字，看久了
-        分不出哪句是「這份資料還新不新」，哪句是提醒；名字留在表頭是因為
-        換人的時候第一眼要先確認「換對了沒」，這件事不能等捲到訊息框才看到。
+        原本是表格上方一行獨立的粗體標頭，2026/08/21 使用者要求收進訊息框
+        當第一行（見 _fill_notes、ui_layout._build_detail）。名字一定要跟資料
+        走在一起 —— 換人的時候第一眼要確認「換對了沒」，而畫面上另一個寫著名字
+        的地方是左邊名單那個反白，那講的是「我點了誰」，不是「右邊這些數字是誰的」。
+
         讀取時間精準到秒，不到分鐘——分鐘不夠精準的話，剛讀完跟半小時前讀的
         兩個時間點會長得一樣。
+
+        還沒讀過任何東西的時候整句留白（2026/08/21）——空的名單加空的表格，
+        自己就已經在說「還沒有資料」了，再寫一句只是把同一件事講第二次；
+        「然後要按哪顆」開機時狀態列已經講了（見 ui.py）。
         """
         if not name:
-            self.detail_head.configure(text="還沒有資料 —— 按上面的「讀取全部帳戶」")
-            return
+            return ""
 
         parts = [name + ("（模擬）" if name in self.fake_sheets else "")]
         read = self.read_at.get(name)
         parts.append(f"讀取於 {read:%H:%M:%S}" if read else "尚未讀取")
-        self.detail_head.configure(text="　".join(parts))
+        return "　".join(parts)
 
     def _fill_notes(self, name):
         """
-        訊息框第一行固定講選中這一位：名字、現金多少、這次要寫幾格
-        （原本在表頭，2026/08/21 搬下來，見 _fill_head；名字這裡也留一份，
-        方便捲到這個框時不必回頭看表頭）。往下才是提醒，而且只在「有事」的
-        時候出聲。
+        第一行是「這份資料是誰的、什麼時候讀的」（`簡嘉懋　讀取於 19:54:23`，
+        見 _head_line）：2026/08/21 使用者要求把原本表格上方那行標頭也收進來，
+        以後有讀取動作就固定放在這個框的第一行。往下是原本兩張表「說明」欄的
+        內容（同一天整批搬過來，見 ui_layout.DETAIL_COLUMNS），最後才是提醒，
+        而且提醒只在「有事」的時候出聲。
+        現金那幾句排在提醒前面：「這個數字是怎麼算出來的」是每天都要看一眼的事，
+        提醒則是有事才有，排前面會把每天都在的那句話往下擠。已經被 planner 當成
+        提醒送出來的那一句（被擋住不寫的理由，「[現金] …」）不再重複一次。
+
+        同一天拿掉的是另一行「簡嘉懋　現金 655　跟網頁一致」（也是使用者要求）：
+        現金在現金表第一列、要寫幾格是左邊名單上那個旗標（「要寫 3」／「✓」，
+        見 _fill_people），同一件事講兩次，只會讓每天都要讀的那幾句算式往下掉。
 
         20 個人的提醒全部堆在同一個框裡等於沒有提醒 —— 別人的事左邊名單上
         已經用 ⚠ 標出來了，要看就換過去看。整組失敗（problems）例外，
@@ -450,21 +474,37 @@ class UiSyncMixin:
         跟著狀態列一起出現、一起被下一句蓋掉。
         """
         text = []
+        warns = list(self.warnings.get(name, []))
         if name:
-            writes, _warns, cash, _negative = self._summary(name)
-            parts = [name]
-            if cash:
-                parts.append(f"現金 {cash}")
-            parts.append(f"要寫 {writes} 格" if writes else "跟網頁一致")
-            text.append("　".join(parts))
+            head = self._head_line(name)
+            if head:
+                text.append(head)
+            text += [f"{title}：{note}" for title, note in self.cash_notes
+                     if f"[現金] {note}" not in warns]
 
-        text += list(self.warnings.get(name, []))
+        text += warns
         for problem in self.problems:
             text.append(f"⚠ {problem}")
 
         self.warn_box.configure(state="normal")
         self.warn_box.delete("1.0", "end")
         self.warn_box.insert("1.0", "\n".join(text))
+        self.warn_box.configure(state="disabled")
+
+    def clear_notes(self):
+        """
+        把訊息框清空。換現金算法的時候呼叫（見 _set_method）。
+
+        裡面每一句都是點「讀取」那一刻算出來的，而換算法換掉的正是「現金那個
+        數字怎麼來」：算式、被擋住的理由都可能不再成立，而新的那一種可能根本還沒
+        去查資料（銀行餘額與交割金額只在選了那種算法的那一輪才查）。留著舊的
+        比什麼都不寫更危險 —— 那幾句看起來跟畫面上現在的數字是一套的。
+
+        下一次讀取（或者在名單上換一位）就會連同新算法重新填好。
+        """
+        self.cash_notes = []
+        self.warn_box.configure(state="normal")
+        self.warn_box.delete("1.0", "end")
         self.warn_box.configure(state="disabled")
 
     def _sync_buttons(self):
@@ -478,7 +518,7 @@ class UiSyncMixin:
         self._apply_scope_state()
         # 「修改」不看 Excel 開著沒 —— 它改的是紀錄檔裡的基準，要寫 Excel 的時候
         # 寫入那邊自己會把檔案開起來。能不能按只看「這一位有沒有網頁資料」，
-        # 那是 _fill_opening 判的。用銀行餘額推算的日子整組被藏起來
+        # 那是 _fill_cash 判的。用銀行餘額推算的日子整顆被藏起來
         # （_show_opening_row），這裡照樣設 state —— 藏著的按鈕設得動，
         # 放回來的時候就已經是對的狀態了。
         self.opening_button.configure(

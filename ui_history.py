@@ -6,7 +6,7 @@ import json
 from tkinter import messagebox
 
 from util import show
-from ui_common import ALL_CHOICE, WHEN_TODAY, ask_confirm
+from ui_common import ALL_CHOICE, WHEN_TODAY, ask_confirm, stripe
 
 # 「補登」這個來源已經沒有入口了（現金帳本分頁拿掉時一起收掉），
 # 但舊的歷程檔裡還有這種紀錄，名字要留著才不會顯示成一個英文代號。
@@ -127,7 +127,7 @@ class UiHistoryMixin:
                  and (item == ALL_CHOICE or row.get("label") == item)
                  and within(row.get("at"), when, today)]
 
-        for event in reversed(shown):         # 最新的放最上面
+        for index, event in enumerate(reversed(shown)):   # 最新的放最上面
             by = event.get("by", "")
             self.history_tree.insert(
                 "", "end",
@@ -138,7 +138,7 @@ class UiHistoryMixin:
                     SOURCE_NAMES.get(by, by),
                     event.get("note", ""),
                 ),
-                tags=(by,),
+                tags=(by,) + stripe(index),
             )
 
         counted = (f"{len(shown)} 筆" if len(shown) == len(self.history_rows)

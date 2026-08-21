@@ -3,7 +3,7 @@
 from tkinter import messagebox
 
 import profile_tools
-from ui_common import ask_confirm
+from ui_common import ask_confirm, stripe
 
 
 class UiCertMixin:
@@ -117,10 +117,11 @@ class UiCertMixin:
         # 沒憑證痕跡的 profile 只是雜訊 —— 這張表是給人挑「要從哪一個複製」，
         # 不是給人看「這台電腦裝了幾個 profile」，所以只列有痕跡的那幾個。
         found_candidates = [c for c in candidates if c["found"]]
-        for candidate in found_candidates:
+        for index, candidate in enumerate(found_candidates):
             item = self.migrate_tree.insert(
                 "", "end",
                 values=(candidate["browser"], candidate["name"], "有", str(candidate["path"])),
+                tags=stripe(index),
             )
             self._migrate_candidates[item] = candidate
 

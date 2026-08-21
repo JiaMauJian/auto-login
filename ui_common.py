@@ -23,6 +23,27 @@ ALL_CHOICE = "全部"
 # 再細的區間（挑日期、選月份）沒有人真的會用，卻要多一個日曆元件跟一整套錯誤處理。
 WHEN_TODAY, WHEN_WEEK = "今天", "近 7 天"
 
+# 斑馬紋：每隔一列鋪一層很淡的灰，讓眼睛橫著讀不會串行。
+#
+# 這是「畫格線」的替代做法（2026/08/21）。格線試過用 image element 畫出來，
+# 畫面對但效能很差 —— 每一列每一格都多一個元素要合成，捲動明顯變鈍
+# （見 docs/Tkinter ui設計原則.md 第十二節）。斑馬紋只是換底色，
+# 一列一個 tag，重畫成本跟沒有它一樣，而它解的是同一個問題。
+# 做法與 ttkbootstrap Tableview 的 stripecolor 相同，只是我們用的是 ttk.Treeview，
+# 自己掛 tag（Tableview 是另一個元件，帶搜尋列與分頁，換過去等於整組重寫）。
+STRIPE_COLOR = "#f2f2f2"
+
+
+def stripe(index, has_background=False):
+    """
+    第 index 列要不要加斑馬紋。回傳可以直接接在 tags 後面的 tuple。
+
+    已經有底色的列不加：那些底色在講事情（綠＝這次要寫、藍＝剛寫過、
+    名單上的綠＝這位要處理），蓋掉就沒了。一列同時掛兩個管底色的 tag，
+    最後誰贏是 Tk 的內部順序決定的，看起來會時有時無。
+    """
+    return ("stripe",) if index % 2 and not has_background else ()
+
 # 外觀設定，全部從 .env 讀，改完重開介面生效。
 
 FONT_ENV_KEY = "UI_FONT_SIZE"
@@ -87,21 +108,95 @@ def wide(pixels):
     return int(pixels * FONT_SIZE / 10)
 
 
+# 表格每一格左右各留的空白，跟 ui_layout 設 Treeview.Cell padding 用的是同一個數字。
+# 算欄寬時一定要扣掉它：ttk 的 padding 吃在格子「裡面」，欄寬扣掉 8+8 才是字能用的
+# 寬度。兩邊各寫各的下場是欄寬看起來夠、字卻少一位 ——2026/08/21 把留白從 4 加到 8
+# 之後，成本欄的「104.6 → 10,400」就被切成「104.6 → 10,40」，而 ttk 切字不補省略號、
+# 也沒有橫向捲軸，字就是斷在那裡。
+CELL_PAD = 8
+
+# padding 之外，ttk 每一格左右還會自己再吃掉幾個像素（Treeitem.text 元素的邊，
+# 樣式調不掉）。抓圖數像素量出來的：padding 8 的時候，「104.6 → 10,400」量出來
+# 113px，欄寬要 137px 字才畫得完整 —— 113 + 8 + 8 = 129 還差 8，也就是左右各 4。
+# 少算這 8px 的下場跟少算 padding 一樣：欄寬看起來剛好，最後一個字被切掉半個。
+CELL_EDGE = 4
+
+_FONTS = {}
+
+
+def _font(tree, spec):
+    """
+    拿一個可以量字寬的 Font。spec 是樣式裡查出來的字型（例如 "{Microsoft JhengHei UI} 12"）。
+
+    量的必須是表格真正在用的那一份字型，所以從樣式查、不自己拼 —— 字級是 .env
+    調得動的，兩邊分開算就會量出跟畫面不一樣的寬度。同一個字型只建一次：
+    每次 tkfont.Font(...) 都是在 Tcl 那邊多一個字型物件，填一次表建兩個就是慢慢漏。
+    """
+    # 查不到就退回這支程式自己挑的字型（樣式沒設過的表格；正常路徑不會走到）。
+    key = spec or "default"
+    if key not in _FONTS:
+        _FONTS[key] = tkfont.Font(root=tree, font=spec or (pick_font(), FONT_SIZE))
+    return _FONTS[key]
+
+
 def build_columns(tree, spec):
     """
     照 spec 把一張表的欄位設好，並讓寬度跟著表格伸縮。
 
     spec 是 (欄名, 標題, 比重, 下限, 對齊) 的序列，比重與下限都照 10 級字的像素給。
+    spec 存在 tree 上，之後 fit_to_content 只要拿到表格本身就重算得出來，
+    填表的地方不必再把欄位定義搬一份過去（ui_sync 也就不必認得 ui_layout）。
     """
+    tree.column_spec = spec
     for key, title, _weight, floor, anchor in spec:
         tree.heading(key, text=title)
         tree.column(key, width=wide(floor), minwidth=wide(floor), anchor=anchor, stretch=False)
     tree.bind("<Configure>", lambda _event: fit_columns(tree, spec))
 
 
+def fit_to_content(tree):
+    """
+    照表格現在的內容算出每一欄「不切字」要多寬，記在 tree 上，然後重攤一次。
+
+    ttk 的 Treeview 沒有「照內容自動調欄寬」這種東西（width/minwidth/stretch 三個
+    選項都跟內容無關，stretch 只管「變寬時要不要分到多的空間」），所以自己量。
+
+    填完資料的地方要叫一次 —— 內容變了寬度才跟著變。刻意不放進 <Configure>：
+    量一個字串是一次 Tcl 呼叫（實測 0.2ms），而拖分隔線時 Configure 一秒噴幾十次，
+    放進去等於每次重畫都重量整張表。同步分頁這兩張表最多 5 檔 × 3 欄，
+    一次約 3ms，而且只在按一下之後發生，感覺不出來；歷程表就不是這個量級
+    （「全部」是幾千列 × 6 欄，量下去要好幾秒），所以那張表沒有叫這支，
+    維持照固定比重攤。真要給它用的話得先加一層「只量最長的幾個」。
+
+    表頭也一起量：欄位再窄也不該窄到看不出這一欄叫什麼。
+    """
+    spec = getattr(tree, "column_spec", None)
+    if spec is None:
+        return
+
+    style = ttk.Style()
+    body = _font(tree, style.lookup("Treeview", "font"))
+    head = _font(tree, style.lookup("Treeview.Heading", "font"))
+    rows = [tree.item(iid, "values") for iid in tree.get_children()]
+
+    tree.content_widths = [
+        max([head.measure(title)]
+            + [body.measure(str(row[index])) for row in rows if index < len(row)])
+        + 2 * (CELL_PAD + CELL_EDGE)
+        for index, (_key, title, _weight, _floor, _anchor) in enumerate(spec)
+    ]
+    fit_columns(tree, spec)
+
+
 def fit_columns(tree, spec):
     """
-    把欄位寬度按比重攤進表格當下的寬度，每一欄不低於自己的下限。
+    把欄位寬度攤進表格當下的寬度：夠寬就照比重分多的，不夠寬就往下限方向縮。
+
+    每一欄有兩個數字：
+        下限  spec 裡寫死的「還讀得出來」寬度，擠到極限時的底線
+        理想  裝得下這一欄現在所有內容的寬度，由 fit_to_content 量出來記在 tree 上
+    量過的表格（同步分頁那兩張）從理想寬度起跳，沒量過的（歷程表）理想＝下限，
+    行為跟以前完全一樣。
 
     為什麼不交給 ttk 的 stretch：它只有在「一開始就放得下」的時候才會分配。
     欄寬總和一旦超過表格實際拿到的寬度，ttk 會整組凍住 —— 之後把視窗拉多寬、
@@ -110,10 +205,9 @@ def fit_columns(tree, spec):
     畫面外，而 Treeview 沒有橫向捲軸，捲也捲不出來。自己算就沒有那個狀態，
     任何寬度都是當場分配。
 
-    下限是「還讀得出來」的下限，不是好看的下限：擠到極限時寧可看到
-    「175,000 → 18…」，也不要一整欄消失 —— 明細表被切掉的偏偏是「狀態」跟
-    「說明」，這一格程式會不會覆蓋、為什麼不覆蓋，答案就在那兩欄裡。字級調大或把中間
-    那條分隔線往右拖，切掉的就更多。
+    下限是「還讀得出來」的下限，不是好看的下限：擠到極限時寧可看到切了尾巴的
+    「175,000 → 18」（ttk 是直接切，不會給省略號），也不要一整欄消失 ——
+    被切掉的那一欄不會有任何跡象說它存在過，使用者只會看到一張少了一欄的表。
     """
     room = tree.winfo_width()
     if room <= 1:
@@ -121,12 +215,33 @@ def fit_columns(tree, spec):
 
     floors = [wide(floor) for _key, _title, _weight, floor, _anchor in spec]
     weights = [weight for _key, _title, weight, _floor, _anchor in spec]
-    spare = max(room - sum(floors), 0)
-    widths = [floor + spare * weight // sum(weights)
-              for floor, weight in zip(floors, weights)]
-    if spare:
-        # 整數除法會掉幾個像素，全部補給最後一欄（兩張表都是「說明」），才會剛好填滿。
-        widths[-1] += room - sum(widths)
+    measured = getattr(tree, "content_widths", None)
+    # 量出來的理想寬度不會低於下限：內容短的時候（例如整欄都是「300」）欄位還是
+    # 要留住原本的樣子，不然表格會隨著資料一格一格抖動。
+    wants = ([max(floor, want) for floor, want in zip(floors, measured)]
+             if measured else list(floors))
+
+    spare = room - sum(wants)
+    if spare >= 0:
+        # 放得下：多出來的照比重分，主要給會變長的那一欄（見 DETAIL_COLUMNS）。
+        widths = [want + spare * weight // sum(weights)
+                  for want, weight in zip(wants, weights)]
+    else:
+        # 放不下：從理想寬度往下限方向等比縮，可以讓的多就讓得多。縮到下限就停，
+        # 之後才開始切字 —— 先切最寬鬆的那一欄，比每一欄都切一點好讀。
+        slack = [want - floor for want, floor in zip(wants, floors)]
+        cut = min(-spare, sum(slack))
+        widths = ([want - cut * piece // sum(slack) for want, piece in zip(wants, slack)]
+                  if sum(slack) else list(floors))
+
+    # 整數除法會掉幾個像素，全部補給最後一欄，才會剛好填滿。差的是個位數像素，
+    # 落在哪一欄都看不出來（同步分頁那兩張表的最後一欄是靠右對齊的數字，
+    # 多幾個像素只是整欄一起往右挪一點點）。
+    # 補到低於下限就不補：全部縮到底還是塞不下的時候，room - sum 是一整段負數，
+    # 補下去等於把最後一欄壓扁，那一欄的字會整片不見。
+    rest = room - sum(widths)
+    if widths[-1] + rest >= floors[-1]:
+        widths[-1] += rest
 
     for (key, _title, _weight, _floor, _anchor), width in zip(spec, widths):
         # 值沒變就別寫回去 —— 改欄寬會再引來一次 Configure，兩邊互相觸發會抖。
@@ -363,7 +478,9 @@ def ask_cash_method(parent, family, current):
         "今天的現金餘額要用哪一種算法？"
     )).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-    for index, key in enumerate((planner.METHOD_BANK, planner.METHOD_OPENING)):
+    # 初始餘額累加排在前面、也是預設選項：它是「想不出今天算哪一種」時比較安全的
+    # 那一個 —— 全額交割當天選錯（用了銀行餘額推算）會扣兩次，隔天才看得出來。
+    for index, key in enumerate((planner.METHOD_OPENING, planner.METHOD_BANK)):
         ttk.Radiobutton(outer, text=planner.METHOD_NAMES[key], value=key,
                         variable=choice, style="Choice.TRadiobutton").grid(
             row=2 + index, column=0, sticky="w", pady=4)
@@ -372,8 +489,8 @@ def ask_cash_method(parent, family, current):
     # 選過一次了）。「全額交割要選哪一種」單獨一行、用跟主畫面「現金算法」
     # 同一種藍字（Method.TLabel），因為這是唯一一句填錯會被吃掉、隔天才看得出來的話。
     ttk.Label(outer, justify="left", style="Hint.TLabel", text=(
-        f"{planner.METHOD_NAMES[planner.METHOD_BANK]} ＝ 銀行餘額(網頁) ＋ 還沒扣款的交割金額(網頁)\n"
-        f"{planner.METHOD_NAMES[planner.METHOD_OPENING]} ＝ 現金餘額(Excel) ＋ 當日淨收付(網頁)"
+        f"{planner.METHOD_NAMES[planner.METHOD_OPENING]} ＝ 現金餘額(Excel) ＋ 當日淨收付(網頁)\n"
+        f"{planner.METHOD_NAMES[planner.METHOD_BANK]} ＝ 銀行餘額(網頁) ＋ 還沒扣款的交割金額(網頁)"
     )).grid(row=4, column=0, sticky="w", pady=(10, 0))
 
     ttk.Label(outer, justify="left", style="Method.TLabel", text=(

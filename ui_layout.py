@@ -6,17 +6,52 @@ import ttkbootstrap as ttk
 
 import profile_tools
 from ui_common import (
-    ALL_CHOICE, FONT_SIZE, HINT_SIZE, WHEN_TODAY, WHEN_WEEK, WINDOW_H, WINDOW_W,
-    build_columns, cash_method_toggle_enabled, pick_font, wide, work_area,
+    ALL_CHOICE, CELL_PAD, FONT_SIZE, HINT_SIZE, WHEN_TODAY, WHEN_WEEK, WINDOW_H, WINDOW_W,
+    STRIPE_COLOR, build_columns, cash_method_toggle_enabled, pick_font, wide, work_area,
 )
 
-# 明細表的五欄：(欄名, 標題, 比重, 下限, 對齊)。比重與下限都照 10 級字的像素給，
-# 實際寬度由 wide() 乘上字級，再由 fit_columns 按比重攤進表格當下的寬度。
+# 明細表的三欄：(欄名, 標題, 比重, 下限, 對齊)。比重與下限都照 10 級字的像素給，
+# 實際寬度由 wide() 乘上字級。
+#
+# 這兩張表的欄寬 2026/08/21 起以「裝得下現在的內容」為準（見 ui_common.fit_to_content
+# 與 ui_sync 填完表之後那兩行）：下限只在內容縮不下去的時候才用得到，比重只決定
+# 「多出來的寬度給誰」。ttk 本身沒有照內容調欄寬的功能，是自己量字寬算出來的。
+#
+# 2026/08/21 現金那張表搬到旁邊並排之後，這張表只分到右半邊的一半寬度，下限跟著
+# 調低（原本 90/110/95/60）—— 三欄的下限加起來要放得進視窗縮到最小時它拿得到的
+# 寬度，不然最右邊那欄會被切在畫面外，而 Treeview 沒有橫向捲軸，捲也捲不出來。
+# 一般尺寸下幾乎沒有差別：那時候寬度是按比重攤的，下限只是起跳點。
+#
+# 同一天再拿掉第四欄「說明」（原本 150/40）：兩張表並排之後每一欄都只剩一半寬度，
+# 說明放的是整句話，一定被切尾巴 —— 而切了尾巴的句子比沒有那一欄更糟，看得到開頭
+# 就會以為讀得完。這一欄的內容整批搬到底下的訊息框（見 ui_sync._fill_notes）：
+# 那裡是整段寬度、會自動換行，長句子本來就該長在那裡。
+# 股票這邊唯一寫得出來的說明是「網頁庫存已無此檔」，而那件事訊息框本來就有一條
+# 更完整的提醒（planner.plan 裡「在網頁庫存中已不存在」那句），所以是真的沒少東西。
+#
+# 空出來的寬度全部給「股票」（比重 300 對 90/90）：另外兩欄是靠右對齊的數字，
+# 長度封頂在「553,161 → 524,854」，給多了只是在數字左邊空出一片；股票那一欄
+# 放的是「006208 富邦台50」這種會變長的名字。
 DETAIL_COLUMNS = (
-    ("stock", "股票", 140, 90, "w"),
-    ("qty", "股數", 175, 110, "e"),
-    ("cost", "成本", 150, 95, "e"),
-    ("note", "說明", 150, 60, "w"),
+    ("stock", "股票", 300, 90, "w"),
+    ("qty", "股數", 90, 75, "e"),
+    ("cost", "成本", 90, 75, "e"),
+)
+
+# 現金表的兩欄，格式同上。說明欄跟明細表一起拿掉了（原本 250/70），理由見上面
+# 那段 —— 現金這一句（「銀行餘額 + 淨收付(T+0) + 淨收付(T+1) = 893 - 238 + 0 = 655」）
+# 每天都在、又是整個畫面上最長的一句，本來就是被切得最兇的那一欄。它現在是訊息框
+# 的第二行（見 ui_sync._fill_notes）。
+#
+# 現金算法那一列沒有金額（它不是一個數目），名字改寫在「金額」欄 —— 那個標題對
+# 這一列來說是不準的，但比起為了它單獨留一欄，寧可讓這一列的值跟另外兩列對齊在
+# 同一個位置。點得動的是整列不是某一欄（見 ui_sync._on_cash_click），所以搬欄
+# 不影響切換算法。
+#
+# 金額欄的下限 75 → 95：以前它只放數字，現在還要放得下「銀行餘額推算」六個字。
+CASH_COLUMNS = (
+    ("item", "現金", 100, 105, "w"),
+    ("value", "金額", 60, 95, "e"),
 )
 
 # 歷程表的七欄，格式同上。
@@ -45,7 +80,7 @@ class UiLayoutMixin:
         # .env 填了 UI_WIDTH/UI_HEIGHT 就用他填的，可用區這一關照樣要過。
         left, top_edge, right, bottom = work_area(self.root)
         room_w, room_h = right - left, bottom - top_edge
-        width = min(WINDOW_W or wide(1300), room_w - 80)
+        width = min(WINDOW_W or wide(960), room_w - 80)
         # 高度不跟著帳號數長：名單本來就有捲軸，滑鼠滾兩下的成本遠低於「20 個帳號
         # 就開一個佔滿整個桌面的視窗」。要一次看完整份名單就自己把視窗拉高，
         # 或在 .env 設 UI_HEIGHT。
@@ -57,7 +92,10 @@ class UiLayoutMixin:
         x = left + max((room_w - width) // 2, 0)
         y = top_edge + max((room_h - height) // 2, 0)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
-        self.root.minsize(min(wide(900), width), min(wide(560), height))
+        # 最窄 1000（原本 900）：右半邊現在要並排放兩張表（現金｜股票），兩張表的
+        # 欄位下限加起來就是那個數字 —— 再窄下去只能靠切欄位換，而切掉的會是
+        # 「今日初始現金餘額」這種一眼要認出是哪一列的字。
+        self.root.minsize(min(wide(1000), width), min(wide(560), height))
 
         # ttkbootstrap：套一個主題，元件仍是原本的 ttk.* 名字（ttkbootstrap 是 ttk 的
         # 相容包裝）——theme_use 改的是 Tcl 層的樣式表，不管元件是哪個 Python 類別
@@ -67,6 +105,11 @@ class UiLayoutMixin:
         self.colors = style.colors
         style.configure("Treeview", font=(family, FONT_SIZE), rowheight=wide(28))
         style.configure("Treeview.Heading", font=(family, FONT_SIZE, "bold"))
+        # 每一格左右各留一點空（2026/08/21 使用者反應「數字貼太緊」）。預設只留
+        # 4 像素，靠右的數字幾乎貼著欄位邊界，跟隔壁欄的字擠在一起。
+        # 數字寫在 ui_common.CELL_PAD：這段留白是吃在格子裡面的，算欄寬的時候
+        # 要扣掉同一個數字，兩邊分開寫就會欄寬看起來夠、字卻被切掉最後一位。
+        style.configure("Treeview.Cell", padding=(CELL_PAD, 0))
         # 選取列統一用 cosmo 的 primary 藍 + 白字，不用預設的灰（cosmo 的 selectbg
         # 本來就是灰，不是藍）。配在這裡等於全部表格共用，不必每張表各自設一次。
         style.map("Treeview", background=[("selected", self.colors.primary)],
@@ -253,11 +296,19 @@ class UiLayoutMixin:
         self.people_count = ttk.Label(head, text="", style="Hint.TLabel")
         self.people_count.pack(side="right")
 
-        self.people = ttk.Treeview(box, columns=("cash", "flag"), show="tree headings",
-                                   selectmode="browse")
+        # 名單上現在只看得到姓名跟狀態。「現金餘額」那一欄 2026/08/21 使用者要求
+        # 隱藏 —— 現金那張表已經把餘額、今日初始餘額、算法一起攤在右邊，名單再列
+        # 一次只是同一個數字的第二個版本，而兩個版本永遠有一個是舊的（一次只讀
+        # 一位的時候，別人那一格是上一輪的）。錢是負的還是會讓名字變紅字
+        # （negative 標籤），數字則回到右邊那張表上看。
+        #
+        # 是「隱藏」不是「拿掉」：欄位還在、值也照樣填（見 _fill_people），只是
+        # displaycolumns 沒把它列出來。要讓它回來就把下面那個 displaycolumns 刪掉，
+        # 一行的事，其他什麼都不用改。
+        self.people = ttk.Treeview(box, columns=("cash", "flag"), displaycolumns=("flag",),
+                                   show="tree headings", selectmode="browse")
         self.people.heading("#0", text="姓名")
         self.people.column("#0", width=wide(120), minwidth=wide(80), stretch=True)
-        # 現金餘額直接列在名單上 —— 下單前最想知道的就是這個人還有多少錢，不必點進去。
         self.people.heading("cash", text="現金餘額")
         self.people.column("cash", width=wide(100), minwidth=wide(80), anchor="e", stretch=False)
         self.people.heading("flag", text="狀態")
@@ -270,6 +321,7 @@ class UiLayoutMixin:
 
         # 底色管「要不要處理」、前景色管「錢是不是負的」。兩件事用不同屬性，
         # 才能同時成立而不會互相蓋掉。
+        self.people.tag_configure("stripe", background=STRIPE_COLOR)
         self.people.tag_configure("attention", background="#eaf4ea")
         self.people.tag_configure("warned", foreground=self.colors.warning)
         self.people.tag_configure("negative", foreground=self.colors.danger)
@@ -283,10 +335,11 @@ class UiLayoutMixin:
         box = ttk.Frame(split)
         split.add(box, weight=1)
 
-        # 標頭把「是誰、第幾位、現金多少、要寫幾格」寫在同一行，而且固定在上面。
-        # 原本這些寫在群組列上，一捲就不見了。
-        self.detail_head = ttk.Label(box, text="", font=(self.family, FONT_SIZE, "bold"))
-        self.detail_head.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        # 這裡原本有一行粗體標頭（「簡嘉懋　讀取於 19:54:23」）。2026/08/21 使用者
+        # 要求把它也收進底下的訊息框當第一行（見 ui_sync._fill_notes）：右半邊
+        # 由上到下本來有標頭、兩張表、訊息框四塊，而標頭跟訊息框講的是同一種話
+        # ——「這份資料是誰的、什麼時候來的、有什麼要注意」。併成一塊之後表格
+        # 直接從最上面開始，看資料的眼睛不必先跳過一行字。row 0 就空著不佔高度。
 
         # 版面照 Excel 那張「持股資料」表：一檔股票一列，股數與成本並排。
         #
@@ -297,12 +350,12 @@ class UiLayoutMixin:
         #
         # 值平常只寫一個數字，有話要說的時候才寫成兩個（「舊 → 新」，或不會寫的
         # 「現值（網頁 …）」）。20 檔裡通常只有一兩格要動，這樣掃一眼就找得到。
-        # 說明是唯一會伸縮的一欄，剩多少寬度給它多少。
-        # 五欄全部可伸縮，寬度靠 wide()/build_columns 按比重攤，不用手動寫死。
+        # 三欄全部可伸縮，寬度靠 wide()/build_columns 按比重攤，不用手動寫死，
+        # 多出來的寬度主要給「股票」那一欄（見 DETAIL_COLUMNS）。
         #
         # minwidth 是「還讀得出來」的下限，不是好看的下限 —— 擠到極限時寧可看到
-        # 「175,000 → 18…」，也不要一整欄消失。五欄的下限加起來比視窗縮到最小時
-        # 右半邊拿得到的寬度還小，所以任何尺寸下五欄都留在畫面上。
+        # 「175,000 → 18…」，也不要一整欄消失。三欄的下限加起來比視窗縮到最小時
+        # 右半邊拿得到的寬度還小，所以任何尺寸下三欄都留在畫面上。
         self.tree = ttk.Treeview(box, columns=[c[0] for c in DETAIL_COLUMNS],
                                  show="headings", selectmode="browse")
         # 寬度一變就重新攤一次（拖分隔線、改視窗大小都算）。
@@ -310,87 +363,87 @@ class UiLayoutMixin:
 
         bar = ttk.Scrollbar(box, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=bar.set)
-        self.tree.grid(row=1, column=0, sticky="nsew")
-        bar.grid(row=1, column=1, sticky="ns")
+        # 右半邊（現金在左、股票在右，見下面那張表）。
+        self.tree.grid(row=1, column=1, sticky="nsew")
+        bar.grid(row=1, column=2, sticky="ns")
 
-        # 顏色只用來輔助，不是唯一線索 —— 說明欄本身就寫著字。
+        # 顏色只用來輔助，不是唯一線索 —— 同一件事訊息框裡有一句話寫著
+        # （見 ui_sync._fill_notes），值那一欄也看得出「舊 → 新」。
+        self.tree.tag_configure("stripe", background=STRIPE_COLOR)
         self.tree.tag_configure("write", background="#eaf4ea")
         self.tree.tag_configure("done", background="#eaf0fb")
         self.tree.tag_configure("missing", foreground=self.colors.secondary)
 
-        # 現金自己一條，不塞進上面那張表。Excel 裡它本來就在「持股資料」那張表
+        # 現金自己一張表，不塞進股票那張。Excel 裡它本來就在「持股資料」那張表
         # 外面（B8），而且它的網頁值是「今日淨收付」不是餘額 —— 跟股數成本不同義，
         # 擺進同一欄底下會讓人以為那是網頁上的餘額。
         #
-        # 用 Text 而不是 Label：Label 只能整行一個顏色，於是「553,161 → -13,877,373」
-        # 這種一正一負的行只能整行紅（正數被染紅在說謊）或整行不紅（負數看不出來）。
-        # Text 可以一段一段上色，負的那個數字自己紅，其餘照常。
-        # 看起來要像一行字、不像輸入框：跟著面板底色、拿掉外框、關掉游標。
-        panel = ttk.Style().lookup("TFrame", "background") or self.root.cget("background")
-        self.cash_line = tk.Text(box, height=1, wrap="word", font=(self.family, FONT_SIZE),
-                                 background=panel, relief="flat", highlightthickness=0,
-                                 insertwidth=0, cursor="arrow", state="disabled")
-        self.cash_line.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.cash_line.tag_configure("dim", foreground="black")
-        self.cash_line.tag_configure("neg", foreground=self.colors.danger)
-        # 「餘額轉負」跟負數同一個紅 —— 它講的就是那個負數，兩種顏色會讓人
-        # 以為是兩件事。
-        self.cash_line.tag_configure("turned", foreground=self.colors.danger)
-        # 拖動中間那條分隔線會改變寬度，說明就可能從一行變兩行 —— 寬度變了就重量一次。
-        self.cash_line.bind("<Configure>", lambda _event: self._fit_cash_line())
+        # 2026/08/21 由「一條 Text ＋一行標籤＋一顆按鈕」改成一張表。現金這邊要看的
+        # 已經不只餘額一個數字：還有今日初始現金餘額、今天用哪一種算法，本來是同一組
+        # 東西卻長成三種不同的形狀，各自對齊各自的左邊。整成表格之後兩邊同一個排法
+        # （項目、值）。
+        #
+        # 同一天再改成左右並排（原本現金那張貼在股票那張底下）：股票那張表高度是
+        # 照「手上大概會有幾檔」給的，實際上常常只有兩三檔，右邊那半塊有大半是空的
+        # ——與其讓現金排在那片空白下面，不如搬到旁邊，兩張表一起收在同一段高度裡。
+        # 代價是兩張表各自變窄，長句子放不下 —— 所以同一天把兩張表的「說明」欄
+        # 整個拿掉，那些話改在底下的訊息框講（見 DETAIL_COLUMNS、_fill_notes）。
+        #
+        # 另一個代價寫在這裡：原本用 Text 是為了一段一段上色 ——「553,161 → -13,877,373」
+        # 這種一正一負的字串只讓負的那個紅。Treeview 的前景色是一整列的，所以改成
+        # 整列照「換完之後是不是負的」上色；被多染紅的只有箭頭左邊那個舊值，
+        # 而那一列真正要看的本來就是箭頭右邊那個數字。
+        # 表格跟底下那顆按鈕包成一塊，才會黏在一起 —— 直接排在 box 上的話，
+        # 按鈕落在「表格那一列」的下面，而那一列的高度是由右邊比較高的股票表撐出來的，
+        # 中間會空一大段。sticky 不給 "s"：現金列數比右邊少，跟著拉長只會多出
+        # 一片空的表格底。
+        cash_box = ttk.Frame(box)
+        cash_box.grid(row=1, column=0, sticky="new", padx=(0, 12))
+        cash_box.columnconfigure(0, weight=1)
 
-        # 現金那一條底下再貼一條：今天是從多少錢開始的。
+        self.cash_tree = ttk.Treeview(cash_box, columns=[c[0] for c in CASH_COLUMNS],
+                                      show="headings", selectmode="none", height=3)
+        build_columns(self.cash_tree, CASH_COLUMNS)
+        self.cash_tree.grid(row=0, column=0, sticky="ew")
+        self.cash_tree.tag_configure("stripe", background=STRIPE_COLOR)
+        self.cash_tree.tag_configure("neg", foreground=self.colors.danger)
+        # 現金算法那一列用主題藍加粗，跟原本那個 Method.TLabel 一樣 ——
+        # 「今天的錢是用哪一種算法算出來的」不該要人回想。
+        self.cash_tree.tag_configure("method", foreground=self.colors.primary,
+                                     font=(self.family, FONT_SIZE, "bold"))
+
+        # 「點一下換算法」原本綁在那個名字標籤上，名字進了表格就改綁在那一列上
+        # （見 _on_cash_click）。.env 的 CASH_METHOD_TOGGLE 設 0 就整個不綁，
+        # 名字照樣看得到、游標也不變手指，避免正式使用時手滑誤觸
+        # （見 ui_common.cash_method_toggle_enabled）。
+        if cash_method_toggle_enabled():
+            self.cash_tree.bind("<Button-1>", self._on_cash_click)
+            self.cash_tree.bind("<Motion>", self._on_cash_motion)
+
+        # 表格底下單獨一排：改「今日初始現金餘額」那一列的按鈕。
         #
         # 餘額不是網頁抄來的，是「今日初始現金餘額 + 今日淨收付」算出來的，所以
-        # 餘額不對的時候要改的是這個數字。它一直只存在紀錄檔裡，畫面上看不到，
-        # 而唯一改得到它的入口是程式自己判斷該不該跳的那個對話框 —— 沒跳、
-        # 或跳的時候填錯，就得等明天。擺一個固定的位置給它就沒有這種時段了。
+        # 餘額不對的時候要改的是那個數字。它一直只存在紀錄檔裡，唯一改得到它的入口
+        # 曾經是程式自己判斷該不該跳的那個對話框 —— 沒跳、或跳的時候填錯，就得等明天。
         #
-        # 貼在現金那一條正下方，因為要看的是兩者的關係（初始 + 今日 = 現在）。
-        opening = ttk.Frame(box)
-        opening.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 0))
-
-        # 今天用哪一種現金算法，就貼在這一行的最左邊。
-        #
-        # 它是全部人共用的一個設定，但顯示在這裡，因為它管的正是右邊那組：
-        # 用銀行餘額推算的日子，基準數字跟「修改」整組不見（見 _show_opening_row）。
-        # 這次執行還沒問過就整個藏起來（見 _refresh_method_label）：那時候「用哪一種」
-        # 還沒有答案，先擺一個名字上去等於替使用者答了。
-        #
-        # 2026/08/20 加回「點一下可以改」（見 _toggle_cash_method）：問過、顯示出來
-        # 之後，這個名字本身也是一個開關，點下去會先跳確認視窗再換，不必等重開程式
-        # 或還原 Excel 備份。跳視窗問答的原本流程（每次重開程式、第一次讀取前）留著沒動。
-        #
-        # 測得差不多之後這顆開關本身也能關（.env 的 CASH_METHOD_TOGGLE，見
-        # ui_common.cash_method_toggle_enabled）：關掉時名字還在、但不綁點擊、
-        # 游標也不變手指，看起來純顯示，避免正式使用時手滑誤觸。
-        self.method_box = ttk.Frame(opening)
-        ttk.Label(self.method_box, text="現金算法", style="Hint.TLabel").pack(side="left")
-        toggle_on = cash_method_toggle_enabled()
-        self.method_value = ttk.Label(self.method_box, style="Method.TLabel", text="",
-                                      cursor="hand2" if toggle_on else "")
-        self.method_value.pack(side="left", padx=(8, 0))
-        if toggle_on:
-            self.method_value.bind("<Button-1>", lambda _e: self._toggle_cash_method())
-
-        # 基準數字＋「修改」包成一組，只在用「初始餘額累加」時顯示（見
-        # _show_opening_row）——銀行餘額推算的日子每次讀取直接算好寫回 B8，
-        # 這組今天用不到，整組收起來，不額外貼理由文字。
-        self.opening_row = ttk.Frame(opening)
-        self.opening_label = ttk.Label(self.opening_row, text="今日初始現金餘額", style="Hint.TLabel")
-        self.opening_label.pack(side="left")
-        self.opening_value = ttk.Label(self.opening_row, text="")
-        self.opening_value.pack(side="left", padx=(8, 0))
-        # warning（橘）呼應專案既有的警示色慣例（見 Manual.TLabel、
-        # 名單上的 warned 標籤）——按下去就是把自動算出來的餘額換成人填的。
-        self.opening_button = ttk.Button(self.opening_row, text="修改", width=6, command=self.edit_opening,
-                                         bootstyle="warning-outline")
-        self.opening_button.pack(side="left", padx=(12, 0))
-        self.opening_row.pack(side="left")
+        # 按鈕沒辦法放進 Treeview 的格子裡，所以留在表外，字也從「修改」改成寫全名：
+        # 離開了那一行之後，只寫「修改」看不出改的是哪一個數字。整排只在用
+        # 「初始餘額累加」時顯示（見 _show_opening_row）——銀行餘額推算的日子
+        # 每次讀取直接算好寫回 B8，這顆今天用不到。
+        # warning（橘）呼應專案既有的警示色慣例（見 Manual.TLabel、名單上的 warned
+        # 標籤）——按下去就是把自動算出來的餘額換成人填的。
+        self.opening_row = ttk.Frame(cash_box)
+        self.opening_row.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.opening_button = ttk.Button(self.opening_row, text="修改今日初始現金餘額",
+                                         command=self.edit_opening, bootstyle="warning-outline")
+        self.opening_button.pack(side="left")
 
         # spacing3：每一行（用 \n 分開的一條提醒）之間留白，不然行跟行黏在一起很擠。
         # height 從 5 加到 6 是為了補回這些留白吃掉的高度，避免原本裝得下的
         # 五條提醒現在反而被擠出框外看不到（見 _fill_notes 為什麼順序有講究）。
+        # 2026/08/21 再加到 8：兩張表的「說明」欄整批搬進這個框，每天固定多一到兩行
+        # （現金那句話長到會折行），不加高的話等於把原本裝得下的提醒擠掉兩條。
+        # 這個框沒有捲軸，裝不下的內容不會有任何跡象 —— 高度是唯一的保險。
         # 底色跟面板本來的白幾乎沒有差（#fbfbfb），這個框在畫面上等於隱形。
         # 換成灰一點的 #eceff1，跟其他色塊（綠 #eaf4ea＝write、藍 #eaf0fb＝done）
         # 區隔開來 —— 這裡是提醒文字，不是狀態色，用中性色才不會被誤讀成別的意思。
@@ -398,10 +451,10 @@ class UiLayoutMixin:
         # 背景空白掃過去。包一層 LabelFrame 給它一個名字跟邊框，跟憑證頁
         # 那三個區塊（Profile／遷移憑證／憑證到期日）同一種手法。
         msg_frame = ttk.LabelFrame(box, text="訊息", padding=(8, 4))
-        msg_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        msg_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         msg_frame.columnconfigure(0, weight=1)
 
-        self.warn_box = tk.Text(msg_frame, height=6, wrap="word", font=(self.family, HINT_SIZE),
+        self.warn_box = tk.Text(msg_frame, height=8, wrap="word", font=(self.family, HINT_SIZE),
                                 background="#eceff1", relief="flat", state="disabled",
                                 padx=8, pady=6, spacing1=1, spacing2=1, spacing3=4)
         self.warn_box.grid(row=0, column=0, sticky="ew")
@@ -414,12 +467,19 @@ class UiLayoutMixin:
         self.root.bind("<Control-Down>", lambda _event: self._step_person(1))
         self.root.bind("<Control-Up>", lambda _event: self._step_person(-1))
 
-        # 持股撐死五六檔，表格卻吃掉整片高度的話，現金那一條會被推到視窗最底下
-        # ——它是每天最先要看的一個數字，不該離持股表那麼遠。所以表格改成照列數
-        # 決定高度（見 _fill_detail），多出來的空白由最下面那一列吸收。
+        # 持股撐死五六檔，表格卻吃掉整片高度的話，底下的東西會被推到視窗最底下。
+        # 所以表格照列數決定高度（見 _fill_detail），多出來的空白由最下面那一列吸收。
         box.rowconfigure(1, weight=0)
-        box.rowconfigure(5, weight=1)
-        box.columnconfigure(0, weight=1)
+        box.rowconfigure(3, weight=1)
+
+        # 兩張表的寬度 2:3 分。uniform 讓這兩欄照 weight 成比例分（單給 weight 只會分
+        # 「多出來」的那些寬度，兩張表的寬度就變成各自欄位下限決定的，比例不受控）。
+        # 原本是對半分，那是「現金的說明欄放的是每天都在的長句子」換來的；說明欄
+        # 拿掉之後現金只剩一個名字加一個數字，再佔半個畫面就是空著，寬度還給右邊
+        # 那張表（它的「股票」欄放得下更長的名字）。捲軸那一欄不進這個群組，
+        # 它要多寬就多寬。
+        box.columnconfigure(0, weight=2, uniform="detail")
+        box.columnconfigure(1, weight=3, uniform="detail")
 
     def _build_history_tab(self):
         frame = ttk.Frame(self.tabs, padding=8)
@@ -460,6 +520,7 @@ class UiLayoutMixin:
         self.history_tree = ttk.Treeview(frame, columns=[c[0] for c in HISTORY_COLUMNS],
                                          show="headings")
         build_columns(self.history_tree, HISTORY_COLUMNS)
+        self.history_tree.tag_configure("stripe", background=STRIPE_COLOR)
 
         bar = ttk.Scrollbar(frame, orient="vertical", command=self.history_tree.yview)
         self.history_tree.configure(yscrollcommand=bar.set)
@@ -548,6 +609,7 @@ class UiLayoutMixin:
             self.migrate_tree.column(key, width=wide(widths[key]), minwidth=wide(widths[key] // 2),
                                      anchor=anchor, stretch=(key == "path"))
         self.migrate_tree.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        self.migrate_tree.tag_configure("stripe", background=STRIPE_COLOR)
         self.migrate_tree.bind("<<TreeviewSelect>>", self._on_migrate_select)
 
         box.rowconfigure(1, weight=1)

@@ -572,7 +572,7 @@ class UiBackgroundMixin:
         # 這一輪讀到的一律是「補上去」，不是「整份換掉」：一次只更新一位的時候，
         # 名單上其他人手上那份是上一輪的資料，清掉他們等於整份名單只剩一個人。
         # 留著的代價是畫面上同時有好幾個時間點的資料，所以每一位都記下讀取時間，
-        # 右邊標頭寫得出「讀取於 10:32:07」（見 _fill_head）。
+        # 訊息框第一行寫得出「讀取於 10:32:07」（見 ui_sync._head_line）。
         now = datetime.datetime.now()
         errors = payload["sheet_errors"]
         fresh = []
@@ -586,7 +586,7 @@ class UiBackgroundMixin:
             elif not name:
                 problem = f"第 {order} 組：讀不出這是哪一位交易人"
             elif name in errors:
-                problem = errors[name]
+                problem = f"第 {order} 組：" + errors[name]
             else:
                 problem = None
 
@@ -715,12 +715,15 @@ class UiBackgroundMixin:
         self.replan()
         self.refresh_history()
 
-        where = "（就寫進你開著的那個 Excel 視窗）" if payload["attached"] else ""
         # 刻意不跳視窗：一顆按鈕從頭做到尾，不要在最後又叫人按確定。程式做的
         # 變更沒辦法用 Ctrl+Z 復原，要反悔只能用備份，所以備份的位置要寫在
         # 狀態列上，人才找得到。
         # 提醒擺在備份路徑前面：路徑很長，接在後面的字會被擠出狀態列外面。
-        self._say(f"已自動寫入 {self.write_count} 格並存檔{where}。"
+        #
+        # 接上使用者開著的 Excel 時不再另外註明（2026/08/21 使用者要求）。
+        # 那句話是寫給「以為自己開著的那份沒被改到」的人看的，而畫面上的數字
+        # 本來就跟 Excel 一致、存檔也一律會做，兩種情況對人來說沒有差別。
+        self._say(f"已自動寫入 {self.write_count} 格並存檔。"
                   f"{self._problem_note()}備份在 {payload['backup']}")
 
     def _refresh_problems(self):
@@ -837,9 +840,10 @@ class UiBackgroundMixin:
 
         # 手上這一輪全是上一份檔算出來的，跟著整批作廢（見 _forget_round）。
         self._forget_round()
-        # 算法是跟著這份 Excel 的紀錄檔走的，換檔就換設定；「這次執行問過了」也一樣
-        # 按路徑記，所以換到這次執行還沒問過的檔，下次讀取會再問一次。
-        self.cash_method.set(self._saved_method())
+        # 換檔就回到預設的「初始餘額累加」（算法不再跟著紀錄檔跨天沿用，
+        # 見 _default_method）；「這次執行問過了」是按路徑記的，所以換到這次執行
+        # 還沒問過的檔，下次讀取會再問一次。
+        self.cash_method.set(self._default_method())
         self._refresh_method_label()
 
         self.fill_sync_tree()
@@ -969,40 +973,29 @@ class UiBackgroundMixin:
             return False
         return True
 
-    def _saved_method(self):
-        """紀錄檔裡記著的現金算法。沒有紀錄檔（還沒選 Excel）就用原本那種。"""
-        if self.ledger is None:
-            return planner.METHOD_OPENING
-        method = self.ledger.setting("cash_method", planner.METHOD_OPENING)
-        return method if method in planner.METHOD_NAMES else planner.METHOD_OPENING
+    def _default_method(self):
+        """
+        現金算法的起始值：每次程式開起來（換一份 Excel 也一樣）都是「初始餘額累加」。
+
+        2026/08/21 使用者要求，取代原本「選了哪一種就寫進紀錄檔跨天沿用」。理由是
+        兩種算法錯的方式不對稱：全額交割當天留在銀行餘額推算會把同一筆錢扣兩次，
+        而且是直接寫進 Excel、隔天才看得出來；初始餘額累加最壞是漏掉匯撥與股利，
+        數字對不起來當下就看得到、也補得回來。所以「忘了換」要往安全的那一邊倒，
+        不能讓某一天的特例自己延續到之後每一天。
+        """
+        return planner.METHOD_OPENING
 
     def _refresh_method_label(self):
         """
-        現金餘額那一行左邊的「現金算法」：要不要顯示，以及顯示哪一個。
-        順便決定右邊那組基準數字＋「修改」在不在（見 _show_opening_row）。
+        算法變了（或換了 Excel）就把現金那張表重畫一次 —— 表上「現金算法」那一列
+        寫的就是它，而「今日初始現金餘額」那一列與底下那顆「修改」在不在也跟著它走
+        （哪一列要畫、按鈕收不收，全在 _fill_cash / _show_opening_row 判）。
 
-        這次執行還沒問過就不顯示。算法是這次程式開起來、第一次按「讀取全部帳戶」時
-        跳視窗問的，在那之前畫面上寫一個名字，看起來就像已經選好了 —— 而那時候顯示的
-        其實是上次沿用下來的預設值。問過之後才寫，寫的就是這次的答案。
-
-        基準數字＋「修改」跟這個名字相反，還沒問過也要照沿用下來的算法決定 ——
-        名字可以先不講（那只是還沒有答案），但一組按下去會蓋掉 B8 的東西不能
-        等到問完才收起來。
+        名字這次執行還沒問過就不畫那一列，但基準那一列與「修改」相反，還沒問過也要
+        照沿用下來的算法決定 —— 名字可以先不講（那只是還沒有答案），但一顆按下去
+        會蓋掉 B8 的東西不能等到問完才收起來。兩件事都在 _fill_cash 裡。
         """
-        asked = self.path in self.cash_method_asked
-        if not asked:
-            self.method_box.pack_forget()
-        else:
-            self.method_value.configure(text=planner.METHOD_NAMES[self.cash_method.get()])
-            # before 指定的對象要「當下」還在畫面上才有效——opening_row 可能在
-            # 上一輪被 _show_opening_row 藏起來了，這裡先確保它在，pack 完
-            # method_box 之後才輪到下面那行去決定它最終該不該露臉。
-            if not self.opening_row.winfo_manager():
-                self.opening_row.pack(side="left")
-            # before：pack 是照呼叫順序排的，藏起來再放回去會跑到最右邊，
-            # 明講它要在「今日初始現金餘額」那一組前面才回得到原位。
-            self.method_box.pack(side="left", padx=(0, 18), before=self.opening_row)
-        self._show_opening_row(self.cash_method.get() == planner.METHOD_OPENING)
+        self._refill_cash()
 
     def _toggle_cash_method(self):
         """
@@ -1028,22 +1021,18 @@ class UiBackgroundMixin:
         換現金算法：記進紀錄檔、重算、重畫。asked=True 代表這次是使用者自己選的
         （對話框的「確定」或工具列點一下切換都算），不必等下次讀取再跳一次視窗問。
 
-        「這次問過了」跟「選了哪一個」分開記：問過了只存在記憶體，是為了不要這次執行
-        期間跳第二次；選了哪一個要寫進紀錄檔跨天沿用（下次開程式、第一次讀取時
-        那個對話框的預設值就是它）。
+        選了哪一種只在這次執行內有效，不寫進紀錄檔 —— 下次開程式一律回到
+        「初始餘額累加」（見 _default_method）。「這次問過了」同樣只放記憶體，
+        那是為了不要同一次執行裡跳第二次。
         """
         self.cash_method.set(method)
         if asked:
             self.cash_method_asked.add(self.path)
         self._refresh_method_label()
-        if self.ledger is not None:
-            try:
-                self.ledger.set_setting("cash_method", method)
-            except OSError as exc:
-                messagebox.showwarning("設定沒存起來",
-                                       f"這次有效，但沒能寫進紀錄檔：{exc}")
         if self.proposals:
             self.replan()
+        # replan 重畫完才清：它會把訊息框重新填一次，順序反過來等於沒清。
+        self.clear_notes()
 
     def _maybe_ask_cash_method(self):
         """
