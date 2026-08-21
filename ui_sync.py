@@ -122,10 +122,15 @@ class UiSyncMixin:
 
         names = list(self.proposals)
         # 正在看的那位不見了（換了檔、重讀、改了篩選）就退回第一位。
-        # 右邊不能停在一個名單上已經沒有的人身上。還沒選過人（current_sheet
-        # 是 None，剛開程式、還沒點過名單也沒切過範圍）就不要自己選一個 ——
-        # 預設不點名，等使用者自己點。
-        if self.current_sheet is not None and self.current_sheet not in names:
+        # 右邊不能停在一個名單上已經沒有的人身上。
+        #
+        # 名單一有人就一定要選中一位，不能等使用者自己點：名單是網頁資料長出來的
+        # （沒讀到的人不會在上面），讀完卻誰都沒選中的話，右邊會停在
+        # 「還沒有資料 —— 按上面的『讀取全部帳戶』」（見 _fill_head），
+        # 明明剛讀完、左邊也看得到人，那句話等於在說謊。
+        # 剛開程式什麼都還沒讀的時候名單是空的，這行自己會落到 None，
+        # 不必另外擋「還沒選過人」。
+        if self.current_sheet not in names:
             self.current_sheet = names[0] if names else None
 
         need = 0

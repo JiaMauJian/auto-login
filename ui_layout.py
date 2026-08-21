@@ -484,18 +484,17 @@ class UiLayoutMixin:
     def _build_cert_tab(self):
         """
         把 setup-profile.ps1（建立/重建使用者資料夾）與 migrate-cert.ps1（掃描、複製憑證）
-        整合進來，外加登入時順便抓到的憑證到期日 —— 這三件事本來都要開 PowerShell 手動跑，
-        現在收進同一個分頁，按鈕按下去就是了。
+        整合進來 —— 這兩件事本來都要開 PowerShell 手動跑，現在收進同一個分頁，
+        按鈕按下去就是了。
         """
         frame = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(frame, text="  憑證  ")
 
         self._build_profile_section(frame)
         self._build_migrate_section(frame)
-        self._build_cert_status_section(frame)
 
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(2, weight=1)
+        frame.rowconfigure(1, weight=1)
 
     def _build_profile_section(self, parent):
         """建立／重建自動登入用的 Chrome 使用者資料夾（對應 setup-profile.ps1）。"""
@@ -525,7 +524,7 @@ class UiLayoutMixin:
     def _build_migrate_section(self, parent):
         """從平常在用的 Chrome/Edge 找出已經申請過的憑證，複製到自動登入用的 Profile（對應 migrate-cert.ps1）。"""
         box = ttk.LabelFrame(parent, text="遷移憑證", padding=8)
-        box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        box.grid(row=1, column=0, sticky="nsew")
 
         head = ttk.Frame(box)
         head.grid(row=0, column=0, sticky="ew")
@@ -548,34 +547,8 @@ class UiLayoutMixin:
             anchor = "center" if key == "found" else "w"
             self.migrate_tree.column(key, width=wide(widths[key]), minwidth=wide(widths[key] // 2),
                                      anchor=anchor, stretch=(key == "path"))
-        self.migrate_tree.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.migrate_tree.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
         self.migrate_tree.bind("<<TreeviewSelect>>", self._on_migrate_select)
 
-        box.columnconfigure(0, weight=1)
-
-    def _build_cert_status_section(self, parent):
-        """登入過的每一位交易人，憑證什麼時候到期（見 fetch._fetch_cert_status）。"""
-        box = ttk.LabelFrame(parent, text="登入帳號的憑證到期日", padding=8)
-        box.grid(row=2, column=0, sticky="nsew")
-
-        columns = ("name", "expiry", "state")
-        titles = {"name": "交易人", "expiry": "憑證到期日", "state": "狀態"}
-        widths = {"name": 120, "expiry": 170, "state": 100}
-        self.cert_tree = ttk.Treeview(box, columns=columns, show="headings", selectmode="browse")
-        for key in columns:
-            self.cert_tree.heading(key, text=titles[key])
-            anchor = "center" if key == "state" else "w"
-            self.cert_tree.column(key, width=wide(widths[key]), minwidth=wide(widths[key] // 2),
-                                  anchor=anchor, stretch=(key == "name"))
-        bar = ttk.Scrollbar(box, orient="vertical", command=self.cert_tree.yview)
-        self.cert_tree.configure(yscrollcommand=bar.set)
-        self.cert_tree.grid(row=0, column=0, sticky="nsew")
-        bar.grid(row=0, column=1, sticky="ns")
-        self.cert_tree.tag_configure("expired", foreground=self.colors.danger)
-        self.cert_tree.tag_configure("soon", foreground=self.colors.warning)
-
-        ttk.Label(box, text="登入時才會抓到；還沒登入過的人這裡不會出現。",
-                  style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-
-        box.rowconfigure(0, weight=1)
+        box.rowconfigure(1, weight=1)
         box.columnconfigure(0, weight=1)

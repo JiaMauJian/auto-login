@@ -38,7 +38,7 @@ CELL_BALANCE = (8, 2)
 # 程式根本沒碰著檔案，做不出真正的即時狀態，文字用詞也刻意避開「控制中」這種
 # 容易被誤會成即時狀態的說法。
 CELL_MARKER = (1, 4)
-MARKER_TEXT = "此檔案由程式自動維護，手動修改可能被覆蓋"
+MARKER_TEXT = "此檔案由程式自動寫入現金餘額、股數與成本"
 MARKER_COLOR = 0xFF0000  # COM 的 Font.Color 是 BGR，這個值是藍字
 MARKER_ENV_KEY = "EXCEL_CONTROL_MARKER"
 

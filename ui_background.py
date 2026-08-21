@@ -507,7 +507,6 @@ class UiBackgroundMixin:
             elif record.get("sheet_name"):
                 names.append(record["sheet_name"])
         self._refresh_account_choices()
-        self._update_cert_status(payload["records"])
 
         if problems:
             messagebox.showerror("登入失敗", "\n".join(problems))
@@ -607,7 +606,6 @@ class UiBackgroundMixin:
         self.sheet_data.update(payload["sheets"])
         self._refresh_problems()
         self._refresh_account_choices()
-        self._update_cert_status(payload["records"])
         self.today = datetime.date.today()
         # 今日現金基準就在這裡定形（見 _initialize）：這一輪的 Excel 現值剛讀回來、
         # 還沒被這一輪的寫入動過，是「今天買賣之前」的最後一刻。
@@ -837,14 +835,8 @@ class UiBackgroundMixin:
         self._set_excel_open(False)
         self.path_label.configure(text=self._path_text())
 
-        self.records, self.sheet_data, self.proposals = {}, {}, {}
-        self.warnings, self.problems = {}, []
-        self.before = {}
-        # 這幾樣都是「上一份檔的這一輪」，跟著整批作廢。trader_of 例外：
-        # 那是帳號與交易人的對照，跟開哪一份 Excel 無關。
-        self.problem_of, self.read_at, self.round_scope = {}, {}, set()
-        self.round_target = None
-        self.current_sheet = None
+        # 手上這一輪全是上一份檔算出來的，跟著整批作廢（見 _forget_round）。
+        self._forget_round()
         # 算法是跟著這份 Excel 的紀錄檔走的，換檔就換設定；「這次執行問過了」也一樣
         # 按路徑記，所以換到這次執行還沒問過的檔，下次讀取會再問一次。
         self.cash_method.set(self._saved_method())
@@ -911,6 +903,19 @@ class UiBackgroundMixin:
         except OSError:
             here = self.excel_open        # 判斷不出來就沿用上次，不要亂閃
         self._set_excel_open(here)
+
+        # Excel 一關，畫面上那些數字就地作廢。它們是「這份 Excel 開著的時候，
+        # 從它讀出來的現值跟網頁比出來」的結果 —— 檔一關就沒有東西替它們背書了：
+        # 人可能是在 Excel 裡自己改完數字才關的，也可能關掉之後換一份檔再開回來。
+        # 按鈕變灰只擋得住下一步，擋不住有人照著螢幕上那個舊餘額去下單。
+        #
+        # 忙的時候先不動：那一輪還會把結果填回畫面（讀取完就緊接著寫入），
+        # 這裡清掉只是被它蓋回去。輪詢三秒一次，忙完的下一次自然會補上。
+        if not here and not self.busy and self._has_round_data():
+            self._forget_round()
+            self.fill_sync_tree()
+            self._say(f"{self.path.name} 關掉了 —— 畫面上的數字是它開著的時候算的，"
+                      f"已經清空。按「開啟EXCEL」重新開起來，再讀一次。")
         self.root.after(3000, self._poll_excel)
 
     def _set_excel_open(self, value):
@@ -920,6 +925,33 @@ class UiBackgroundMixin:
         self.excel_open = value
         self.path_label.configure(text=self._path_text())
         self._sync_buttons()
+
+    def _has_round_data(self):
+        """畫面上（左邊名單、右邊明細、訊息框）現在有沒有東西。"""
+        return bool(self.records or self.sheet_data or self.proposals or self.problems)
+
+    def _forget_round(self):
+        """
+        把「這一份 Excel 的這一輪」整批忘掉：網頁資料、Excel 現值、提案、提醒、
+        舊值、這一輪的範圍。換檔（open_excel）與 Excel 被關掉（_poll_excel）都走這裡。
+
+        畫面不在這裡重畫 —— 呼叫的人接下來還有別的事要先做（換檔要先把路徑與
+        紀錄檔換好），由他自己挑時機叫 fill_sync_tree()。
+
+        trader_of 不清：那是「第幾組帳號是哪一位交易人」的對照，跟開哪一份 Excel、
+        Excel 開著沒都無關，瀏覽器那邊也還登著，下次讀取不必重登。
+
+        範圍退回「全部」：手上一位的資料都不剩了，下一步一定是重讀一輪，
+        停在某一位身上的話，「讀取（某某）帳戶」按下去只會讀回半份名單。
+        """
+        self.records, self.sheet_data, self.proposals = {}, {}, {}
+        self.warnings, self.problems = {}, []
+        self.before = {}
+        self.problem_of, self.read_at, self.round_scope = {}, {}, set()
+        self.round_target = None
+        self.current_sheet = None
+        self.account_choice.current(0)
+        self._refresh_fetch_button()
 
     def _require_excel(self):
         """登入／讀取前的最後一道關卡。按鈕平常是灰的，這裡擋的是鍵盤觸發那種漏網。"""

@@ -17,7 +17,6 @@ Chrome Profile 的建立與 tbbstock 數位憑證的搬遷／狀態，供 ui.py 
 import codecs
 import datetime
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,12 +33,6 @@ HOME_URL = "https://www.tbbstock.com.tw/tbb/index/home.jsp"
 # 不能拿 "tbbstock" 本身當標記 —— localStorage key 是照 origin 存的，只要開過
 # https://www.tbbstock.com.tw 這個網頁，不管有沒有憑證，這個字串就會寫進去。
 MARKERS = ("TWCACertIdxRef",)
-
-# 「系統訊息與憑證狀態」那個區塊的文字節點，含「憑證有效終止時間: 2027/08/15 23:59:59」。
-CERT_PAGE = "https://www.tbbstock.com.tw/tbb/welcome/layout.jsp?type=1"
-CERT_MSG_JS = "(() => { const el = document.querySelector('#msg'); return el ? el.innerText : ''; })()"
-CERT_EXPIRY_PATTERN = re.compile(r"憑證有效終止時間[:：]\s*(\d{4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}:\d{2})")
-CERT_WARN_DAYS = 14   # 到期前幾天開始提醒
 
 
 def current_raw():
@@ -282,28 +275,3 @@ def copy_cert(source_profile_dir, target_profile_dir):
             pass
 
     return backup
-
-
-def parse_cert_expiry(text):
-    """從「憑證有效終止時間: 2027/08/15 23:59:59」這類文字取出到期時間，取不到回 None。"""
-    if not text:
-        return None
-    match = CERT_EXPIRY_PATTERN.search(text)
-    if not match:
-        return None
-    try:
-        return datetime.datetime.strptime(match.group(1), "%Y/%m/%d %H:%M:%S")
-    except ValueError:
-        return None
-
-
-def cert_alert_level(expiry, now=None):
-    """expiry 的狀態：None（沒事）／"expired"（已過期）／"soon"（快到期，CERT_WARN_DAYS 天內）。"""
-    if expiry is None:
-        return None
-    now = now or datetime.datetime.now()
-    if expiry <= now:
-        return "expired"
-    if expiry - now <= datetime.timedelta(days=CERT_WARN_DAYS):
-        return "soon"
-    return None

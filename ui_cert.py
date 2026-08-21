@@ -1,6 +1,4 @@
-"""憑證分頁的行為：建立/重建 Profile、掃描並遷移憑證、記錄與提醒到期日。"""
-
-import datetime
+"""憑證分頁的行為：建立/重建 Profile、掃描並遷移憑證。"""
 
 from tkinter import messagebox
 
@@ -200,44 +198,3 @@ class UiCertMixin:
             "複製完成",
             f"憑證已複製到自動登入用的 Profile{note}。\n"
             "接下來按「登入」實際驗證，不再跳「瀏覽器查無有效數位憑證」就是成功了。", parent=self.root)
-
-    def _update_cert_status(self, records):
-        """
-        把這批登入結果裡的憑證到期日記起來，畫進「憑證」分頁；快到期或已過期的人跳一次提醒
-        （同一個工作階段只提醒一次，不必每讀一次資料就再煩一次，見 2.5）。
-        """
-        alerts = []
-        for record in records:
-            name = record.get("sheet_name")
-            if not name or record.get("cert_text") is None:
-                continue
-            raw_expiry = record.get("cert_expiry")
-            expiry = datetime.datetime.fromisoformat(raw_expiry) if raw_expiry else None
-            self.cert_status[name] = {"text": record["cert_text"], "expiry": expiry}
-            level = profile_tools.cert_alert_level(expiry)
-            if level and name not in self.cert_alerted:
-                self.cert_alerted.add(name)
-                alerts.append((name, level, expiry))
-
-        self._refresh_cert_tree()
-
-        if alerts:
-            lines = [f"・{name}：{'已過期' if level == 'expired' else '快到期'}"
-                    f"（{expiry.strftime('%Y/%m/%d') if expiry else '?'}）"
-                    for name, level, expiry in alerts]
-            messagebox.showwarning(
-                "憑證快到期了",
-                "以下交易人的 tbbstock 數位憑證：\n\n" + "\n".join(lines) +
-                "\n\n請提醒本人去 tbbstock 重新申請憑證。", parent=self.root)
-
-    def _refresh_cert_tree(self):
-        self.cert_tree.delete(*self.cert_tree.get_children())
-        now = datetime.datetime.now()
-        for name in sorted(self.cert_status):
-            info = self.cert_status[name]
-            expiry = info.get("expiry")
-            level = profile_tools.cert_alert_level(expiry, now)
-            expiry_text = expiry.strftime("%Y/%m/%d %H:%M") if expiry else (info.get("text") or "抓不到")
-            state = {"expired": "已過期", "soon": "即將到期"}.get(level, "正常" if expiry else "未知")
-            self.cert_tree.insert("", "end", values=(name, expiry_text, state),
-                                  tags=(level,) if level else ())

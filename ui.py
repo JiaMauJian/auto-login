@@ -202,11 +202,6 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         # 就是在盯這件事。
         self.browser_waiting = 0
 
-        # 「憑證」分頁：交易人 -> {"text": 網頁抄來的原文, "expiry": 解析出來的到期日}。
-        # 只在登入的當下抓一次（見 fetch._fetch_cert_status），所以還沒登入過的人不會出現。
-        self.cert_status = {}
-        # 這次工作階段已經提醒過的人 —— 快到期不必每讀一次資料就再跳一次視窗。
-        self.cert_alerted = set()
         self._migrate_candidates = {}   # 遷移憑證那張表的列 id -> profile_tools.scan_cert_sources() 的一筆
         self.profile_busy = False       # 「建立 Profile」進行中，避免重複點
         self.cert_tab_scanned = False   # 「憑證」分頁只在第一次切過去時自動掃描一次，之後靠手動「掃描」

@@ -16,7 +16,6 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 
 from dev_tools import simulate
 from login import do_login
-from profile_tools import CERT_MSG_JS, CERT_PAGE, parse_cert_expiry
 from recon import ACCOUNT_PAGE, SESSION_JS, account_codes, query
 
 
@@ -76,29 +75,36 @@ def account_code(session):
     return f"1{bid}-{cid}" if bid and cid else ""
 
 
-def _settle(page):
-    """等頁面安定下來。等不到就算了 —— 這個網站常有背景請求一直在跑。"""
-    try:
-        page.wait_for_load_state("networkidle", timeout=15000)
-    except PlaywrightTimeoutError:
-        pass
+# 帳戶頁「可以判斷了」的條件，也就是 _open_account_page 真正在等的東西。
+#
+# 後半是這個分頁接下來要用的兩樣：呼叫 AJAX 用的 common.js 全域函式（見
+# recon.FETCH_JS），以及認得出登入身分的 sessionStorage（見 recon.SESSION_JS）。
+#
+# 前半的「已經不在 /account/ 了」是給失敗那條路的：session 過期時網站會把人踢回
+# 登入／首頁，那一頁永遠等不到後半那兩樣東西。沒有這一條，最該快點放棄的情況
+# （踢回去了，要重登）反而要白等滿逾時；有了它就立刻回來，讓 _revisit 從網址看出來。
+PAGE_READY_JS = """
+() => !location.pathname.includes('/account/')
+   || (typeof B64_XOR_Encode === 'function' && typeof XOR_KEY !== 'undefined'
+       && !!(sessionStorage.getItem('branch_id') && sessionStorage.getItem('cust_id')))
+"""
 
 
-def _fetch_cert_status(page):
+def _open_account_page(page):
     """
-    在剛登入的分頁裡開一次「系統訊息與憑證狀態」頁，抓「憑證有效終止時間」。
+    導到帳戶頁，等到能判斷它可不可以用為止。等不到就算了 —— 缺什麼由呼叫方自己去看
+    （網址、sessionStorage、身分核對三道都在 _revisit 裡）。
 
-    只在剛做完整套登入流程時呼叫一次（見 ensure_logged_in）—— 換 cookie 復用
-    session 的那幾條路不會重跑，憑證到期日不會在同一次瀏覽器存活期間內變動，
-    沒必要每次讀取都多開一次頁面。抓不到就靜靜回傳空值，不能讓這一步拖垮登入。
+    刻意不等整頁 load、也不等 networkidle：這個網站的帳戶頁有背景請求一直在跑，
+    等它安靜是在等一件我們不在乎的事。2026/08/21 實測，同一次登入裡等 networkidle
+    要 0.90 秒，等 PAGE_READY_JS 只要 0.33 秒，而且等到的正好是下一步真正要用的東西
+    —— 等完立刻打 AJAX，retcode 照樣是 000000。整趟帳戶頁從 2.96 秒降到 2.18 秒。
     """
+    page.goto(ACCOUNT_PAGE, wait_until="domcontentloaded")
     try:
-        page.goto(CERT_PAGE)
-        _settle(page)
-        text = (page.evaluate(CERT_MSG_JS) or "").strip()
+        page.wait_for_function(PAGE_READY_JS, timeout=15000)
     except (PlaywrightError, PlaywrightTimeoutError):
-        return "", None
-    return text, parse_cert_expiry(text)
+        pass
 
 
 def _revisit(page, expect_code):
@@ -116,8 +122,7 @@ def _revisit(page, expect_code):
     只看它的話，一個早就被頂掉的分頁探起來一樣「還活著」，照它走就會拿到別人的
     資料寫進別人的 Excel。
     """
-    page.goto(ACCOUNT_PAGE)
-    _settle(page)
+    _open_account_page(page)
     if "/account/" not in page.url:
         return None
     probe = page.evaluate(SESSION_JS)
@@ -204,13 +209,8 @@ def ensure_logged_in(context, selected, store=None):
             if session is None:
                 page = do_login(context, account["id"], account["password"], reuse_page or spare_page)
                 spare_page = None
-                cert_text, cert_expiry = _fetch_cert_status(page)
-                page.goto(ACCOUNT_PAGE)
-                _settle(page)
+                _open_account_page(page)
                 session = page.evaluate(SESSION_JS)
-                if session is not None:
-                    session["cert_text"] = cert_text
-                    session["cert_expiry"] = cert_expiry.isoformat() if cert_expiry else None
 
             if store is not None:
                 store["pages"][order] = page
@@ -262,8 +262,6 @@ def login_only(context, selected, store=None):
 
         record["account_code"] = account_code(session)
         record["sheet_name"] = (session.get("account") or "").strip()
-        record["cert_text"] = session.get("cert_text")
-        record["cert_expiry"] = session.get("cert_expiry")
 
     return records
 
@@ -298,8 +296,6 @@ def collect(context, selected, store=None, need_bank=False):
 
         record["account_code"] = account_code(session)
         record["sheet_name"] = (session.get("account") or "").strip()
-        record["cert_text"] = session.get("cert_text")
-        record["cert_expiry"] = session.get("cert_expiry")
 
         queries = {
             "未實現損益": ("queryInstantAccount_new", {
