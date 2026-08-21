@@ -19,6 +19,9 @@
    queryBankBalance 的參數怎麼帶、回應裡哪個欄位是銀行餘額？
    queryType=6（前一日）回的是不是真的前一個交易日？（用 transDateQuery 回的
    lastTransDate 交叉比對，不必等到週一才驗得出來。）
+5. （2026/08/21 新增）交割金額查詢（query610）跟「撈一段區間逐筆看 cdate」
+   算出來的「還沒交割的錢」一不一樣？程式已經改用前者，後者留著當對照組 ——
+   週一、連假後、收盤結帳之後這幾天還沒有人驗過，那正是兩條路可能分家的日子。
 
 因為第 2 點，這裡刻意採用「每登入完一組帳號就立刻抓完它的資料」的順序，
 而不是全部登入完再回頭抓 —— 後者前面幾個帳號的 session 可能早就被頂掉了。
@@ -299,7 +302,7 @@ LOOKBACK_DAYS = 10
 
 def range_query(page, bid, cid, start, end):
     """指定一段日期區間查淨收付。start/end 是 datetime.date。回傳 (資料, 摘要文字)。"""
-    lines = ["", f"--- 指定區間 {start:%Y/%m/%d} ~ {end:%Y/%m/%d}（方法二要用的那一支）---"]
+    lines = ["", f"--- 指定區間 {start:%Y/%m/%d} ~ {end:%Y/%m/%d}（方法二的舊路，留著對照）---"]
     data, raw = query(page, "queryInstantAccount_new", {
         "branchId": "1" + bid, "custId": cid,
         "his": "y", "queryType": "0",
@@ -313,13 +316,60 @@ def range_query(page, bid, cid, start, end):
     return data, lines
 
 
+def settle_query(page, bid, cid, today):
+    """
+    交割金額查詢（type=3 那一頁自己打的 CMD=query610）。
+    回傳 (合計要補的金額, 原始回應, 摘要文字)。
+
+    回應一天一列，金額已經是那一天的淨額（負數＝要付出去）：
+
+        {"data":[{"trade":"20260819","cdate":"20260821","pay_amt":"0"},
+                 {"trade":"20260821","cdate":"20260825","pay_amt":"-238"}], ...}
+
+    2026/08/21 實測到的兩件事，兩件都值得記著：
+
+        branchId 一定要加 '1'。不加也回 retcode 000000，只是每一天都變成 0
+        —— 錯了不會有任何徵兆，只會少算一筆錢。
+        回應裡**沒有 bhno/cseq**，「這份資料是不是這個人的」核不了。
+    """
+    lines = ["", "--- 交割金額查詢（type=3, query610）---"]
+    data, raw = query(page, "query610", {"branchId": "1" + bid, "custId": cid})
+    if data is None:
+        lines.append(f"查詢失敗：{str(raw)[:300]}")
+        return None, None, lines
+
+    lines.append(f"retcode={data.get('retcode')} retmsg={data.get('retmsg')}")
+    lines.append("回應內容: " + json.dumps(data, ensure_ascii=False)[:800])
+    lines.extend(check_account(data, None))
+
+    rows = data.get("data") or []
+    if not rows:
+        lines.append("!! 一列都沒有。真的網站不管有沒有成交都會列出最近幾個交易日，"
+                     "所以這代表查詢沒查成，不是「沒有錢要交割」")
+        return None, data, lines
+
+    stamp = today.strftime("%Y%m%d")
+    total = 0.0
+    for row in rows:
+        cdate = str(row.get("cdate") or "").strip()
+        amount = to_num(row.get("pay_amt"))
+        mark = "要補" if cdate > stamp else "已交割，不補"
+        lines.append(f"   成交日={row.get('trade')} 交割日={cdate}"
+                     f" 交割金額={amount:,.0f}  <- {mark}")
+        if cdate > stamp:
+            total += amount
+
+    lines.append(f"合計要補的金額 = {total:,.0f}")
+    return total, data, lines
+
+
 def unsettled_rows(data, today):
     """
     交割日還沒到的成交明細。回傳 (合計, 每一列的說明, 沒有 cdate 的筆數)。
 
-    這就是方法二的核心：銀行餘額只含已經交割的錢，所以要補的正好是「cdate 比今天晚」
-    的那幾筆。用 cdate 而不是「今天+昨天」，是因為週一與連假後不只欠兩天
-    （週四、週五兩天的成交都還沒交割），而 cdate 是每一筆自己帶著的，不必推算。
+    這是方法二的**舊**算法：撈一段區間的成交，逐筆看 cdate，把還沒交割的加起來。
+    程式已經改用交割金額查詢（settle_query）算同一件事，這一段留著當對照組 ——
+    兩條路的答案一不一樣，是偵察報告最值得看的一行。
 
     cdate 讀不到的列要單獨數出來 —— 那種列沒有辦法判斷該不該加，
     不能默默當成「已交割」跳過（那等於少算錢）。
@@ -444,12 +494,16 @@ def recon_bank(page, bid, cid, acc_code):
     return lines, dumps
 
 
-def method_two(dumps, span, today):
+def method_two(dumps, span, due_total, today):
     """
-    把方法二整條算完印出來：銀行餘額 + 還沒交割的成交淨收付。純顯示，什麼都不寫。
+    把方法二整條算完印出來：銀行餘額 + 還沒交割的錢。純顯示，什麼都不寫。
 
     偵察報告最後有這一段，是因為前面那些 retcode 與欄位名對不對，人是看不出來的；
     「算出來的餘額跟我 Excel 上那個數字一不一樣」才看得出來。
+
+    due_total 是程式實際在用的那條路（交割金額查詢）算出來的；下面順便用舊路
+    （區間淨收付逐筆看 cdate）再算一次，兩邊擺在一起。週一、連假後、收盤結帳
+    之後這幾種情境還沒有人驗過，而那幾天正是兩條路最可能分家的日子。
     """
     lines = ["", "--- 方法二試算（只印出來，不寫任何東西）---"]
 
@@ -470,17 +524,30 @@ def method_two(dumps, span, today):
             if to_num(shown.get("balance")) != balance:
                 lines.append("!! 兩邊對不起來，Amount 的單位跟想的不一樣")
 
-    if balance is None or span is None:
-        lines.append("資料不齊，算不出來")
+    if balance is None:
+        lines.append("銀行餘額讀不到，算不出來")
         return lines
 
-    total, rows, unknown = unsettled_rows(span, today)
-    lines.append(f"還沒交割的成交（交割日比 {today:%Y/%m/%d} 晚）：")
-    lines.extend(rows or ["   （這段區間內沒有任何成交）"])
-    if unknown:
-        lines.append(f"!! 有 {unknown} 筆讀不到交割日，這種列不能默默跳過（會少算錢）")
-    lines.append(f"合計要補的金額 = {total:,.0f}")
-    lines.append(f"方法二算出來的現金餘額 = {balance:,.2f} + {total:,.0f} = {balance + total:,.2f}")
+    if span is None:
+        lines.append("（區間淨收付沒查到，這次沒有舊路可以對照）")
+    else:
+        total, rows, unknown = unsettled_rows(span, today)
+        lines.append(f"舊路：還沒交割的成交（交割日比 {today:%Y/%m/%d} 晚）")
+        lines.extend(rows or ["   （這段區間內沒有任何成交）"])
+        if unknown:
+            lines.append(f"!! 有 {unknown} 筆讀不到交割日，這種列不能默默跳過（會少算錢）")
+        lines.append(f"   舊路合計 = {total:,.0f}")
+        if due_total is not None:
+            lines.append("兩條路" + ("一樣" if round(due_total, 2) == round(total, 2)
+                                    else f"不一樣 !!（交割金額查詢 {due_total:,.0f}"
+                                         f"、區間淨收付 {total:,.0f}）"))
+
+    if due_total is None:
+        lines.append("!! 交割金額查詢沒查到，程式在這裡會擋住整格不寫")
+        return lines
+
+    lines.append(f"方法二算出來的現金餘額 = {balance:,.2f} + {due_total:,.0f}"
+                 f" = {balance + due_total:,.2f}")
     lines.append("   ^ 這個數字要跟你 Excel 上的現金餘額對得起來")
     return lines
 
@@ -573,6 +640,12 @@ def recon_one(page):
             lines.append(traceback.format_exc())
 
     today = datetime.now().date()
+
+    due_total, due_data, due_lines = settle_query(page, bid, cid, today)
+    lines.extend(due_lines)
+    if due_data is not None:
+        dumps["交割金額"] = due_data
+
     span, span_lines = range_query(
         page, bid, cid, today - timedelta(days=LOOKBACK_DAYS), today)
     lines.extend(span_lines)
@@ -584,7 +657,7 @@ def recon_one(page):
     lines.extend(bank_lines)
     dumps.update(bank_dumps)
 
-    lines.extend(method_two(dumps, span, today))
+    lines.extend(method_two(dumps, span, due_total, today))
 
     return acc_code, lines, dumps
 

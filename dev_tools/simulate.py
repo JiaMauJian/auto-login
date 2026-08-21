@@ -445,7 +445,8 @@ def open_page(context, account, page=None):
 
 def read_page(page):
     """
-    從假網頁讀回兩份資料，形狀跟真的 API 回應一致（retcode / retmsg / arrays）。
+    從假網頁讀回每一支查詢的資料，形狀跟真的 API 回應一致
+    （retcode / retmsg，加上 arrays 或 data —— 交割金額與銀行餘額是 data）。
 
     即時從頁面上的輸入格算出來，所以看到什麼就讀到什麼。
     """
@@ -534,7 +535,7 @@ def render_html(account, data):
   <div>銀行帳號 {meta['bnkacc']}　餘額（元）
     <input id="bank" class="num" value="{meta['bank']}"></div>
   <div class="hint">
-    現金餘額的第二種算法用的就是這個數字：<b>銀行餘額 + 還沒交割的成交淨收付</b>。<br>
+    現金餘額的第二種算法用的就是這個數字：<b>銀行餘額 + 還沒扣款的交割金額</b>。<br>
     預設值等於這個帳號的現金餘額，所以兩種算法會算出一樣的結果。
     要測「兩種對不上」（真實情境是全額交割），就改這一格，
     或把下面某一筆成交改成「已交割」。
@@ -564,6 +565,8 @@ def render_html(account, data):
   <div class="total">淨收付合計：<span id="net">0</span></div>
   <div class="hint">
     全部刪掉 = 今天沒有成交，淨收付 0。<br>
+    「已交割」= 這一筆算成<b>前兩個交易日</b>成交、錢已經扣掉了（今天成交的要 T+2 才扣，
+    不可能已交割），所以它只進得了銀行餘額，不會被算成「還沒交割的錢」。<br>
     注意：未實現損益那邊只要有今天的成交明細（就是這張表的內容），
     這裡卻是 0 的話，程式會刻意不動現金那一格 —— 那是防「收盤結帳後查不到當日資料」的保護。
   </div>
@@ -589,13 +592,21 @@ function stampOf(d) {{
   return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') +
       String(d.getDate()).padStart(2, '0');
 }}
-const settleDay = new Date(today);
-for (let left = 2; left > 0; ) {{
-  settleDay.setDate(settleDay.getDate() + 1);
-  const week = settleDay.getDay();
-  if (week !== 0 && week !== 6) left -= 1;
+function shiftDays(from, steps) {{
+  const d = new Date(from);
+  const step = steps < 0 ? -1 : 1;
+  for (let left = Math.abs(steps); left > 0; ) {{
+    d.setDate(d.getDate() + step);
+    const week = d.getDay();
+    if (week !== 0 && week !== 6) left -= 1;
+  }}
+  return d;
 }}
-const SETTLE = stampOf(settleDay);
+const SETTLE = stampOf(shiftDays(today, 2));
+// 往前兩個交易日。標成「已交割」的那幾筆算成那一天成交的：今天成交的錢要 T+2
+// 才扣得掉，所以「今天成交、又已經交割」在真實世界裡不存在，假頁面也不該生出來
+// （程式有一道專門擋這種矛盾，見 planner._cash_blocked）。
+const PREV = stampOf(shiftDays(today, -2));
 document.getElementById('settle').textContent = SETTLE;
 
 function tickUnit(p) {{
@@ -671,8 +682,9 @@ function detailOf(t, index) {{
     tagName: 'stkdat', bhno: META.bhno, cseq: META.cseq,
     stkno: t.code, stkna: t.name, trade: '0', bs: t.bs,
     // 交割日是方法二的關鍵：cdate 比今天晚才代表這筆錢還沒離開銀行帳戶。
-    // 真的網站是 T+2，這裡照樣往後推兩個交易日（遇到週末再往後挪）。
-    tdate: STAMP, cdate: t.settled ? STAMP : SETTLE,
+    // 真的網站是 T+2，這裡照樣往後推兩個交易日（遇到週末再往後挪）；
+    // 標成「已交割」的就整筆往前挪兩個交易日，變成「前幾天成交、錢已經扣掉了」。
+    tdate: t.settled ? PREV : STAMP, cdate: t.settled ? STAMP : SETTLE,
     qty: String(t.qty), price: String(t.price), priceqty: String(t.priceqty),
     fee: String(t.fee), tax: String(t.tax), payn: String(t.payn),
     ordno: 'S' + String(index + 1).padStart(4, '0'),
@@ -700,7 +712,7 @@ function build() {{
   const settle = list.map((t, i) => ({{
     tagName: 'matsum', bhno: META.bhno, cseq: META.cseq,
     stkno: t.code, stkna: t.name, trade: '0', bs: t.bs, stype: 'H',
-    tdate: STAMP, cdate: t.settled ? STAMP : SETTLE,
+    tdate: t.settled ? PREV : STAMP, cdate: t.settled ? STAMP : SETTLE,
     qty: String(t.qty), priceavg: String(t.price), priceqty: String(t.priceqty),
     matdat: [Object.assign(detailOf(t, i), {{ tagName: 'matdat' }})],
   }}));
@@ -713,12 +725,22 @@ function build() {{
   // 至少讀得回來；真的遇到再照實際格式改。
   const raw = Math.round(num(document.getElementById('bank')) * 100);
   const cents = (raw < 0 ? '-' : '') + String(Math.abs(raw)).padStart(13, '0');
+
+  // 交割金額查詢（query610）：一天一列，金額是那一天要交割的淨額。真的網站不管
+  // 有沒有成交，都會把最近幾個交易日各列一列（沒成交就是 0），所以這裡也是固定
+  // 兩列、金額 0 也照給 —— 「今天那一列在不在」是程式的一道檢查（見
+  // planner._cash_blocked），不能因為今天沒成交就讓它消失。
+  const sumOf = (settled) => list.filter(t => !!t.settled === settled)
+      .reduce((s, t) => s + t.payn, 0);
+  const due = [
+    {{ trade: PREV, cdate: STAMP, pay_amt: String(sumOf(true)) }},
+    {{ trade: STAMP, cdate: SETTLE, pay_amt: String(sumOf(false)) }},
+  ];
+
   return {{
     '未實現損益': Object.assign({{ arrays: pnl }}, ok),
     '當日淨收付': Object.assign({{ arrays: settle }}, ok),
-    // 近期淨收付在真的網站上是一段日期區間，模擬頁只有「今天」這一批成交，
-    // 所以內容跟當日一樣 —— 差別在每一筆的 cdate，那才是方法二要看的東西。
-    '近期淨收付': Object.assign({{ arrays: settle }}, ok),
+    '交割金額': Object.assign({{ data: due }}, ok),
     '銀行餘額': Object.assign({{ data: [{{
       qry_date: STAMP, qry_times: '090000',
       bnkno: '050', bnkacc: META.bnkacc,

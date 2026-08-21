@@ -19,7 +19,7 @@ from util import cash_formula, cell_name, same_number, show, to_num
 # 現金餘額的兩種算法（完整說明見 docs/現金餘額兩種算法.md）。
 #
 #   opening  今日初始現金餘額 + 今日淨收付
-#   bank     銀行餘額 + 還沒交割的成交淨收付
+#   bank     銀行餘額 + 還沒扣款的交割金額
 #
 # 兩種並存不是備援，是各有各正確的日子：全額交割股當天，錢在成交當下就從銀行餘額
 # 扣走，但同一筆還掛在當日淨收付上（下午才更新改正），那天 bank 會扣兩次、
@@ -105,39 +105,35 @@ def bank_balance(rows):
     return round(amount / 100, 2)
 
 
-def unsettled_total(arrays, today):
+def pending_total(rows, today):
     """
-    還沒交割的成交淨收付合計。回傳 (合計, 筆數, 讀不到交割日的筆數, 有沒有今天的成交)。
+    還沒交割的錢。回傳 (合計, 有金額的天數, 今天那一列的金額)。
 
-    銀行餘額只含已經交割的錢，所以要補的正好是「cdate 比今天晚」的那幾筆。
-    用每一筆自己帶的交割日，而不是「今天+昨天」：那個寫法要嘛得知道「前一日」的
-    定義（沒人證實過），要嘛在非交易日跑會漏一天。
+    來源是交割金額查詢（query610），一天一列，金額已經是那一天的淨額：
 
-    讀不到 cdate 的列要單獨數出來給呼叫方擋 —— 那種列無法判斷該不該補，
-    默默跳過就是少算錢，而且畫面上不會有任何徵兆。
+        {"trade": "20260821", "cdate": "20260825", "pay_amt": "-238"}
 
-    這裡不濾 reason 非空的列（匯撥、配股）：網頁畫面會濾掉它們，但這支算的是
-    「還沒離開銀行帳戶的錢」，匯撥要是還沒交割就該算進來。真的遇到再回頭看
-    （還沒有人看過那種列長什麼樣，見 todo 4.1）。
+    銀行餘額只含已經交割的錢，所以要補的正好是「cdate 比今天晚」的那幾列。
+    交割日等於今天的那一列不補 —— 那筆錢今天早上就扣掉了（見 docs 裡的「前提」）。
+    日期是 YYYYMMDD，直接比字串就是比大小。
+
+    今天那一列（trade 等於今天）另外回傳給呼叫方做交叉檢查用：未實現損益說
+    今天有成交、這裡卻是 0 或根本沒有今天，就是這份資料有問題（見 _cash_blocked）。
+    沒有今天那一列時回 None —— 「今天沒有這一列」跟「今天是 0」要分得出來。
     """
     stamp = today.strftime("%Y%m%d")
-    total, rows, unknown, has_today = 0.0, 0, 0, False
+    total, days, today_amount = 0.0, 0, None
 
-    for item in arrays:
-        for mat in item.get("matdat") or []:
-            if str(mat.get("qty") or "").strip() == "0":
-                continue
-            if str(mat.get("tdate") or "").strip() == stamp:
-                has_today = True
-            cdate = str(mat.get("cdate") or "").strip()
-            if not cdate:
-                unknown += 1
-                continue
-            if cdate > stamp:
-                total += to_num(mat.get("payn"))
-                rows += 1
+    for row in rows:
+        amount = to_num(row.get("pay_amt"))
+        if str(row.get("trade") or "").strip() == stamp:
+            today_amount = amount
+        if str(row.get("cdate") or "").strip() > stamp:
+            total += amount
+            if amount:
+                days += 1
 
-    return round(total, 2), rows, unknown, has_today
+    return round(total, 2), days, today_amount
 
 
 def traded_today(pnl_arrays, today):
@@ -263,8 +259,10 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
     balance = sheet_data["balance"]
     cash = book["cash"]
 
-    # 當日淨收付兩種算法都要抓：opening 拿它算餘額，bank 雖然用不到它算餘額，
-    # 但「重設基準」與「今天有沒有成交」的交叉檢查都靠它，而且它只有一支查詢。
+    # 當日淨收付兩種算法都要抓：opening 拿它算餘額；bank 用不到它算餘額，但
+    # 「重設基準」要它，而且它是這一輪唯一一支「每一列都帶 bhno/cseq」的現金相關
+    # 資料 —— 銀行餘額與交割金額都沒有回顯帳號，身分核對全靠它擋在前面
+    # （見 fetch.collect 與下面 _cash_blocked 的第一道）。
     net, rows = settlement_total(record.get("當日淨收付", []))
 
     proposal = _row(row, col, "cash", "cash", "balance", "現金餘額", balance, net, None)
@@ -276,22 +274,21 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
     # 拿一個已知是錯的 net 去 calibrate，等於把今天的成交永久算進基準裡。
     proposal["blocked"] = False
 
-    bank = pending = None
-    pending_rows = unknown = 0
-    has_today = False
+    bank = pending = today_amount = None
+    pending_days = 0
     if method == METHOD_BANK:
         bank = bank_balance(record.get("銀行餘額"))
-        pending, pending_rows, unknown, has_today = unsettled_total(
-            record.get("近期淨收付", []), today)
+        pending, pending_days, today_amount = pending_total(
+            record.get("交割金額", []), today)
     proposal["bank"] = bank
     proposal["pending"] = pending
-    proposal["pending_rows"] = pending_rows
+    proposal["pending_days"] = pending_days
 
     if balance is None:
         proposal["note"] = "B8 是空的或不是數字，請先填一個現金餘額"
         return proposal
 
-    reason = _cash_blocked(record, today, method, net, bank, unknown, has_today)
+    reason = _cash_blocked(record, today, method, net, bank, today_amount)
     if reason:
         proposal["note"] = reason
         proposal["blocked"] = True
@@ -305,8 +302,11 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
     if method == METHOD_BANK:
         proposal["proposed"] = round(bank + pending, 2)
         proposal["formula"] = cash_formula(bank, pending)
-        proposal["note"] = (f"銀行餘額 {show(bank)} + 還沒交割的 {show(pending)}"
-                            f"（{pending_rows} 筆）")
+        proposal["note"] = (
+            f"銀行餘額 {show(bank)} + 還沒交割的 {show(pending)}（{pending_days} 天的成交還沒扣款）"
+            if pending_days else
+            f"銀行餘額 {show(bank)}（沒有還沒交割的成交）"
+        )
     else:
         proposal["proposed"] = ledger.cash_after(cash, today, net)
         proposal["formula"] = cash_formula(cash.get("baseline_value"), net)
@@ -320,7 +320,7 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
     return proposal
 
 
-def _cash_blocked(record, today, method, net, bank, unknown, has_today):
+def _cash_blocked(record, today, method, net, bank, today_amount):
     """
     現金這一格該不該整個擋住不寫。要擋就回一句給人看的話，不擋回 None。
 
@@ -334,13 +334,14 @@ def _cash_blocked(record, today, method, net, bank, unknown, has_today):
     if method == METHOD_BANK:
         if bank is None:
             return "銀行餘額沒有讀到（剛換算法的話要再按一次「讀取」）"
-        if "近期淨收付" not in record:
-            return "近期淨收付沒有讀到，算不出還有哪幾筆沒交割，現金這格先不動"
-        if unknown:
-            return (f"有 {unknown} 筆成交讀不到交割日，無法判斷該不該算進來，"
-                    f"現金這格先不動")
-        if traded_today(record.get("未實現損益", []), today) and not has_today:
-            return ("未實現損益顯示今天有成交，近期淨收付裡卻沒有今天的資料"
+        if "交割金額" not in record:
+            return "交割金額查詢沒有讀到，算不出還有哪幾天沒交割，現金這格先不動"
+        # 交叉檢查：未實現損益說今天有成交，交割金額查詢卻說今天沒有錢要交割。
+        # 今天成交的要 T+2 才扣，所以那筆錢一定還掛在這支查詢上；掛不上就是這份
+        # 資料不對（收盤結帳後這支還準不準，沒有人在那個時段查過）。少算的正好是
+        # 今天成交的那一整筆，而畫面上不會有任何徵兆，所以整格不寫。
+        if traded_today(record.get("未實現損益", []), today) and not today_amount:
+            return ("未實現損益顯示今天有成交，交割金額查詢裡今天卻沒有金額"
                     "（收盤結帳後可能查不到），現金這格先不動")
         return None
 

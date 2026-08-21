@@ -5,8 +5,9 @@ do_login()：開一個分頁，自動填入身分證、密碼與驗證碼並送�
 多組帳號設定：.env 用 TBB_ID_1/TBB_PASSWORD_1、TBB_ID_2/TBB_PASSWORD_2... 依序編號（見 .env.example）。
 多帳號共用同一個瀏覽器 context（因此也共用同一組 cookie/session）：這個網站是
 Java/Servlet 架構，登入狀態靠 JSESSIONID 這類 cookie 辨識，換帳號登入會把前一個
-的 session 頂掉。GUI 靠 fetch.ensure_logged_in 在换帳號前先把上一組的 cookie
-收下來，需要用時再換回去，才不必每次都重新跑一遍登入流程。
+的 session 頂掉。GUI 靠 fetch._ensure_one 在換帳號前先把上一組的 cookie
+收下來，需要用時再換回去，才不必每次都重新跑一遍登入流程；
+也因為 cookie 只有一組，抓資料一定是「一組登入完就立刻抓完他的」（見 fetch.collect）。
 
 瀏覽器設定：預設用 Playwright 自己下載的 Chromium、每次都是全新的空白 profile（沒有任何登入狀態）。
 想改用電腦上已安裝的 Chrome，在 .env 設 BROWSER_CHANNEL=chrome；

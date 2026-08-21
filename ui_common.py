@@ -372,7 +372,7 @@ def ask_cash_method(parent, family, current):
     # 選過一次了）。「全額交割要選哪一種」單獨一行、用跟主畫面「現金算法」
     # 同一種藍字（Method.TLabel），因為這是唯一一句填錯會被吃掉、隔天才看得出來的話。
     ttk.Label(outer, justify="left", style="Hint.TLabel", text=(
-        f"{planner.METHOD_NAMES[planner.METHOD_BANK]} ＝ 銀行餘額(網頁) ＋ 當日淨收付(網頁) ＋ 昨日淨收付(網頁)\n"
+        f"{planner.METHOD_NAMES[planner.METHOD_BANK]} ＝ 銀行餘額(網頁) ＋ 還沒扣款的交割金額(網頁)\n"
         f"{planner.METHOD_NAMES[planner.METHOD_OPENING]} ＝ 現金餘額(Excel) ＋ 當日淨收付(網頁)"
     )).grid(row=4, column=0, sticky="w", pady=(10, 0))
 
