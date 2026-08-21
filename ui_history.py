@@ -133,7 +133,7 @@ class UiHistoryMixin:
                 "", "end",
                 values=(
                     (event.get("at") or "").replace("T", " "),
-                    event.get("sheet", ""), event.get("cell", ""), event.get("label", ""),
+                    event.get("sheet", ""), event.get("label", ""),
                     describe_change(by, event.get("old"), event.get("new")),
                     SOURCE_NAMES.get(by, by),
                     event.get("note", ""),

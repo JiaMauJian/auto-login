@@ -222,15 +222,15 @@ def ask_opening_balance(parent, family, name, current, item):
     text = tk.StringVar(value="" if current is None else show(current))
     row = len(lines) + 1
 
-    ttk.Label(outer, text=f"Excel現金餘額 {item['cell']} 改成").grid(row=row, column=0,
-                                                          sticky="w", pady=(10, 2))
+    ttk.Label(outer, text="Excel現金餘額改成").grid(row=row, column=0,
+                                                sticky="w", pady=(10, 2))
     entry = ttk.Entry(outer, width=16, font=(family, FONT_SIZE), justify="right",
                       textvariable=text)
     entry.grid(row=row, column=1, sticky="e", padx=(24, 0), pady=(10, 2))
 
     # 結果邊打邊算。要核對的是「按下去會變成什麼」，自己看得到就不必先在心裡
     # 算一次再賭它跟程式算的一樣。
-    ttk.Label(outer, text=f"{item['cell']} 會變成", style="Hint.TLabel").grid(
+    ttk.Label(outer, text="會變成", style="Hint.TLabel").grid(
         row=row + 1, column=0, sticky="w", pady=2)
     result = ttk.Label(outer, text="維持原樣", style="Hint.TLabel")
     result.grid(row=row + 1, column=1, sticky="e", padx=(24, 0), pady=2)

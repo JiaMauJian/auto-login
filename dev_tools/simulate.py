@@ -425,7 +425,7 @@ def open_page(context, account, page=None):
     確保這個假帳號有一個假網頁分頁，回傳該分頁。
 
     已經是我們畫的那一頁（window.__SIM__ 在）就直接沿用，不重新產生 ——
-    否則每次按「讀取網頁資料」都會把使用者在頁面上改過的數字洗掉。
+    否則每次按「讀取」都會把使用者在頁面上改過的數字洗掉。
     """
     if page is None:
         page = context.new_page()

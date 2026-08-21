@@ -122,8 +122,10 @@ class UiSyncMixin:
 
         names = list(self.proposals)
         # 正在看的那位不見了（換了檔、重讀、改了篩選）就退回第一位。
-        # 右邊不能停在一個名單上已經沒有的人身上。
-        if self.current_sheet not in names:
+        # 右邊不能停在一個名單上已經沒有的人身上。還沒選過人（current_sheet
+        # 是 None，剛開程式、還沒點過名單也沒切過範圍）就不要自己選一個 ——
+        # 預設不點名，等使用者自己點。
+        if self.current_sheet is not None and self.current_sheet not in names:
             self.current_sheet = names[0] if names else None
 
         need = 0
@@ -248,7 +250,6 @@ class UiSyncMixin:
             self.tree.insert(
                 "", "end",
                 values=(
-                    " ".join(item["cell"] for item in both),
                     stock_title(both[0]["label"]),
                     texts["qty"], texts["cost"],
                     group_note(qty, cost),
@@ -263,7 +264,7 @@ class UiSyncMixin:
 
     def _fill_cash(self, name, item):
         """
-        表格底下那一條現金：現金餘額 B8　舊值 → 新值　說明：…
+        表格底下那一條現金：現金餘額　舊值 → 新值　說明：…
 
         一段一段插，負的數字自己上紅字。沒資料就整條清掉 ——
         換到還沒讀過的人時留著上一位的餘額，是這畫面上最危險的一種殘影。
@@ -274,7 +275,7 @@ class UiSyncMixin:
             after = item["proposed"] if item["will_write"] else item["current"]
             turned = self._cash_turned(item, before)
 
-            segments.append((f"現金餘額 {item['cell']}", "dim"))
+            segments.append(("現金餘額", "dim"))
             segments.append(("　", None))
             segments.append((show(before), _neg_tag(before)))
             if not values_match(before, after):
@@ -404,51 +405,57 @@ class UiSyncMixin:
         self.replan()
         self.refresh_history()
         self._say(f"{name} 的今日初始現金餘額改成 {show(opening)}，"
-                  f"{item['cell']} 上的數字剛好一樣，沒有格子要寫。"
+                  "跟 Excel 上的數字剛好一樣，沒有格子要寫。"
                   + (f"紀錄檔更新了 {recorded} 筆（見歷程）。" if recorded else ""))
 
     def _fill_head(self, name):
-        """表格上方那一行：是誰、第幾位、現金多少、這次要寫幾格、資料是幾點讀的。"""
+        """
+        表格上方那一行：是誰、資料是幾點讀的。
+
+        第幾位、現金多少、要寫幾格——2026/08/21 起併進下面的訊息框
+        （見 _fill_notes）當第一行。表頭跟提醒擠成同一種份量的字，看久了
+        分不出哪句是「這份資料還新不新」，哪句是提醒；名字留在表頭是因為
+        換人的時候第一眼要先確認「換對了沒」，這件事不能等捲到訊息框才看到。
+        讀取時間精準到秒，不到分鐘——分鐘不夠精準的話，剛讀完跟半小時前讀的
+        兩個時間點會長得一樣。
+        """
         if not name:
-            self.detail_head.configure(text="還沒有資料 —— 按上面的「讀取網頁資料」")
+            self.detail_head.configure(text="還沒有資料 —— 按上面的「讀取全部帳戶」")
             return
 
-        writes, _warns, cash, _negative = self._summary(name)
-        names = self._shown()
         parts = [name + ("（模擬）" if name in self.fake_sheets else "")]
-        if name in names:
-            parts.append(f"第 {names.index(name) + 1} / {len(names)} 位")
-        if cash:
-            parts.append(f"現金 {cash}")
-        parts.append(f"要寫 {writes} 格" if writes else "跟網頁一致")
-        # 一次只更新一位之後，畫面上每個人的資料新舊不一 —— 沒有這個時間，
-        # 半小時前讀的數字跟剛剛讀的長得一模一樣。
         read = self.read_at.get(name)
-        if read:
-            parts.append(f"讀取於 {read:%H:%M}")
+        parts.append(f"讀取於 {read:%H:%M:%S}" if read else "尚未讀取")
         self.detail_head.configure(text="　".join(parts))
 
     def _fill_notes(self, name):
         """
-        提醒只講選中的這一位，而且只在「有事」的時候出聲。
+        訊息框第一行固定講選中這一位：名字、現金多少、這次要寫幾格
+        （原本在表頭，2026/08/21 搬下來，見 _fill_head；名字這裡也留一份，
+        方便捲到這個框時不必回頭看表頭）。往下才是提醒，而且只在「有事」的
+        時候出聲。
 
         20 個人的提醒全部堆在同一個框裡等於沒有提醒 —— 別人的事左邊名單上
         已經用 ⚠ 標出來了，要看就換過去看。整組失敗（problems）例外，
         那跟選中誰無關，一定要講。
 
-        沒有警告的時候框就留空 —— 「還沒有資料」「已經一致」這種話下面
-        狀態列都講過（見 ui.py／ui_background.py 的 _say），這裡再寫一次
-        只是同一件事說兩遍，不是真正的提醒。
+        「操作中不要改 Excel 的現金餘額」不擺在這裡 —— 這個框在讀取完、寫入完
+        都還留著上一輪的內容，常駐在這裡等於讀完老半天還在講「正在做的時候
+        別碰」，反而誤導。那句話改成讀取中的忙碌訊息（見 start_fetch），
+        跟著狀態列一起出現、一起被下一句蓋掉。
         """
-        text = [f"• {warning}" for warning in self.warnings.get(name, [])]
+        text = []
+        if name:
+            writes, _warns, cash, _negative = self._summary(name)
+            parts = [name]
+            if cash:
+                parts.append(f"現金 {cash}")
+            parts.append(f"要寫 {writes} 格" if writes else "跟網頁一致")
+            text.append("　".join(parts))
+
+        text += list(self.warnings.get(name, []))
         for problem in self.problems:
             text.append(f"⚠ {problem}")
-
-        # 每天都成立的規矩，擺在最後一行。這個框只有五行高又沒有捲軸，
-        # 常駐的字排在前面就會把當天真正的警告推出視線 —— 排最後的話，
-        # 沒事的日子看得到（框是空的），有事的日子被擠掉的正好是它。
-        if self.proposals:
-            text.append("操作中不要改 Excel 的現金餘額")
 
         self.warn_box.configure(state="normal")
         self.warn_box.delete("1.0", "end")

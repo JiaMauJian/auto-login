@@ -64,6 +64,25 @@ def values_match(left, right):
     return same_number(left, right)
 
 
+def cash_formula(base, delta):
+    """
+    把「起點 ± 變動」組成一條 Excel 公式字串，例如 =1000-107。
+
+    現金餘額寫回 Excel 時改用公式，是為了讓人在 B8 上就能看到「今天從多少開始、
+    加減了多少」，不必再回頭查程式或紀錄檔。
+
+    數字刻意不加千分位逗點 —— 逗點在 Excel 公式裡是參數分隔符號，
+    "=1,000-107" 不是「一千減一百零七」，是壞掉的公式。
+    """
+    sign = "+" if delta >= 0 else "-"
+    return f"={_plain_num(base)}{sign}{_plain_num(abs(delta))}"
+
+
+def _plain_num(number):
+    text = f"{number:.2f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def show(value):
     """
     印給人看的數字。None 顯示成 (空)，數字加千分位、去掉多餘的零。

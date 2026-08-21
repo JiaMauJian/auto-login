@@ -5,6 +5,7 @@ Excel 讀寫。只認得持股管理表的這幾格，其餘全是公式，一�
     E4:E8  股數            <- 未實現損益的「成交股數」
     F4:F8  成本            <- 未實現損益的「成交均價」
     B8     現金餘額         <- 由紀錄檔的現金流水算出來
+    D1     程式維護提醒      每次寫入順便刷新，關閉程式時清掉，見 marker_enabled
 
 位置寫死是刻意的：這支程式只認得這個特定格式的持股管理表，
 認錯了就是把數字寫進別人的格子裡，寧可一開始就對不上而報錯。
@@ -22,7 +23,7 @@ import time
 from pathlib import Path
 
 from login import app_dir
-from util import to_num
+from util import env_int, to_num
 
 ENV_FILE = ".env"
 ENV_KEY = "EXCEL_PATH"
@@ -30,6 +31,21 @@ ENV_KEY = "EXCEL_PATH"
 HOLDING_ROWS = range(4, 9)
 COL_NAME, COL_QTY, COL_COST = 4, 5, 6
 CELL_BALANCE = (8, 2)
+
+# D1 沒被上面三處佔用，理論上可以安全借來提醒「這份檔案有程式在管」。
+# 語意是「這份檔案由程式維護」的持久標記，不是「程式現在正在跑」的即時燈號——
+# _write_worker 每次同步只是短暫用 COM 開檔、寫入、存檔、關檔，平常大部分時間
+# 程式根本沒碰著檔案，做不出真正的即時狀態，文字用詞也刻意避開「控制中」這種
+# 容易被誤會成即時狀態的說法。
+CELL_MARKER = (1, 4)
+MARKER_TEXT = "此檔案由程式自動維護，手動修改可能被覆蓋"
+MARKER_COLOR = 0xFF0000  # COM 的 Font.Color 是 BGR，這個值是藍字
+MARKER_ENV_KEY = "EXCEL_CONTROL_MARKER"
+
+
+def marker_enabled():
+    """.env 的 EXCEL_CONTROL_MARKER 沒設或設 1 就開著；設 0 就整個關掉這個功能。"""
+    return env_int(MARKER_ENV_KEY, 1) != 0
 
 BACKUP_KEEP = 10
 
@@ -149,9 +165,58 @@ def read_sheet(sheet):
 
 
 def write_cells(sheet, writes):
-    """writes 是 (row, col, value) 的清單。只會寫進記憶體，存檔是另一回事。"""
+    """
+    writes 是 (row, col, value) 的清單。只會寫進記憶體，存檔是另一回事。
+
+    現金餘額那格 value 會是「=1000-107」這種公式字串（見 util.cash_formula），
+    要走 Formula 屬性才會被 Excel 當成公式算，走 Value 屬性只會存成一串文字。
+    """
     for row, col, value in writes:
-        sheet.Cells(row, col).Value = value
+        cell = sheet.Cells(row, col)
+        if isinstance(value, str) and value.startswith("="):
+            cell.Formula = value
+        else:
+            cell.Value = value
+
+
+def write_marker(sheet):
+    """在 D1 補上藍字提醒。每次同步寫入都順手刷新，反正已經在開檔，不多一次 COM 往返。"""
+    cell = sheet.Cells(*CELL_MARKER)
+    cell.Value = MARKER_TEXT
+    cell.Font.Color = MARKER_COLOR
+
+
+def clear_all_markers(path):
+    """
+    程式正常關閉時呼叫：把 Excel 裡所有分頁的 D1 提醒清掉。
+
+    範圍是整份活頁簿，不只這次執行寫過的分頁——帳戶數不多，全部掃一遍成本低，
+    還能順便清掉上次非正常結束（當機、被工作管理員砍掉）遺留下來的提醒。
+
+    Best-effort：任何一步失敗都默默放棄，不能卡住關閉流程。真正的風險是相反的
+    不對稱——非正常結束不會走到這裡，D1 會留著過期的提醒，那個風險是可以接受的，
+    但絕不能因為清除失敗就讓程式關不掉。
+    """
+    if not marker_enabled() or path is None or not path.is_file():
+        return
+    try:
+        backup(path)
+        excel, workbook, attached = open_workbook(path, True)
+    except Exception:
+        return
+    try:
+        changed = False
+        for sheet in workbook.Worksheets:
+            cell = sheet.Cells(*CELL_MARKER)
+            if str(cell.Value or "").strip() == MARKER_TEXT:
+                cell.Value = None
+                changed = True
+        if changed:
+            workbook.Save()
+    except Exception:
+        pass
+    finally:
+        close_workbook(excel, workbook, attached)
 
 
 def find_sheet(book, name):

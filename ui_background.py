@@ -23,7 +23,7 @@ from login import app_dir, configure_browsers_path, open_context
 from ui_common import ask_cash_method, ask_confirm
 
 # 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
-STEP_NAMES = {"logged_in": "登入", "fetched": "讀取網頁資料", "written": "寫入"}
+STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入"}
 
 # 瀏覽器起不來時，錯誤視窗最上面那段人話。traceback 講的是 Playwright 的內部狀況，
 # 對使用者沒有意義，真正能動手的只有下面這兩件事。
@@ -42,6 +42,24 @@ def _browser_alive(context):
         return any(not pg.is_closed() for pg in context.pages)
     except PlaywrightError:
         return False
+
+
+def _pump_browser(context):
+    """
+    背景執行緒閒置時呼叫：隨便找一個活著的分頁進 Playwright 一下，逼它去處理
+    瀏覽器送來的事件。見 login.wait_until_finished 的說明。
+
+    還沒登入、context 是 None 時什麼也不做；context 已經被使用者關掉、
+    或這次呼叫剛好碰上分頁正在關閉，都當作沒事發生，下一輪再試。
+    """
+    if context is None:
+        return
+    try:
+        pages = [pg for pg in context.pages if not pg.is_closed()]
+        if pages:
+            pages[0].wait_for_timeout(100)
+    except PlaywrightError:
+        pass
 
 
 def _read_excel_after_fetch(records, path):
@@ -111,10 +129,10 @@ class UiBackgroundMixin:
     def _scope_ready(self):
         """範圍下拉能不能讓人手動切到某一組。
 
-        名字不到齊之前不給選：「登入」跟「更新全部帳戶」選在「全部」時
+        名字不到齊之前不給選：「登入」跟「讀取全部帳戶」選在「全部」時
         本來就會把每一組都登入一輪、順便知道名字（見 _on_logged_in），
         這裡等的正是那一輪做完 —— 不然使用者可能在誰都還沒登入過的時候，
-        手動切到一個從沒動過的組別，按鈕只能落到「更新（第 N 組）帳戶」
+        手動切到一個從沒動過的組別，按鈕只能落到「讀取（第 N 組）帳戶」
         那種叫不出名字的備援文字。模擬帳號一開機名字就有了，天生就緒。
         """
         return self.excel_open and not self.busy and all(
@@ -128,7 +146,7 @@ class UiBackgroundMixin:
 
         不管只有一組還是有很多組，選單停在「全部」就是全部 —— 第一次
         一定是全部讀取，之後要各別讀取得自己把選單切到那一組，按鈕文字
-        才會跟著換成「更新（某某）帳戶」或「更新（第 N 組）帳戶」。
+        才會跟著換成「讀取（某某）帳戶」或「讀取（第 N 組）帳戶」。
         """
         choice = self.account_choice.current()
         return choice if choice > 0 else None
@@ -140,7 +158,7 @@ class UiBackgroundMixin:
 
     def _refresh_fetch_button(self):
         """
-        按鈕上的字就是「按下去會動到誰」，一律用「更新」這個動詞。
+        按鈕上的字就是「按下去會動到誰」，一律用「讀取」這個動詞。
 
         名字還不知道（那一組沒登入過）時寫「第 3 組」而不是硬掰一個名字：
         這種時候按下去確實只做那一組，只是程式還說不出他是誰。正常流程會先
@@ -148,10 +166,11 @@ class UiBackgroundMixin:
         """
         order = self._scope_order()
         if order is None:
-            text = "更新全部帳戶"
+            done_once = all(i in self.trader_of for i in range(1, len(self.accounts) + 1))
+            text = "讀取全部帳戶" if done_once else "登入+讀取"
         else:
             name = self.trader_of.get(order)
-            text = f"更新（{name}）帳戶" if name else f"更新（第 {order} 組）帳戶"
+            text = f"讀取（{name}）帳戶" if name else f"讀取（第 {order} 組）帳戶"
         self.fetch_button.configure(text=text)
 
     def _on_scope_changed(self, _event=None):
@@ -216,7 +235,8 @@ class UiBackgroundMixin:
         who = self.round_target = self._scope_name()
         self._ensure_browser_thread()
         self._set_busy(True, f"讀取{f'（{who}）' if who else ''}中，"
-                             f"還沒登入的話瀏覽器會自己開起來，請不要關掉它…")
+                             f"還沒登入的話瀏覽器會自己開起來，請不要關掉它…"
+                             f"操作中不要改 Excel 的現金餘額。")
         self.browser_waiting += 1
         self.browser_cmd_queue.put((
             "fetch",
@@ -235,7 +255,7 @@ class UiBackgroundMixin:
         不能每次按鈕都開新執行緒各開各的瀏覽器 —— Playwright 的同步 API 底層用
         greenlet 綁死建立它的那個執行緒，換一個執行緒去操作同一個 context 會直接
         壞掉（cannot switch to a different thread）。所以瀏覽器只能養在「一個專屬、
-        活得夠久」的執行緒裡，「登入」「讀取網頁資料」都只是丟一個指令進 queue
+        活得夠久」的執行緒裡，「登入」「讀取」都只是丟一個指令進 queue
         給它處理，差別只在要不要順便查資料、更新 Excel。
 
         每一個指令都一定要回一則結果，這個執行緒也一定不能因為某次失敗就結束。
@@ -271,7 +291,17 @@ class UiBackgroundMixin:
 
         try:
             while True:
-                cmd, arg = self.browser_cmd_queue.get()
+                try:
+                    cmd, arg = self.browser_cmd_queue.get(timeout=0.15)
+                except queue.Empty:
+                    # 沒有指令要處理的時候也要繼續進出 Playwright，理由跟
+                    # login.wait_until_finished 一樣：同步 API 只有在程式呼叫
+                    # Playwright 時才會處理瀏覽器送來的事件，網站用 window.open
+                    # 開出來的分頁（例如「即時看盤交易」「簡易看盤交易」）要等
+                    # 事件被處理過才會開始載入。這裡沒有這一段的話，登入完、
+                    # 使用者自己在瀏覽器裡點連結，新視窗會一直卡在 about:blank。
+                    _pump_browser(context)
+                    continue
                 if cmd == "stop":
                     break
 
@@ -283,7 +313,7 @@ class UiBackgroundMixin:
                     ensure_browser()
                     records = fetch_records(context, selected, store, *extra)
                     if cmd == "login":
-                        # 登入按鈕只做登入，不碰 Excel —— 現值要留給「讀取網頁資料」去讀，
+                        # 登入按鈕只做登入，不碰 Excel —— 現值要留給「讀取」去讀，
                         # 那邊本來就要讀一次，今日現金基準也是靠那次讀到的值設定（見 _on_fetched）。
                         payload = {"records": records}
                     else:
@@ -319,14 +349,14 @@ class UiBackgroundMixin:
         這條路了，寫進 Excel 的跟記進紀錄檔的必定是同一批。
 
         只收 round_scope 裡那幾位。名單上其他人可能也有「要寫」的格子，但那是
-        用上一輪的網頁資料算出來的 —— 按「更新（王小明）」只會去查王小明，
+        用上一輪的網頁資料算出來的 —— 按「讀取（王小明）帳戶」只會去查王小明，
         這時候順手把別人那幾格也寫進去，寫的是舊資料，而且沒有人要求過。
         """
         writes, total = {}, 0
         for name, items in self.proposals.items():
             if name not in self.round_scope:
                 continue
-            cells = [(item["row"], item["col"], item["proposed"])
+            cells = [(item["row"], item["col"], item["formula"] or item["proposed"])
                      for item in items if item["will_write"]]
             if cells:
                 writes[name] = cells
@@ -356,6 +386,8 @@ class UiBackgroundMixin:
                     if sheet is None:
                         raise RuntimeError(error)
                     excel_io.write_cells(sheet, cells)
+                    if excel_io.marker_enabled():
+                        excel_io.write_marker(sheet)
                 # 一律存檔，接上使用者開著的 Excel 時也一樣。
                 #
                 # 原本接上時刻意不存、留給人自己按 Ctrl+S 當作多一道確認，但那道
@@ -467,7 +499,7 @@ class UiBackgroundMixin:
         names, problems = [], []
         for record in payload["records"]:
             # 名字是登入才拿得到的東西，拿到就記著 —— 上面那個範圍選單、
-            # 「更新（某某）」那顆按鈕都靠這份對照。
+            # 「讀取（某某）帳戶」那顆按鈕都靠這份對照。
             if record.get("sheet_name"):
                 self.trader_of[record["order"]] = record["sheet_name"]
             if record["problems"]:
@@ -482,13 +514,13 @@ class UiBackgroundMixin:
             self._say("登入失敗")
             return
 
-        self._say(f"已登入：{'、'.join(names)}。要更新資料時再按「讀取網頁資料」。")
+        self._say(f"已登入：{'、'.join(names)}。要更新資料時再按「讀取」。")
 
     def _initialize(self, records):
         """
         把 Excel 上的現金餘額收成今日基準。回傳收了幾格。
 
-        在「讀取網頁資料」回呼裡呼叫，緊接在這一輪 Excel 現值讀回來（sheet_data
+        在「讀取」回呼裡呼叫，緊接在這一輪 Excel 現值讀回來（sheet_data
         更新）之後、真正拿網頁資料去算現金（replan）之前 —— 這一輪還沒寫過 Excel，
         所以這裡讀到的數字必定是「今天買賣之前」的狀態，現金基準可以直接取 B8、
         今天的流水先記 0，等 replan 再把這一輪查到的淨收付往上加。「B8 含不含
@@ -541,7 +573,7 @@ class UiBackgroundMixin:
         # 這一輪讀到的一律是「補上去」，不是「整份換掉」：一次只更新一位的時候，
         # 名單上其他人手上那份是上一輪的資料，清掉他們等於整份名單只剩一個人。
         # 留著的代價是畫面上同時有好幾個時間點的資料，所以每一位都記下讀取時間，
-        # 右邊標頭寫得出「讀取於 10:32」（見 _fill_head）。
+        # 右邊標頭寫得出「讀取於 10:32:07」（見 _fill_head）。
         now = datetime.datetime.now()
         errors = payload["sheet_errors"]
         fresh = []
@@ -590,7 +622,7 @@ class UiBackgroundMixin:
 
         who = self.round_target
         note = self._problem_note()
-        # 一位都沒讀成功的時候絕對不能說「已讀取」——「更新（王小明）」按下去、
+        # 一位都沒讀成功的時候絕對不能說「已讀取」——「讀取（王小明）帳戶」按下去、
         # 他那一組登入逾時，畫面上其他人的數字全都還在，最像結論的那一句要是
         # 寫著「已讀取」，看的人不會知道自己看的是半小時前的東西。
         if not self.round_scope:
@@ -604,7 +636,7 @@ class UiBackgroundMixin:
         else:
             self._say(head + note)
 
-        # 讀完直接接著寫，中間不再問一次。按「讀取網頁資料」本身就是意願的表達，
+        # 讀完直接接著寫，中間不再問一次。按「讀取」本身就是意願的表達，
         # 再跳一個確認只是重複問同一件事。
         writes, total = self._collect_writes()
         if total:
@@ -917,7 +949,7 @@ class UiBackgroundMixin:
         現金餘額那一行左邊的「現金算法」：要不要顯示，以及顯示哪一個。
         順便決定右邊那組基準數字＋「修改」在不在（見 _show_opening_row）。
 
-        這次執行還沒問過就不顯示。算法是這次程式開起來、第一次按「讀取網頁資料」時
+        這次執行還沒問過就不顯示。算法是這次程式開起來、第一次按「讀取全部帳戶」時
         跳視窗問的，在那之前畫面上寫一個名字，看起來就像已經選好了 —— 而那時候顯示的
         其實是上次沿用下來的預設值。問過之後才寫，寫的就是這次的答案。
 
@@ -983,7 +1015,7 @@ class UiBackgroundMixin:
 
     def _maybe_ask_cash_method(self):
         """
-        這次程式開起來、第一次按「讀取網頁資料」時，先問今天要用哪一種算法。
+        這次程式開起來、第一次按「讀取全部帳戶」時，先問今天要用哪一種算法。
 
         問在抓資料之前：算法決定要不要去查銀行餘額那兩支，選在後面就得再讀一次。
         它也不需要任何資料才問得出口 —— 判斷依據是「今天有沒有買全額交割股」，

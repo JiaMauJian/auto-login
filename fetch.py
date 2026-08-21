@@ -238,7 +238,7 @@ def ensure_logged_in(context, selected, store=None):
 def login_only(context, selected, store=None):
     """
     只確保登入，不查資料。給「登入」按鈕用：先把瀏覽器開好、帳號登入好，
-    之後按「讀取網頁資料」（見 collect）就能直接重查，不必再等一次自動登入。
+    之後按「讀取」（見 collect）就能直接重查，不必再等一次自動登入。
 
     20 組一次登完之後，每一組的 cookie 都收在 store 裡（見 new_store），
     所以之後「只更新某一位」不必重登 —— 換回他的 cookie 就好。

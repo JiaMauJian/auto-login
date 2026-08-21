@@ -13,7 +13,6 @@ from ui_common import (
 # 明細表的五欄：(欄名, 標題, 比重, 下限, 對齊)。比重與下限都照 10 級字的像素給，
 # 實際寬度由 wide() 乘上字級，再由 fit_columns 按比重攤進表格當下的寬度。
 DETAIL_COLUMNS = (
-    ("cells", "格子", 72, 52, "w"),
     ("stock", "股票", 140, 90, "w"),
     ("qty", "股數", 175, 110, "e"),
     ("cost", "成本", 150, 95, "e"),
@@ -27,7 +26,6 @@ DETAIL_COLUMNS = (
 HISTORY_COLUMNS = (
     ("at", "時間", 120, 100, "w"),
     ("sheet", "交易人", 80, 60, "w"),
-    ("cell", "格子", 60, 40, "w"),
     ("label", "項目", 190, 120, "w"),
     ("change", "變化", 190, 130, "w"),
     ("by", "來源", 60, 40, "center"),
@@ -81,7 +79,7 @@ class UiLayoutMixin:
         style.configure("TLabel", font=(family, FONT_SIZE))
         style.configure("TNotebook.Tab", font=(family, FONT_SIZE))
         style.configure("Hint.TLabel", font=(family, HINT_SIZE), foreground="black")
-        # 「讀取網頁資料」用 bootstyle="primary"（見下面 fetch_button），這裡只補粗體 ——
+        # 「讀取」用 bootstyle="primary"（見下面 fetch_button），這裡只補粗體 ——
         # ttkbootstrap 產生的實際樣式名就是 primary.TButton，全程式只有這顆按鈕用它。
         style.configure("primary.TButton", font=(family, FONT_SIZE, "bold"))
         # 現金算法只顯示、不給選（每天讀取前那個視窗才是入口），所以要夠醒目
@@ -107,6 +105,13 @@ class UiLayoutMixin:
         self._build_sync_tab()
         self._build_history_tab()
         self._build_cert_tab()
+
+        # 展開的下拉清單選取列要跟 Treeview 一樣是主題藍——但 ttkbootstrap 每次
+        # 套用 bootstyle 都會用 Tcl 呼叫直接蓋一次 selectbackground/foreground
+        # （見 update_combobox_popdown_style），優先度比 option_add 高，蓋掉了字級
+        # 那條路能用的設法。只能照它的路子，在它蓋完之後再蓋一次我們要的顏色。
+        for combo in (self.account_choice, self.history_who, self.history_item, self.history_when):
+            self._paint_dropdown_selection(combo)
 
         # 狀態列跟進度條放同一條、同一列：狀態列說「在幹嘛」，進度條說「還在動」，
         # 是同一件事的兩種講法，本來就該擺在一起看，不是兩個各自獨立的區塊。
@@ -136,6 +141,18 @@ class UiLayoutMixin:
         self._sync_buttons()
 
         self._center(width, height)
+
+    def _paint_dropdown_selection(self, combobox):
+        """把 combobox 展開的那份清單，選取列蓋成主題藍。
+
+        popdown 是 ttk::combobox 內部另開的 Tcl 視窗，第一次呼叫
+        PopdownWindow 才會建出來（已建過的話回傳原本那個，不會重建）。
+        必須在 ttkbootstrap 蓋完它自己那份顏色之後才蓋，不然會被蓋回去。
+        """
+        popdown = combobox.tk.eval(f"ttk::combobox::PopdownWindow {combobox}")
+        combobox.tk.call(f"{popdown}.f.l", "configure",
+                          "-selectbackground", self.colors.primary,
+                          "-selectforeground", self.colors.selectfg)
 
     def _center(self, width, height):
         """
@@ -179,7 +196,7 @@ class UiLayoutMixin:
 
     def _build_toolbar(self, parent):
         """
-        開啟EXCEL／登入／讀取網頁資料——原本擺在視窗最上面、三個分頁共用，
+        開啟EXCEL／登入／讀取——原本擺在視窗最上面、三個分頁共用，
         但這幾顆按鈕做的事只跟「同步」有關（讀網頁、寫 Excel），歷程、憑證
         兩頁都用不到，擺在分頁外面等於替另外兩頁背了不相干的操作列。移進來。
         """
@@ -187,9 +204,9 @@ class UiLayoutMixin:
         top.grid(row=0, column=0, sticky="ew")
 
         # 三顆按鈕疊成左邊那一直行，由上而下就是做事的順序：
-        # 開啟EXCEL -> 登入 -> 讀取網頁資料。
+        # 開啟EXCEL -> 登入 -> 讀取。
         #
-        # 原本「讀取網頁資料」擺在最右邊，動線就變成左上、左下、再橫跨整個視窗
+        # 原本「讀取」擺在最右邊，動線就變成左上、左下、再橫跨整個視窗
         # ——而它是這裡最常按的一顆（登入一天一次，讀取一天很多次）。垂直對齊
         # 還多帶一個好處：後兩顆在前一步沒完成時是灰的，排成一行才看得出那是
         # 「還沒輪到」而不是「壞了」。sticky="ew" 讓三顆一樣寬，看起來才是一疊
@@ -217,18 +234,10 @@ class UiLayoutMixin:
         self.account_choice.grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
         self.account_choice.bind("<<ComboboxSelected>>", self._on_scope_changed)
 
-        # 按鈕上的字跟著範圍走：全部是「更新全部帳戶」，選了一位就是「更新（王小明）帳戶」
+        # 按鈕上的字跟著範圍走：全部是「讀取全部帳戶」，選了一位就是「讀取（王小明）帳戶」
         # —— 按下去會動到誰，寫在按鈕上，不必回頭去看那個下拉選單（見 _refresh_fetch_button）。
-        self.fetch_button = ttk.Button(top, text="更新全部帳戶", bootstyle="primary", command=self.start_fetch)
+        self.fetch_button = ttk.Button(top, text="讀取全部帳戶", bootstyle="primary", command=self.start_fetch)
         self.fetch_button.grid(row=2, column=0, sticky="ew", pady=(6, 0))
-
-        # 提醒貼在「更新」按鈕旁邊：它講的正是按下那顆按鈕之後會發生的事，
-        # 擺在一起才看得出因果，放到別的分頁或選單裡就沒人記得自己是哪一邊。
-        # 這裡原本是一個「程式自動更新」開關，可以關掉改成人工維護；拿掉了 ——
-        # 會開這支程式，就是要讓程式自動更新，這句話固定不變，不必再看開關。
-        self.mode_hint = ttk.Label(
-            top, text="讀完網頁資料就會自動備份並寫進 Excel", style="Auto.TLabel")
-        self.mode_hint.grid(row=2, column=1, columnspan=3, sticky="w", padx=(16, 0), pady=(6, 0))
 
         # 右邊留白那一欄負責吃掉多餘寬度，左邊那一直行才不會被拉開。
         top.columnconfigure(3, weight=1)

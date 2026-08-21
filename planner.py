@@ -14,7 +14,7 @@ Excel 上的現值一律被網頁值覆蓋，程式不記、不比對「這一�
 import ledger
 from excel_io import COL_COST, COL_QTY, CELL_BALANCE
 from recon import TRADE_NAMES
-from util import cell_name, same_number, show, to_num
+from util import cash_formula, cell_name, same_number, show, to_num
 
 # 現金餘額的兩種算法（完整說明見 docs/現金餘額兩種算法.md）。
 #
@@ -222,7 +222,7 @@ def _row(row, col, kind, key, which, label, current, web, proposed, note="", mis
         "kind": kind, "key": key, "which": which, "label": label,
         "current": current, "web": web, "proposed": proposed,
         "note": note, "missing": missing, "will_write": will_write,
-        "reset_to": None,
+        "reset_to": None, "formula": None,
     }
 
 
@@ -238,6 +238,7 @@ def apply_cash_reset(item, opening):
     """
     target = round(opening + item["net"], 2)
     item["proposed"] = target
+    item["formula"] = cash_formula(opening, item["net"])
     item["reset_to"] = target
     item["record_net"] = False          # calibrate 會把流水一起寫好
     item["will_write"] = not same_number(item["current"], target)
@@ -303,10 +304,12 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
 
     if method == METHOD_BANK:
         proposal["proposed"] = round(bank + pending, 2)
+        proposal["formula"] = cash_formula(bank, pending)
         proposal["note"] = (f"銀行餘額 {show(bank)} + 還沒交割的 {show(pending)}"
                             f"（{pending_rows} 筆）")
     else:
         proposal["proposed"] = ledger.cash_after(cash, today, net)
+        proposal["formula"] = cash_formula(cash.get("baseline_value"), net)
         proposal["note"] = f"今日淨收付 {show(net)}（{rows} 筆成交）"
 
     proposal["will_write"] = (
@@ -330,7 +333,7 @@ def _cash_blocked(record, today, method, net, bank, unknown, has_today):
 
     if method == METHOD_BANK:
         if bank is None:
-            return "銀行餘額沒有讀到（剛換算法的話要再按一次「讀取網頁資料」）"
+            return "銀行餘額沒有讀到（剛換算法的話要再按一次「讀取」）"
         if "近期淨收付" not in record:
             return "近期淨收付沒有讀到，算不出還有哪幾筆沒交割，現金這格先不動"
         if unknown:
@@ -361,7 +364,7 @@ def initialize(sheet_data, book, sheet_name, today, at):
     介面在登入成功後跑一次。股數/成本不需要初始化 —— 程式每次都直接以
     網頁值覆蓋，沒有「先接管」這一步。
 
-    這裡刻意不需要網頁資料。今天在網頁上成交了什麼，等按「讀取網頁資料」時
+    這裡刻意不需要網頁資料。今天在網頁上成交了什麼，等按「讀取」時
     再往上加 —— 所以現金基準直接取 B8，今天的流水先記 0，之後 commit 會用
     真正的淨收付覆蓋掉那個 0。這也是為什麼不必再問「B8 含不含今天的淨收付」：
     登入的當下它一定還沒含。
