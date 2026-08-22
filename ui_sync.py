@@ -3,7 +3,7 @@
 import ledger as ledger_mod
 import planner
 from util import show, to_num, values_match
-from ui_common import ask_opening_balance, fit_to_content, stripe
+from ui_common import ask_opening_balance, fit_to_content
 
 
 def _neg_tag(value):
@@ -113,7 +113,7 @@ class UiSyncMixin:
             self.current_sheet = names[0] if names else None
 
         need = 0
-        for index, name in enumerate(names):
+        for name in names:
             # 現金餘額現在是隱藏欄（見 _build_people），值照樣填 —— 隱藏的意思是
             # 「先不顯示」，不是「不算」，那一欄要回來的時候不必再回頭補這裡。
             writes, warns, cash, negative = self._summary(name)
@@ -133,7 +133,7 @@ class UiSyncMixin:
                 "", "end", iid=name,
                 text=name + ("（模擬）" if name in self.fake_sheets else ""),
                 values=(cash, flag),
-                tags=tuple(tags) + stripe(index, "attention" in tags),
+                tags=tuple(tags),
             )
 
         total = len(self.proposals)
@@ -211,7 +211,7 @@ class UiSyncMixin:
         # 兩邊收在同一段高度裡。上限只是防呆（真有人塞了三十檔，那就讓它捲）。
         self.tree.configure(height=max(5, min(len(groups), 18)))
 
-        for index, group in enumerate(groups):
+        for group in groups:
             qty, cost = group.get("qty"), group.get("cost")
             both = [item for item in (qty, cost) if item is not None]
             if not both:
@@ -244,7 +244,7 @@ class UiSyncMixin:
                     stock_title(both[0]["label"]),
                     texts["qty"], texts["cost"],
                 ),
-                tags=tuple(tags) + stripe(index, bool({"write", "done"} & set(tags))),
+                tags=tuple(tags),
             )
 
         # 欄寬照這一位的內容重算：股票名字有長有短（「2059 川湖」對「006208 富邦台50」），
@@ -321,9 +321,9 @@ class UiSyncMixin:
         self.cash_notes = [(title, note) for _key, title, _value, note, _tag in rows if note]
 
         self.cash_tree.delete(*self.cash_tree.get_children())
-        for index, (key, title, value, note, tag) in enumerate(rows):
+        for key, title, value, note, tag in rows:
             self.cash_tree.insert("", "end", iid=key, values=(title, value),
-                                  tags=((tag,) if tag else ()) + stripe(index))
+                                  tags=(tag,) if tag else ())
         # 高度照實際有幾列給，多的空白留給底下的訊息框。一列都沒有的時候還是留 1
         # ——Treeview 高度 0 在畫面上只剩一條表頭，看起來像壞掉。
         self.cash_tree.configure(height=max(len(rows), 1))

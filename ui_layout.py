@@ -321,7 +321,6 @@ class UiLayoutMixin:
 
         # 底色管「要不要處理」、前景色管「錢是不是負的」。兩件事用不同屬性，
         # 才能同時成立而不會互相蓋掉。
-        self.people.tag_configure("stripe", background=STRIPE_COLOR)
         self.people.tag_configure("attention", background="#eaf4ea")
         self.people.tag_configure("warned", foreground=self.colors.warning)
         self.people.tag_configure("negative", foreground=self.colors.danger)
@@ -369,7 +368,6 @@ class UiLayoutMixin:
 
         # 顏色只用來輔助，不是唯一線索 —— 同一件事訊息框裡有一句話寫著
         # （見 ui_sync._fill_notes），值那一欄也看得出「舊 → 新」。
-        self.tree.tag_configure("stripe", background=STRIPE_COLOR)
         self.tree.tag_configure("write", background="#eaf4ea")
         self.tree.tag_configure("done", background="#eaf0fb")
         self.tree.tag_configure("missing", foreground=self.colors.secondary)
@@ -405,7 +403,6 @@ class UiLayoutMixin:
                                       show="headings", selectmode="none", height=3)
         build_columns(self.cash_tree, CASH_COLUMNS)
         self.cash_tree.grid(row=0, column=0, sticky="ew")
-        self.cash_tree.tag_configure("stripe", background=STRIPE_COLOR)
         self.cash_tree.tag_configure("neg", foreground=self.colors.danger)
         # 現金算法那一列用主題藍加粗，跟原本那個 Method.TLabel 一樣 ——
         # 「今天的錢是用哪一種算法算出來的」不該要人回想。
@@ -609,7 +606,6 @@ class UiLayoutMixin:
             self.migrate_tree.column(key, width=wide(widths[key]), minwidth=wide(widths[key] // 2),
                                      anchor=anchor, stretch=(key == "path"))
         self.migrate_tree.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-        self.migrate_tree.tag_configure("stripe", background=STRIPE_COLOR)
         self.migrate_tree.bind("<<TreeviewSelect>>", self._on_migrate_select)
 
         box.rowconfigure(1, weight=1)
