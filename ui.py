@@ -13,11 +13,12 @@
 而實際的工作方式是依序輪詢、一次只處理一個人，所以「換下一位」被做成一個
 動作（按鈕或 Ctrl+↑ / Ctrl+↓），右邊那張表永遠一頁看得完。
 
-右邊那張表排得跟 Excel 的「持股資料」一樣：一檔股票一列，股數與成本並排，
-現金（B8）像在 Excel 裡一樣擺在那張表外面、自己一張表（現金餘額、今日初始現金餘額、
-現金算法各一列，負的整列紅字），左現金、右股票並排。畫面跟檔案同形狀，
-對照的時候才不必在心裡翻譯一次。值平常只寫現在的數字，有變化才寫成
-「舊 → 新」—— 20 檔裡通常只有一兩格要動，那一兩個箭頭才跳得出來。
+右邊分兩塊：右上角是常駐狀態列（現金算法、今日初始現金餘額、「修改」按鈕），
+不管這一輪有沒有異動都在；底下是訊息框，讀歷程檔篩「今天＋這位交易人」重排
+成一行一句話（見 ui_sync._fill_notes），只列這一輪真的有寫入的現金與股數／
+成本，沒有異動的檔完全不提。2026/08/22 之前這裡是現金／股票兩張並排的
+Treeview（見 docs/同步分頁訊息框改版.md），拿掉的理由是那兩張表大半列平常
+都是「跟網頁一致，沒事」，真正要看的一兩格反而被淹沒在裡面。
 
 一次讀全部，還是只更新一位
 --------------------------
@@ -29,13 +30,14 @@
 開盤前那一次。預設仍然是全部，因為交易人的名字要登入之後才從網站拿得到
 （.env 裡只有帳密），沒讀過一輪之前左邊名單是空的，也就沒有人可以點。
 
-只更新一位有兩件事要守住：
+只更新一位要守住：寫入、落帳只能碰這一輪讀到的那幾位（round_scope）。名單上
+別人也可能有「要寫」的格子，那是用上一輪的網頁資料算出來的，順手寫出去就是
+拿舊資料改 Excel。
 
-一、畫面上的資料新舊不一。別人那幾列是上一輪讀的，所以每一位都記著自己的讀取時間，
-右邊標頭寫「讀取於 10:32:07」—— 沒有它，半小時前的數字跟剛讀的長得一模一樣。
-
-二、寫入、落帳只能碰這一輪讀到的那幾位（round_scope）。名單上別人也可能有
-「要寫」的格子，那是用上一輪的網頁資料算出來的，順手寫出去就是拿舊資料改 Excel。
+（畫面上的資料新舊不一——別人那幾列是上一輪讀的——這件事原本靠每一位的讀取
+時間標出來，訊息框第一行寫著「讀取於 10:32:07」；2026/08/22 使用者要求拿掉
+那一行，目前沒有別的畫面信號補這個位置，只是不影響上面那條「寫入範圍」的
+硬規則，資料看起來新舊不分不會讓程式寫錯地方，只是人自己不容易一眼看出來。）
 
 還有一個藏在瀏覽器裡的限制：整個瀏覽器只有一組 cookie，同時只帶得動一個人的身分
 —— 而被頂掉的那個分頁自己不會知道，探起來還像活著。但伺服器那邊 20 個帳號的
@@ -49,8 +51,8 @@ cookie 換回去就回到他登入完的那一刻（見 fetch.new_store），只
 現金的流水還是照記，只是那是程式內部的帳，不再是一個要人看、要人操作的畫面。
 
 「改 B8 就好」只在隔天成立。同一天第二次以後登入，基準已經設過、不會再跟著 B8 走，
-手改會在下次寫入時被程式直接蓋掉。所以基準本身就寫在畫面上：現金那張表上
-一列「今日初始現金餘額」，表格底下一顆「修改今日初始現金餘額」（見 _fill_cash、
+手改會在下次寫入時被程式直接蓋掉。所以基準本身就寫在畫面上：右上角常駐狀態列一項
+「今日初始現金餘額」，旁邊一顆「修改今日初始現金餘額」（見 ui_sync._fill_status、
 edit_opening）。那顆按鈕只在今天用「初始餘額累加」的時候才出現 —— 它改的是那一種
 算法的基準。
 
@@ -80,8 +82,8 @@ docs/現金餘額兩種算法.md。
 `_default_method`）。錯的方式不對稱 —— 全額交割當天留在銀行餘額推算會扣兩次、
 寫進 Excel 隔天才看得出來，所以「忘了換」要往安全的那一邊倒。
 
-問過、名字顯示出來之後，現金表上「現金算法」那一列本身也是一個開關：點一下先跳
-確認視窗、再換成另一種（見 `ui_sync._on_cash_click`、
+問過、名字顯示出來之後，狀態列上「現金算法」那個名字本身也是一個開關：點一下先跳
+確認視窗、再換成另一種（見 `ui_sync._on_method_click`、
 `ui_background._toggle_cash_method`），不必等重開程式或還原 Excel 備份。2026/08/20 加的，原因是測試時每次都要還原備份才能換答案太重；
 原本每次重開程式都要問一次的規矩沒有變，這是在那之上多開的第二個入口。
 
@@ -177,7 +179,10 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         self.proposals = {}      # 分頁名 -> 提案清單
         self.warnings = {}       # 分頁名 -> 提醒
         self.problems = []       # 這一輪畫在提醒框裡的失敗原因（由 problem_of 攤平而來）
-        self.cash_notes = []     # 現金表那幾列的說明，(列名, 說明)；表上沒有說明欄，改在訊息框講
+        # 歷程檔整份讀進記憶體的結果，refresh_history() 每次 commit 完都會重填一次。
+        # 這裡先給空清單：_build() 會在 refresh_history() 第一次被呼叫之前就先畫一次
+        # 右邊的訊息框（見 ui_sync._fill_notes），沒有這行會在那一刻找不到這個屬性。
+        self.history_rows = []
         self.current_sheet = None  # 右邊正在看哪一位交易人
 
         # 「第幾組帳號」與「哪一位交易人」的對照。帳號設定裡只有帳密沒有名字，
@@ -186,19 +191,23 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         # 一開機就填得進去，逐一交易人更新在模擬模式下不必先讀一輪。
         self.trader_of = {i: a["name"] for i, a in enumerate(self.accounts, start=1)
                           if a.get("fake")}
-        # 每一位的網頁資料是什麼時候讀的。改成一次只更新一位之後，畫面上同時
-        # 存在好幾個時間點的資料 —— 不寫出來，別人那幾列看起來就跟剛讀的一樣新。
-        self.read_at = {}        # 分頁名 -> datetime
         # 失敗原因改成用「第幾組」當 key，不再是一整串重來一次的清單：只更新一位的
         # 時候，別人上一輪的失敗還沒被解決，不能因為這一輪沒讀到他就當作沒事了。
-        self.problem_of = {}     # 第幾組 -> 失敗原因
+        self.problem_of = {}     # 第幾組 -> {"text": 失敗原因, "at": 記錄時間}
         # 這一輪動到哪幾位。寫入、落帳都只能在這個範圍裡做 —— 別人手上那份
         # 是上一輪的舊資料，拿舊資料去寫 Excel 是這個改動最大的風險。
         self.round_scope = set()
         # 這一輪按下去的時候要做誰（None = 全部）。報告用的，不是判斷用的。
         self.round_target = None
+        # 分頁名 -> 這一位最後一次讀到資料（或修改今日初始現金餘額）的時間
+        # （ISO 字串）。右邊常駐狀態列那個「✓ 與網頁一致」小提示要掛的時間戳
+        # 就是它（見 ui_sync._fill_status）——2026/08/22 這句話原本進訊息框、
+        # 逐輪疊成一行行歷程，使用者發現多數時候都是這個結果，訊息框反而被
+        # 洗版、真正的異動被淹沒，改成不進訊息框，搬到這裡當一個原地更新、
+        # 不往下疊的小提示（見 docs/同步分頁訊息框改版.md）。
+        self.round_at = {}
         self.busy = False
-        # 「修改今日初始現金餘額」現在能不能按。_fill_cash 判定，_sync_buttons 套用
+        # 「修改今日初始現金餘額」現在能不能按。_fill_status 判定，_sync_buttons 套用
         # ——「忙不忙」跟「有沒有資料」是兩件事，分開記才不會互相蓋掉。
         self.opening_ready = False
         self.write_count = 0     # 這次要寫幾格，寫完報告時要用
@@ -212,7 +221,6 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
 
         self._migrate_candidates = {}   # 遷移憑證那張表的列 id -> profile_tools.scan_cert_sources() 的一筆
         self.profile_busy = False       # 「建立 Profile」進行中，避免重複點
-        self.cert_tab_scanned = False   # 「憑證」分頁只在第一次切過去時自動掃描一次，之後靠手動「掃描」
 
         self.ledger = None
         self.ledger_error = None
@@ -260,8 +268,8 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         else:
             self._say("按「登入」開瀏覽器並自動登入，之後要更新資料時再按「讀取全部帳戶」。")
 
-        # 開機也要畫一次。右半邊沒資料的樣子（空表格、空訊息框、「修改」按鈕
-        # 該不該亮）是在 _fill_detail 那一串裡定下來的，而那串只有 fill_sync_tree
+        # 開機也要畫一次。右半邊沒資料的樣子（空狀態列、空訊息框、「修改」按鈕
+        # 該不該亮）是在 _fill_right 那一串裡定下來的，而那串只有 fill_sync_tree
         # 會叫到——不在這裡叫一次的話，那些狀態要等到第一次讀取（或換檔、切開關）
         # 才第一次被設對。
         self.fill_sync_tree()
@@ -279,10 +287,8 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         elif index == 2:
             self._refresh_profile_status()
             # 掃描要讀遍 Chrome／Edge 每個 profile 的 Local Storage，不便宜，
-            # 所以只在第一次切過去時自動做一次，之後靠手動按「掃描」。
-            if not self.cert_tab_scanned:
-                self.cert_tab_scanned = True
-                self.scan_cert_sources()
+            # 不自動做，一律等使用者自己按「掃描」（2026/08/23 使用者要求：
+            # 原本第一次切過去會自動掃一次，一開分頁就跑一段看不到理由的等待）。
 
 
 def main():

@@ -5,28 +5,8 @@ import json
 
 from tkinter import messagebox
 
-from util import show
-from ui_common import ALL_CHOICE, WHEN_TODAY, ask_confirm, stripe
-
-# 「補登」這個來源已經沒有入口了（現金帳本分頁拿掉時一起收掉），
-# 但舊的歷程檔裡還有這種紀錄，名字要留著才不會顯示成一個英文代號。
-SOURCE_NAMES = {"program": "程式", "human": "人工", "adopt": "交接", "backfill": "補登"}
-
-
-def within(stamp, when, today):
-    """這一筆的時間在不在選的期間裡。"""
-    if when == ALL_CHOICE:
-        return True
-    try:
-        day = datetime.date.fromisoformat((stamp or "")[:10])
-    except ValueError:
-        # 時間壞掉的那幾筆只有「全部」看得到。當成今天會更糟 ——
-        # 那等於憑空生出一筆今天的異動，而歷程是拿來對帳的東西。
-        return False
-    if when == WHEN_TODAY:
-        return day == today
-    return (today - day).days < 7      # 含今天往回數七天
-
+from util import show, to_num
+from ui_common import ALL_CHOICE, ask_confirm, stock_title, within
 
 def item_order(label):
     """
@@ -52,9 +32,85 @@ def describe_change(by, old, new):
     """
     if by == "adopt":
         return f"{show(old)} → 改記 {show(new)}"
-    if by == "human":
-        return f"{show(old)} → {show(new)}（人工）"
     return f"{show(old)} → {show(new)}"
+
+
+def history_line(event):
+    """
+    一行印完一筆歷程事件（時間／交易人／項目／變化／說明），取代原本
+    Treeview 的六個欄位（2026/08/23 改用 Text，理由跟同步分頁訊息框一樣：
+    欄寬固定會切字，改成單行文字自動換行就不會切到，見
+    ui_layout._build_history_tab）。來源（程式／人工／交接）不再特別強調，
+    2026/08/23 使用者要求拿掉——`by` 只留給 describe_change 判斷「交接」
+    要不要印成「改記」。
+
+    回傳 (文字, tag)：現金餘額變負的那一筆標紅（"neg"），跟同步頁訊息框、
+    左邊名單同一套「負現金就紅」的規矩（見 ui_sync._cash_line、
+    ui_layout.py 的 "negative" tag），2026/08/23 使用者要求加上。
+    """
+    by = event.get("by", "")
+    time_text = (event.get("at") or "").replace("T", " ")
+    change = describe_change(by, event.get("old"), event.get("new"))
+    note = event.get("note", "")
+    line = f"{time_text}　{event.get('sheet', '')}　[{event.get('label', '')}]　{change}"
+    if note:
+        line += f"　{note}"
+    new = to_num(event.get("new"), None)
+    negative = event.get("label") == "現金餘額" and new is not None and new < 0
+    return line, ("neg" if negative else None)
+
+
+def _merge_stock_group(events):
+    """
+    同一輪、同一檔股票的股數／成本併成一行（跟同步分頁訊息框
+    ui_sync._stock_lines 同一個併法，見 stock_title），但歷程要留舊→新方便
+    跨日查核，不像訊息框那樣省掉。
+    """
+    titles, order = {}, []
+    for event in events:
+        title = stock_title(event.get("label", ""))
+        if title not in titles:
+            titles[title] = {}
+            order.append(title)
+        which = "股數" if event.get("label", "").startswith("股數") else "成本"
+        titles[title][which] = event
+
+    lines = []
+    for title in order:
+        parts = titles[title]
+        first = next(iter(parts.values()))
+        time_text = (first.get("at") or "").replace("T", " ")
+        change_text = "　".join(
+            f"{key} {describe_change(parts[key].get('by', ''), parts[key].get('old'), parts[key].get('new'))}"
+            for key in ("股數", "成本") if key in parts)
+        lines.append((f"{time_text}　{first.get('sheet', '')}　[{title}]　{change_text}", None))
+    return lines
+
+
+def _grouped_lines(rows):
+    """
+    把 `rows`（依檔案順序、時間由舊到新）依 (交易人, 時間) 分組，同一輪的
+    股數／成本併成一行，其餘照舊一行一筆；輸出新的一組排最上面，跟原本
+    「最新的放最上面」的慣例一致，組內維持現金先、股票後（跟同步分頁訊息框
+    同一個順序，見 docs/同步分頁訊息框改版.md）。
+    """
+    groups, order = {}, []
+    for row in rows:
+        key = (row.get("sheet", ""), row.get("at", ""))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row)
+
+    lines = []
+    for key in reversed(order):
+        stock_events, other_events = [], []
+        for event in groups[key]:
+            target = stock_events if event.get("label", "").startswith(("股數（", "成本（")) else other_events
+            target.append(event)
+        lines.extend(history_line(event) for event in other_events)
+        lines.extend(_merge_stock_group(stock_events))
+    return lines
 
 
 class UiHistoryMixin:
@@ -109,12 +165,13 @@ class UiHistoryMixin:
         self._fill_history()
 
     def _fill_history(self):
-        """把通過篩選的事件畫進表格。"""
-        self.history_tree.delete(*self.history_tree.get_children())
+        """把通過篩選的事件畫進訊息框，一行一筆，最新的放最上面。"""
+        self.history_box.configure(state="normal")
+        self.history_box.delete("1.0", "end")
         self._sync_clear_button()
 
         if not self.history_rows:
-            self.history_hint.configure(text="還沒有任何歷程。第一次寫入或交接之後就會有。")
+            self.history_box.configure(state="disabled")
             return
 
         who, item, when = (self.history_who.get(), self.history_item.get(),
@@ -127,19 +184,11 @@ class UiHistoryMixin:
                  and (item == ALL_CHOICE or row.get("label") == item)
                  and within(row.get("at"), when, today)]
 
-        for index, event in enumerate(reversed(shown)):   # 最新的放最上面
-            by = event.get("by", "")
-            self.history_tree.insert(
-                "", "end",
-                values=(
-                    (event.get("at") or "").replace("T", " "),
-                    event.get("sheet", ""), event.get("label", ""),
-                    describe_change(by, event.get("old"), event.get("new")),
-                    SOURCE_NAMES.get(by, by),
-                    event.get("note", ""),
-                ),
-                tags=(by,) + stripe(index),
-            )
+        for index, (text, tag) in enumerate(_grouped_lines(shown)):   # 最新的放最上面
+            if index:
+                self.history_box.insert("end", "\n")
+            self.history_box.insert("end", text, (tag,) if tag else ())
+        self.history_box.configure(state="disabled")
 
         counted = (f"{len(shown)} 筆" if len(shown) == len(self.history_rows)
                    else f"篩出 {len(shown)} 筆／共 {len(self.history_rows)} 筆")
@@ -167,7 +216,8 @@ class UiHistoryMixin:
                 "清除歷程",
                 f"要清掉全部 {len(self.history_rows)} 筆歷程嗎？\n\n"
                 "舊的歷程檔會改名收進「備份」資料夾，不是真的刪掉。\n"
-                "每一格歸誰管、現金的基準都記在另一個紀錄檔裡，不受影響。"):
+                "每一格歸誰管、現金的基準都記在另一個紀錄檔裡，不受影響。",
+                confirm_style="primary"):
             return
 
         try:

@@ -6,6 +6,7 @@ ui.py 底下幾個分頁共用的字級／視窗尺寸換算、表格欄寬計�
 對方模組裡的東西，就會兜出循環匯入。
 """
 
+import datetime
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox
@@ -23,26 +24,36 @@ ALL_CHOICE = "全部"
 # 再細的區間（挑日期、選月份）沒有人真的會用，卻要多一個日曆元件跟一整套錯誤處理。
 WHEN_TODAY, WHEN_WEEK = "今天", "近 7 天"
 
-# 斑馬紋：每隔一列鋪一層很淡的灰，讓眼睛橫著讀不會串行。
-#
-# 這是「畫格線」的替代做法（2026/08/21）。格線試過用 image element 畫出來，
-# 畫面對但效能很差 —— 每一列每一格都多一個元素要合成，捲動明顯變鈍
-# （見 docs/Tkinter ui設計原則.md 第十二節）。斑馬紋只是換底色，
-# 一列一個 tag，重畫成本跟沒有它一樣，而它解的是同一個問題。
-# 做法與 ttkbootstrap Tableview 的 stripecolor 相同，只是我們用的是 ttk.Treeview，
-# 自己掛 tag（Tableview 是另一個元件，帶搜尋列與分頁，換過去等於整組重寫）。
-STRIPE_COLOR = "#f2f2f2"
 
-
-def stripe(index, has_background=False):
+def stock_title(label):
     """
-    第 index 列要不要加斑馬紋。回傳可以直接接在 tags 後面的 tuple。
+    從「股數（2059 川湖）」取出「2059 川湖」。取不到就原樣顯示。
 
-    已經有底色的列不加：那些底色在講事情（綠＝這次要寫、藍＝剛寫過、
-    名單上的綠＝這位要處理），蓋掉就沒了。一列同時掛兩個管底色的 tag，
-    最後誰贏是 Tk 的內部順序決定的，看起來會時有時無。
+    同步分頁訊息框、歷程分頁都要把同一輪股數／成本兩筆事件併成一行，靠的是
+    同一個股票名稱，兩邊要用同一支函式取名字才不會對不起來。
     """
-    return ("stripe",) if index % 2 and not has_background else ()
+    inside = label.partition("（")[2].rstrip("）")
+    return inside or label
+
+
+def within(stamp, when, today):
+    """
+    這一筆的時間在不在選的期間裡。
+
+    「歷程」分頁跟同步分頁的訊息框（見 ui_sync._fill_notes）都靠這個篩今天
+    ／近 7 天／全部，兩邊要是同一套判斷，篩出來的才會是同一份真相。
+    """
+    if when == ALL_CHOICE:
+        return True
+    try:
+        day = datetime.date.fromisoformat((stamp or "")[:10])
+    except ValueError:
+        # 時間壞掉的那幾筆只有「全部」看得到。當成今天會更糟 ——
+        # 那等於憑空生出一筆今天的異動，而歷程是拿來對帳的東西。
+        return False
+    if when == WHEN_TODAY:
+        return day == today
+    return (today - day).days < 7      # 含今天往回數七天
 
 # 外觀設定，全部從 .env 讀，改完重開介面生效。
 
@@ -108,145 +119,10 @@ def wide(pixels):
     return int(pixels * FONT_SIZE / 10)
 
 
-# 表格每一格左右各留的空白，跟 ui_layout 設 Treeview.Cell padding 用的是同一個數字。
-# 算欄寬時一定要扣掉它：ttk 的 padding 吃在格子「裡面」，欄寬扣掉 8+8 才是字能用的
-# 寬度。兩邊各寫各的下場是欄寬看起來夠、字卻少一位 ——2026/08/21 把留白從 4 加到 8
-# 之後，成本欄的「104.6 → 10,400」就被切成「104.6 → 10,40」，而 ttk 切字不補省略號、
-# 也沒有橫向捲軸，字就是斷在那裡。
+# 表格每一格左右各留的空白，套在 ui_layout 的 Treeview.Cell 樣式上
+# （style.configure("Treeview.Cell", padding=(CELL_PAD, 0))）——2026/08/21 使用者
+# 反應「數字貼太緊」，預設只留 4 像素，靠右的數字幾乎貼著欄位邊界。
 CELL_PAD = 8
-
-# padding 之外，ttk 每一格左右還會自己再吃掉幾個像素（Treeitem.text 元素的邊，
-# 樣式調不掉）。抓圖數像素量出來的：padding 8 的時候，「104.6 → 10,400」量出來
-# 113px，欄寬要 137px 字才畫得完整 —— 113 + 8 + 8 = 129 還差 8，也就是左右各 4。
-# 少算這 8px 的下場跟少算 padding 一樣：欄寬看起來剛好，最後一個字被切掉半個。
-CELL_EDGE = 4
-
-_FONTS = {}
-
-
-def _font(tree, spec):
-    """
-    拿一個可以量字寬的 Font。spec 是樣式裡查出來的字型（例如 "{Microsoft JhengHei UI} 12"）。
-
-    量的必須是表格真正在用的那一份字型，所以從樣式查、不自己拼 —— 字級是 .env
-    調得動的，兩邊分開算就會量出跟畫面不一樣的寬度。同一個字型只建一次：
-    每次 tkfont.Font(...) 都是在 Tcl 那邊多一個字型物件，填一次表建兩個就是慢慢漏。
-    """
-    # 查不到就退回這支程式自己挑的字型（樣式沒設過的表格；正常路徑不會走到）。
-    key = spec or "default"
-    if key not in _FONTS:
-        _FONTS[key] = tkfont.Font(root=tree, font=spec or (pick_font(), FONT_SIZE))
-    return _FONTS[key]
-
-
-def build_columns(tree, spec):
-    """
-    照 spec 把一張表的欄位設好，並讓寬度跟著表格伸縮。
-
-    spec 是 (欄名, 標題, 比重, 下限, 對齊) 的序列，比重與下限都照 10 級字的像素給。
-    spec 存在 tree 上，之後 fit_to_content 只要拿到表格本身就重算得出來，
-    填表的地方不必再把欄位定義搬一份過去（ui_sync 也就不必認得 ui_layout）。
-    """
-    tree.column_spec = spec
-    for key, title, _weight, floor, anchor in spec:
-        tree.heading(key, text=title)
-        tree.column(key, width=wide(floor), minwidth=wide(floor), anchor=anchor, stretch=False)
-    tree.bind("<Configure>", lambda _event: fit_columns(tree, spec))
-
-
-def fit_to_content(tree):
-    """
-    照表格現在的內容算出每一欄「不切字」要多寬，記在 tree 上，然後重攤一次。
-
-    ttk 的 Treeview 沒有「照內容自動調欄寬」這種東西（width/minwidth/stretch 三個
-    選項都跟內容無關，stretch 只管「變寬時要不要分到多的空間」），所以自己量。
-
-    填完資料的地方要叫一次 —— 內容變了寬度才跟著變。刻意不放進 <Configure>：
-    量一個字串是一次 Tcl 呼叫（實測 0.2ms），而拖分隔線時 Configure 一秒噴幾十次，
-    放進去等於每次重畫都重量整張表。同步分頁這兩張表最多 5 檔 × 3 欄，
-    一次約 3ms，而且只在按一下之後發生，感覺不出來；歷程表就不是這個量級
-    （「全部」是幾千列 × 6 欄，量下去要好幾秒），所以那張表沒有叫這支，
-    維持照固定比重攤。真要給它用的話得先加一層「只量最長的幾個」。
-
-    表頭也一起量：欄位再窄也不該窄到看不出這一欄叫什麼。
-    """
-    spec = getattr(tree, "column_spec", None)
-    if spec is None:
-        return
-
-    style = ttk.Style()
-    body = _font(tree, style.lookup("Treeview", "font"))
-    head = _font(tree, style.lookup("Treeview.Heading", "font"))
-    rows = [tree.item(iid, "values") for iid in tree.get_children()]
-
-    tree.content_widths = [
-        max([head.measure(title)]
-            + [body.measure(str(row[index])) for row in rows if index < len(row)])
-        + 2 * (CELL_PAD + CELL_EDGE)
-        for index, (_key, title, _weight, _floor, _anchor) in enumerate(spec)
-    ]
-    fit_columns(tree, spec)
-
-
-def fit_columns(tree, spec):
-    """
-    把欄位寬度攤進表格當下的寬度：夠寬就照比重分多的，不夠寬就往下限方向縮。
-
-    每一欄有兩個數字：
-        下限  spec 裡寫死的「還讀得出來」寬度，擠到極限時的底線
-        理想  裝得下這一欄現在所有內容的寬度，由 fit_to_content 量出來記在 tree 上
-    量過的表格（同步分頁那兩張）從理想寬度起跳，沒量過的（歷程表）理想＝下限，
-    行為跟以前完全一樣。
-
-    為什麼不交給 ttk 的 stretch：它只有在「一開始就放得下」的時候才會分配。
-    欄寬總和一旦超過表格實際拿到的寬度，ttk 會整組凍住 —— 之後把視窗拉多寬、
-    把分隔線拖多開都不再重算。兩張表原本都踩在這條線上（明細表的固定寬加起來
-    wide(837)，預設字級下就超出 34px；歷程表超出 85px），於是最右邊的欄位被切在
-    畫面外，而 Treeview 沒有橫向捲軸，捲也捲不出來。自己算就沒有那個狀態，
-    任何寬度都是當場分配。
-
-    下限是「還讀得出來」的下限，不是好看的下限：擠到極限時寧可看到切了尾巴的
-    「175,000 → 18」（ttk 是直接切，不會給省略號），也不要一整欄消失 ——
-    被切掉的那一欄不會有任何跡象說它存在過，使用者只會看到一張少了一欄的表。
-    """
-    room = tree.winfo_width()
-    if room <= 1:
-        return                            # 還沒排版完，等下一次 Configure
-
-    floors = [wide(floor) for _key, _title, _weight, floor, _anchor in spec]
-    weights = [weight for _key, _title, weight, _floor, _anchor in spec]
-    measured = getattr(tree, "content_widths", None)
-    # 量出來的理想寬度不會低於下限：內容短的時候（例如整欄都是「300」）欄位還是
-    # 要留住原本的樣子，不然表格會隨著資料一格一格抖動。
-    wants = ([max(floor, want) for floor, want in zip(floors, measured)]
-             if measured else list(floors))
-
-    spare = room - sum(wants)
-    if spare >= 0:
-        # 放得下：多出來的照比重分，主要給會變長的那一欄（見 DETAIL_COLUMNS）。
-        widths = [want + spare * weight // sum(weights)
-                  for want, weight in zip(wants, weights)]
-    else:
-        # 放不下：從理想寬度往下限方向等比縮，可以讓的多就讓得多。縮到下限就停，
-        # 之後才開始切字 —— 先切最寬鬆的那一欄，比每一欄都切一點好讀。
-        slack = [want - floor for want, floor in zip(wants, floors)]
-        cut = min(-spare, sum(slack))
-        widths = ([want - cut * piece // sum(slack) for want, piece in zip(wants, slack)]
-                  if sum(slack) else list(floors))
-
-    # 整數除法會掉幾個像素，全部補給最後一欄，才會剛好填滿。差的是個位數像素，
-    # 落在哪一欄都看不出來（同步分頁那兩張表的最後一欄是靠右對齊的數字，
-    # 多幾個像素只是整欄一起往右挪一點點）。
-    # 補到低於下限就不補：全部縮到底還是塞不下的時候，room - sum 是一整段負數，
-    # 補下去等於把最後一欄壓扁，那一欄的字會整片不見。
-    rest = room - sum(widths)
-    if widths[-1] + rest >= floors[-1]:
-        widths[-1] += rest
-
-    for (key, _title, _weight, _floor, _anchor), width in zip(spec, widths):
-        # 值沒變就別寫回去 —— 改欄寬會再引來一次 Configure，兩邊互相觸發會抖。
-        if tree.column(key, "width") != width:
-            tree.column(key, width=width)
 
 
 def work_area(root):
@@ -397,7 +273,8 @@ def ask_opening_balance(parent, family, name, current, item):
     return answer.get("opening")
 
 
-def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否", danger=True):
+def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否", danger=True,
+                confirm_style=None):
     """
     是非確認對話框，取代 messagebox.askyesno。
 
@@ -406,12 +283,18 @@ def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否"
     這種要人謹慎看清楚才按下去的場合反而幫倒忙。
 
     danger=True（預設）對應原本 icon="warning", default="no" 那幾顆：焦點鎖在
-    「否」、Enter 也觸發取消，確定鍵漆成警示色——這幾顆通常管的是「立刻生效、
+    「否」、Enter 也觸發取消，確定鍵預設漆成警示色——這幾顆通常管的是「立刻生效、
     蓋掉既有資料」，手滑按下 Enter 不該真的動到東西。
 
     danger=False 對應原本沒設 default 的那幾顆（例如複製憑證，目標會先備份，
     風險比較低）：焦點在確定鍵、Enter 直接確認、按鈕用一般強調色，行為跟
     messagebox.askyesno 預設的「Enter＝是」一致。
+
+    confirm_style 只換確定鍵的顏色，不動 danger 管的「焦點鎖在哪、Enter 觸發
+    哪一顆」——顏色是「看起來像哪一種按鈕」，danger 管的是「按錯了會不會直接
+    生效」，兩件事不一定要綁在一起（例如切換現金算法：換錯了有代價，所以
+    danger=True 焦點還是鎖「否」，但按鈕顏色 2026/08/22 使用者要求跟同一天
+    新增的「今天的現金餘額怎麼算」那顆藍色「確定」統一，不繼續用警示色）。
     """
     win = tk.Toplevel(parent)
     win.title(title)
@@ -437,7 +320,7 @@ def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否"
     cancel_btn = ttk.Button(buttons, text=cancel_text, command=cancel, bootstyle="secondary")
     cancel_btn.pack(side="right")
     confirm_btn = ttk.Button(buttons, text=confirm_text, command=confirm,
-                             bootstyle="warning" if danger else "primary")
+                             bootstyle=confirm_style or ("warning" if danger else "primary"))
     confirm_btn.pack(side="right", padx=(0, 8))
 
     default_btn = cancel_btn if danger else confirm_btn
@@ -453,7 +336,13 @@ def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否"
 
 def ask_cash_method(parent, family, current):
     """
-    今天的現金餘額要用哪一種算法。回傳選定的算法，取消就回 None（沿用原本的）。
+    今天的現金餘額要用哪一種算法。回傳選定的算法，一定是使用者自己按「確定」
+    選出來的那一個。
+
+    沒有「取消」，X 跟 Escape 也都關不掉（2026/08/22 使用者要求）——這裡不是
+    「要不要做」的確認，是「兩個都得選一個」，沒有「先不選、之後再說」的空間；
+    使用者沒意識到自己選了哪個就把視窗關掉，程式卻默默套用了某一種算法，
+    是比多問一次更危險的事。要離開只有一條路：看清楚選的是哪一個，按「確定」。
 
     只問，不算給你看。曾經在這裡列出「哪幾位的兩種算法對不上、差多少」，後來拿掉了：
     算法是全部人共用的一個開關，逐人列出來看起來像可以一位一位挑；而且差額講不出
@@ -495,22 +384,22 @@ def ask_cash_method(parent, family, current):
 
     ttk.Label(outer, justify="left", style="Method.TLabel", text=(
         f"全額交割當天要選「{planner.METHOD_NAMES[planner.METHOD_OPENING]}」"
-        f"（{planner.METHOD_NAMES[planner.METHOD_BANK]}那天會扣兩次）"
     )).grid(row=5, column=0, sticky="w", pady=(10, 0))
 
     def confirm(*_args):
         answer["method"] = choice.get()
         win.destroy()
 
+    # 沒有「取消」——兩個選項都選好了（預設就是比較安全的那一種），這裡不存在
+    # 「不想選」的狀態，只有「選哪一個」，不必給一顆多餘的按鈕。
     buttons = ttk.Frame(outer)
     buttons.grid(row=6, column=0, sticky="e", pady=(12, 0))
-    ttk.Button(buttons, text="取消", command=win.destroy,
-              bootstyle="secondary").pack(side="left", padx=(0, 8))
     ttk.Button(buttons, text="確定", command=confirm,
               bootstyle="primary").pack(side="left")
 
-    win.protocol("WM_DELETE_WINDOW", win.destroy)
-    win.bind("<Escape>", lambda _e: win.destroy())
+    # X 跟 Escape 都不關窗（見上面 docstring）——WM_DELETE_WINDOW 換成 no-op，
+    # 沒有 bind Escape 就等於什麼都不做（ttk 元件預設不吃這個鍵）。
+    win.protocol("WM_DELETE_WINDOW", lambda: None)
     win.bind("<Return>", confirm)
     center_on(win, parent)
     win.grab_set()

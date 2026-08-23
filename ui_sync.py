@@ -1,21 +1,196 @@
-"""同步分頁的顯示與操作：左邊名單、右邊明細、現金那張表。"""
+"""同步分頁的顯示與操作：左邊名單、右邊常駐狀態列與訊息框。"""
+
+import datetime
 
 import ledger as ledger_mod
 import planner
-from util import show, to_num, values_match
-from ui_common import ask_opening_balance, fit_to_content
+from util import same_number, show, to_num
+from ui_common import (WHEN_TODAY, ask_opening_balance, cash_method_toggle_enabled, stock_title,
+                        within)
 
 
-def _neg_tag(value):
-    """負的數字才上紅字。空的、不是數字的都不算。"""
-    number = to_num(value, None)
-    return "neg" if number is not None and number < 0 else None
+def _row_of(cell):
+    """
+    從 "E5" 這種格子名稱取出列號。股票併行時要照 Excel 列的順序排（見
+    _format_today_events），不是照歷程檔裡實際寫入的先後。
+    """
+    return int(cell[1:])
 
 
-def stock_title(label):
-    """從「股數（2059 川湖）」取出「2059 川湖」。取不到就原樣顯示。"""
-    inside = label.partition("（")[2].rstrip("）")
-    return inside or label
+def _cash_formula(event):
+    """
+    現金那一行的算式：「{算法名稱} = {算式} = {結果}」，兩種算法都是這個形狀
+    （2026/08/22 使用者訂正：不管有沒有轉負都要看得到算法，不是只有轉負那一次）。
+
+    planner._bank_note／_formula_note 算好的 note 長這樣：
+
+        銀行餘額 + 淨收付(T+0) + 淨收付(T+1) = 893 - 238 + 0 = 655
+        今日初始現金餘額 + 今日淨收付 = 893 - 238 = 655
+
+    第一個 " = " 前面那段（"銀行餘額 + 淨收付(T+0) + …"）是標籤，換算法名稱
+    打頭是重複資訊——算法名稱已經講了是哪一種算法，數字才是這一行真正要看的
+    東西，所以只取第一個 " = " 之後的部分。
+
+    只有「讀取」這條路自動算出來的現金事件是這個形狀；`by == "adopt"` 的兩種
+    （今天第一次登入設基準、「修改今日初始現金餘額」沒有格子要寫）在 _cash_line
+    就先分流掉了，不會走到這裡。但「修改今日初始現金餘額」如果真的寫了格子
+    （`by == "program"`），note 是 apply_cash_reset 自己的散文說明，一樣沒有
+    這個「標籤 = 算式 = 結果」的形狀（沒有第二個 " = "），這裡分不出算法、
+    也不必硬套，原樣印出 note 就好。
+    """
+    note = event.get("note") or ""
+    if note.startswith("銀行餘額") and " = " in note:
+        return f"{planner.METHOD_NAMES[planner.METHOD_BANK]} = {note.partition(' = ')[2]}"
+    if note.startswith("今日初始現金餘額") and " = " in note:
+        return f"{planner.METHOD_NAMES[planner.METHOD_OPENING]} = {note.partition(' = ')[2]}"
+    return note or show(event.get("new"))
+
+
+def _cash_line(time_text, event):
+    """
+    現金那一行。負的就整行標紅——不管是不是這一輪才由正轉負，只要結果是負的
+    就紅（2026/08/22 使用者訂正：原本只有「這一輪由正轉負」那一次才標紅，
+    導致連續好幾筆都是負的時候，除了第一筆，後面每一筆的「老早就負的」都沒
+    紅字提醒，看起來像沒事——這裡跟名單上現金負的名字變紅字是同一個規矩，
+    看「現在是不是負的」，不看「是不是這一輪才變負的」）。
+
+    `by == "adopt"` 的兩種情況——今天第一次登入把 B8 收成今日起點
+    （`planner.initialize`）、「修改今日初始現金餘額」算出來剛好等於 Excel
+    上的數字所以沒有格子要寫（`planner.apply_cash_reset`）——都不是套公式
+    算出來的餘額異動，Excel 那一格根本沒被寫過。原本兩者都套用 [餘額更新]
+    標籤、只印一句沒帶數字的說明（例如「今日初始現金餘額（今天第一次登入時
+    的 B8）」），語意不明：既不像更新（沒有算式、沒有結果數字），也讓人以為
+    這一輪真的改了 B8。改用專屬標籤 [今日初始餘額] 並印出實際數字，跟真正
+    套公式寫入的 [餘額更新] 分開。
+    """
+    new = to_num(event.get("new"), None)
+    negative = new is not None and new < 0
+    if event.get("by") == "adopt":
+        return (f"{time_text} [今日初始餘額] {show(event.get('new'))}", "neg" if negative else None)
+    return (f"{time_text} [餘額更新] {_cash_formula(event)}", "neg" if negative else None)
+
+
+def _stock_lines(time_text, events):
+    """
+    同一輪、同一檔股票的股數／成本併成一行。歷程檔裡股數、成本是兩筆分開的
+    事件，這裡再照股票名稱分一次（呼叫這裡之前已經先照 at 分過同一輪了）。
+    """
+    titles, order = {}, []
+    for event in events:
+        title = stock_title(event.get("label", ""))
+        if title not in titles:
+            titles[title] = {"row": _row_of(event.get("cell", "A0"))}
+            order.append(title)
+        which = "股數" if event.get("label", "").startswith("股數") else "成本"
+        titles[title][which] = event.get("new")
+    order.sort(key=lambda title: titles[title]["row"])
+
+    return [
+        (f"{time_text} [股票更新] {title}　"
+         + "　".join(f"{key} {show(titles[title][key])}" for key in ("股數", "成本")
+                    if key in titles[title]),
+         None)
+        for title in order
+    ]
+
+
+def _warning_line(time_text, text):
+    """
+    股票提醒那一行（見 UiSyncMixin._fill_notes）。2026/08/22 使用者要求：
+    跟其他行統一格式——不再堆在訊息框最後面（會被今天累積的歷程往下擠、
+    要捲很多才看得到，見 docs/同步分頁訊息框改版.md），改成掛時間戳、混進
+    同一個時間序，跟 `_cash_line`／`_stock_lines` 同一種「時間 [標籤] 內容」
+    形狀。字用深黃色（`warn` tag，`self.colors.warning`）——份量比一般歷程
+    重，2026/08/22 使用者再次要求跟其他行顏色分開。現金被擋住的那幾句
+    （`planner._cash` 的 `[現金]` 開頭）還在討論中，不走這裡。
+    """
+    return (f"{time_text} [警告] {text}", "warn")
+
+
+def _error_line(time_text, text):
+    """
+    這一位帳號整組失敗（登入逾時、Excel 找不到分頁之類，見
+    `ui_background._on_fetched` 的 `problem_of`）那一行。2026/08/22 使用者
+    要求：不要全部堆在系統狀態列或所有人共用的提醒框裡，改成跟其他行同一種
+    「時間 [標籤] 內容」形狀，只出現在這一組對應到的那位交易人自己的訊息框
+    （見 UiSyncMixin._fill_notes 用 trader_of 反查是誰）。真的還查不出是誰
+    的那極少數情況才會落到 fallback，一樣走這裡（見 _fill_notes）。字用紅色
+    （`err` tag，`self.colors.danger`）——比警告更急，2026/08/22 使用者要求
+    跟 [警告] 分開顏色。
+    """
+    return (f"{time_text} [異常] {text}", "err")
+
+
+def _dedupe_cash_rows(rows):
+    """
+    現金那幾筆事件，結果（`new`）跟上一筆顯示過的一樣就丟掉，不進訊息框
+    （2026/08/22 使用者要求）。
+
+    現金每次讀取一定會覆蓋 Excel、也一定會記進歷程（見
+    docs/現金餘額兩種算法.md「B8 無條件覆蓋」）——這裡動的只是訊息框要不要
+    重複顯示同一個結果，不影響 Excel 寫入或歷程檔，「歷程」分頁還是看得到
+    每一筆。比對的是算出來的結果，不是整句算式：算式裡淨收付的細節可能每次
+    都有一點出入，但只要最後的餘額沒變，對使用者來說就是「沒事」。
+
+    「今天第一筆」一定留著（`last_shown` 用 `None` 當哨兵，`same_number` 對
+    None 一律回 False，所以第一筆永遠算「跟上一筆不一樣」）；`by == "adopt"`
+    的今日初始餘額、`by == "program"` 的正常寫入，只要結果相同一樣算重複，
+    一起比——使用者要看的是「這個數字有沒有變」，不是它是哪一種事件寫的。
+
+    照時間先後比對，不是照畫面顯示的順序（畫面是新的在最上面）。
+    """
+    ordered = sorted(rows, key=lambda row: row.get("at") or "")
+    kept, last_shown = [], None
+    for row in ordered:
+        if row.get("label") != "現金餘額":
+            kept.append(row)
+            continue
+        new = row.get("new")
+        if not same_number(last_shown, new):
+            kept.append(row)
+            last_shown = new
+    return kept
+
+
+def _format_today_events(rows, method):
+    """
+    把某一位「今天」的歷程事件（含 `label == "警告"` 的股票提醒、
+    `label == "異常"` 的整組帳號失敗合成列，見 UiSyncMixin._fill_notes），
+    排成訊息框要顯示的 (文字, 標籤) 清單。
+
+    同一輪內（同一個 at）異常排最前面、警告第二、現金第三、股票照 Excel
+    列的順序排在最後——不管歷程檔裡實際寫入的先後（planner.commit 是股票先、
+    現金最後才 append）。整體新的在最上面，跟「歷程」分頁
+    ui_history._fill_history 同一個慣例。
+    """
+    groups, order = {}, []
+    for row in rows:
+        at = row.get("at") or ""
+        if at not in groups:
+            groups[at] = []
+            order.append(at)
+        groups[at].append(row)
+    order.sort(reverse=True)
+
+    lines = []
+    for at in order:
+        time_text = at[11:19] if len(at) >= 19 else at
+        group = groups[at]
+        error_events = [row for row in group if row.get("label") == "異常"]
+        warning_events = [row for row in group if row.get("label") == "警告"]
+        cash_events = [row for row in group if row.get("label") == "現金餘額"]
+        if method == planner.METHOD_BANK:
+            # [今日初始餘額] 只有「初始餘額累加」算法會拿基準去加今日淨收付；
+            # 「銀行餘額推算」算的時候完全用不到這個基準，印出來只會讓人
+            # 誤以為它也是算式的一部分（2026/08/23 使用者要求）。
+            cash_events = [row for row in cash_events if row.get("by") != "adopt"]
+        stock_events = [row for row in group
+                        if row.get("label", "").startswith(("股數（", "成本（"))]
+        lines.extend(_error_line(time_text, event["text"]) for event in error_events)
+        lines.extend(_warning_line(time_text, event["text"]) for event in warning_events)
+        lines.extend(_cash_line(time_text, event) for event in cash_events)
+        lines.extend(_stock_lines(time_text, stock_events))
+    return lines
 
 
 class UiSyncMixin:
@@ -36,62 +211,31 @@ class UiSyncMixin:
 
         self.fill_sync_tree()
 
-    def _value_text(self, name, item, compare_web=True):
-        """
-        一格在畫面上要寫什麼字，外加它是不是這一輪剛被寫過。
-
-        沒事就只寫現在的數字 —— 一格擺出舊值、網頁值、新值三個數字，真正要看的
-        那一個反而被埋掉了。有話要說的時候才寫兩個：
-
-            1,000 → 2,000        等著寫的，或這一輪剛寫進去的
-            1,000（網頁 2,000）  跟網頁不一樣，但這一輪沒被寫（例如現金被擋）
-            1,000                跟網頁一致，這一輪也沒動過
-
-        舊值取的是這批網頁資料讀進來時 Excel 上原本的數字（self.before）。
-        寫入成功之後 item["current"] 就是新數字了，沒有這份快照的話，畫面上
-        再也看不到「被蓋掉之前是多少」。
-
-        現金要 compare_web=False：它的 web 是今日淨收付、不是餘額，
-        拿去跟 Excel 的餘額比是兩件不同的東西。
-        """
-        before = self.before.get((name, item["cell"]), item["current"])
-        if item["will_write"]:
-            return f"{show(before)} → {show(item['proposed'])}", False
-        if not values_match(before, item["current"]):
-            return f"{show(before)} → {show(item['current'])}", True
-        if compare_web and item["web"] is not None and not values_match(item["current"], item["web"]):
-            return f"{show(item['current'])}（網頁 {show(item['web'])}）", False
-        return show(item["current"]), False
-
-    def _cash_turned(self, item, before):
-        """
-        餘額這一輪是不是由正翻負。
-
-        紅字是一個數字一個數字上的（負的才紅），所以這裡只剩「由正變負」這件事
-        要另外講 —— 那是這一條上最該被看見的一次變化，而兩個各自上色的數字
-        只說得出「現在是負的」，說不出「今天才變負的」。
-        """
-        old = to_num(before, None)
-        new = to_num(item["proposed"] if item["will_write"] else item["current"], None)
-        return old is not None and old >= 0 and new is not None and new < 0
-
     def fill_sync_tree(self):
-        """左邊的名單與右邊的明細一起重畫。"""
+        """左邊的名單與右邊的狀態列＋訊息框一起重畫。"""
         self._fill_people()
-        self._fill_detail()
+        self._fill_right()
 
     def _summary(self, name):
-        """一位交易人的濃縮狀態：(要寫幾格, 幾條提醒, 現金顯示值, 現金是不是負的)。"""
+        """
+        一位交易人的濃縮狀態：(要不要標記 ⚠, 現金顯示值, 現金是不是負的)。
+
+        標記只看訊息框裡會不會出現 [警告]／[異常]（planner warnings、整組帳號
+        失敗，見 `_fill_notes`），跟這輪有沒有格子要寫無關——單純寫入是正常
+        狀況，訊息框本來就會印 [股票更新]／[餘額更新]，不需要在名單上另外
+        標記（2026/08/22 使用者要求：⚠ 只保留給訊息框真的有警告/異常的時候，
+        避免使用者看到 ⚠ 卻在訊息框找不到對應的警告字樣）。
+        """
         items = self.proposals.get(name, [])
-        writes = sum(1 for item in items if item["will_write"])
-        warns = len(self.warnings.get(name, []))
+        flagged = bool(self.warnings.get(name)) or any(
+            self.trader_of.get(problem["order"]) == name for problem in self.problems)
 
         cash = next((item for item in items if item["kind"] == "cash"), None)
         if cash is None:
-            return writes, warns, "", False
+            return flagged, "", False
         value = cash["proposed"] if cash["will_write"] else cash["current"]
         number = to_num(value, None)
-        return writes, warns, show(value), number is not None and number < 0
+        return flagged, show(value), number is not None and number < 0
 
     def _shown(self):
         """名單上現在真的有誰。上一位／下一位都照這個走，才會跟眼睛看到的一致。"""
@@ -106,7 +250,7 @@ class UiSyncMixin:
         #
         # 名單一有人就一定要選中一位，不能等使用者自己點：名單是網頁資料長出來的
         # （沒讀到的人不會在上面），讀完卻誰都沒選中的話，右邊會整片空白
-        # （見 _fill_detail），明明剛讀完、左邊也看得到人，右邊卻像什麼都沒讀到。
+        # （見 _fill_right），明明剛讀完、左邊也看得到人，右邊卻像什麼都沒讀到。
         # 剛開程式什麼都還沒讀的時候名單是空的，這行自己會落到 None，
         # 不必另外擋「還沒選過人」。
         if self.current_sheet not in names:
@@ -116,15 +260,12 @@ class UiSyncMixin:
         for name in names:
             # 現金餘額現在是隱藏欄（見 _build_people），值照樣填 —— 隱藏的意思是
             # 「先不顯示」，不是「不算」，那一欄要回來的時候不必再回頭補這裡。
-            writes, warns, cash, negative = self._summary(name)
+            flagged, cash, negative = self._summary(name)
             tags = []
-            if writes:
+            if flagged:
                 need += 1
-                flag = f"要寫 {writes}"
-                tags.append("attention")
-            elif warns:
                 flag = "⚠"
-                tags.append("warned")
+                tags.append("attention")
             else:
                 flag = "✓"
             if negative:
@@ -151,12 +292,12 @@ class UiSyncMixin:
     def _on_person_selected(self, _event=None):
         picked = self.people.selection()
         # selection_set 自己也會觸發這個事件。選的還是同一位就別再畫一次，
-        # 否則每次重建名單都要多畫一張明細。
+        # 否則每次重建名單都要多畫一次右邊。
         if not picked or picked[0] == self.current_sheet:
             return
         self.current_sheet = picked[0]
         self._sync_scope_to_person()
-        self._fill_detail()
+        self._fill_right()
 
     def _step_person(self, delta):
         """換上一位／下一位。名單怎麼排就怎麼走，到頭了就停住（不繞回去）。"""
@@ -173,168 +314,71 @@ class UiSyncMixin:
         self.people.selection_set(self.current_sheet)
         self.people.see(self.current_sheet)
         self._sync_scope_to_person()
-        self._fill_detail()
+        self._fill_right()
 
-    def _grouped(self, name):
-        """
-        把一格一列的提案併成畫面上的列：一檔股票一列，現金另外拿出來。
-
-        以 Excel 的列號分組而不是股號 —— 畫面上的一列就是檔案上的同一列，
-        對照的時候不必在心裡再翻譯一次。
-
-        一個分頁只有第 4~8 列五個位置，一列一檔、股號不會重複。真的重複了的話
-        這裡照樣會畫成兩列，但底下撐不住：兩列都查到同一檔的網頁值，
-        股數/成本會整個複製貼到兩列，不會照原本的比例拆開。
-        所以那不是一種支援的排法，是一種要避開的排法。
-        """
-        groups, order, cash = {}, [], None
-        for item in self.proposals.get(name, []):
-            if item["kind"] == "cash":
-                cash = item
-                continue
-            if item["row"] not in groups:
-                groups[item["row"]] = {}
-                order.append(item["row"])
-            groups[item["row"]][item["which"]] = item
-        return [groups[row] for row in order], cash
-
-    def _fill_detail(self):
-        """右邊那張表：選中的交易人有哪幾檔、哪幾格要動。"""
-        self.tree.delete(*self.tree.get_children())
+    def _fill_right(self):
+        """右邊：常駐狀態列＋訊息框，都是選中的那位交易人的。"""
         name = self.current_sheet
-        groups, cash = self._grouped(name)
-
-        # 高度照這位有幾檔算，但至少留五列。下限原本是八列 —— 那時候現金貼在這張表
-        # 底下，表格一跳高度現金就跟著上下移動，寧可空著幾列也不要它動。現金搬到
-        # 左邊並排之後（2026/08/21），它不再跟著這張表的高度走，下限就跟著改成
-        # 「左邊那一欄有多高」：現金表三列加底下那顆按鈕，差不多就是這裡五列，
-        # 兩邊收在同一段高度裡。上限只是防呆（真有人塞了三十檔，那就讓它捲）。
-        self.tree.configure(height=max(5, min(len(groups), 18)))
-
-        for group in groups:
-            qty, cost = group.get("qty"), group.get("cost")
-            both = [item for item in (qty, cost) if item is not None]
-            if not both:
-                continue
-
-            texts, written = {}, False
-            for which, item in (("qty", qty), ("cost", cost)):
-                if item is None:
-                    texts[which] = ""
-                    continue
-                texts[which], done = self._value_text(name, item)
-                written = written or done
-
-            tags = []
-            if any(item["will_write"] for item in both):
-                tags.append("write")
-            elif written:
-                tags.append("done")
-            # 前景色一列只給一個 —— 同時掛兩個管顏色的標籤，最後誰贏是 Tk 的
-            # 內部順序決定的，看起來就會時橘時灰。
-            if any(item.get("missing") for item in both):
-                tags.append("missing")
-
-            # 說明欄拿掉了（2026/08/21，見 ui_layout.DETAIL_COLUMNS）——股票這邊
-            # 唯一寫得出來的那句「網頁庫存已無此檔」，訊息框裡本來就有一條講得更
-            # 清楚的提醒（第幾列、哪一檔、要不要刪）。這裡只剩「灰字＝網頁沒有它」。
-            self.tree.insert(
-                "", "end",
-                values=(
-                    stock_title(both[0]["label"]),
-                    texts["qty"], texts["cost"],
-                ),
-                tags=tuple(tags),
-            )
-
-        # 欄寬照這一位的內容重算：股票名字有長有短（「2059 川湖」對「006208 富邦台50」），
-        # 值有時是一個數字、有時是「104.6 → 10,400」，固定欄寬一定有人被切到。
-        fit_to_content(self.tree)
-
-        self._fill_cash(name, cash)
+        # 訊息框的標題掛上名字（「交易人A　訊息」），不塞進內容第一行——標題貼在
+        # 框邊、不隨內容捲動，換人換得快的時候一眼就看得到是誰，比塞進會被捲走
+        # 的第一行穩妥（2026/08/22 使用者要求；原本的表格標頭見 ui_layout._build_detail）。
+        if name:
+            who = name + ("（模擬）" if name in self.fake_sheets else "")
+            self.msg_frame.configure(text=f"{who}　訊息")
+        else:
+            self.msg_frame.configure(text="訊息")
+        self._fill_status(name)
         self._fill_notes(name)
 
-    def _refill_cash(self):
-        """只重畫現金那張表。人跟提案都從現在的狀態拿，換算法時用得到。"""
-        name = self.current_sheet
-        self._fill_cash(name, self._cash_item(name))
-        # 現金的說明現在寫在訊息框裡（見 _fill_cash），換算法整句話都會變，
-        # 只重畫表格的話那句話會留在上一種算法的版本。
-        self._fill_notes(name)
-
-    def _fill_cash(self, name, item):
+    def _fill_status(self, name):
         """
-        股票表旁邊那張現金表：一件事一列，欄位跟上面那張表對齊。
+        右上角常駐狀態列：現金算法、今日初始現金餘額、現在的現金餘額、
+        「✓ 與網頁一致」小提示、修改按鈕——不管這一輪有沒有異動都在，跟
+        訊息框（今天發生了什麼）分開（見 docs/同步分頁訊息框改版.md）。
 
-            現金                     金額
-            現金餘額            893 → 655
-            今日初始現金餘額          893
-            現金算法             銀行餘額推算
-
-        說明欄 2026/08/21 拿掉了（見 ui_layout.CASH_COLUMNS）：這幾列的說明
-        ——「銀行餘額 + 淨收付(T+0) + 淨收付(T+1) = 893 - 238 + 0 = 655」——是整個畫面上
-        最長的句子，擠在半個畫面寬的表格裡一定被切尾巴。它們收在 self.cash_notes
-        裡，由 _fill_notes 寫進底下的訊息框，那裡會自動換行。
-
-        沒資料的列就不畫（不是留一列空的）—— 換到還沒讀過的人時留著上一位的餘額，
-        是這畫面上最危險的一種殘影。負的數字整列上紅字（理由見 ui_layout 建這張表
-        那一段）。
-
-        今日初始現金餘額直接讀紀錄檔的現金基準（見 ledger.opening_balance），不是
-        提案算出來的 —— 它講的是「今天從多少錢開始」，跟這一輪要不要寫哪一格無關，
-        就算這位今天一格都不必動也要看得到。基準每天由當天第一次登入設成 B8，
-        所以正常情況它就是今天早上的那個數字。剛按過「修改」還沒落帳的時候寫成
-        「舊 → 新」，跟餘額那一列同一個寫法：按完卻還顯示舊數字，看起來就像沒按到。
-
-        現金算法這次執行還沒問過就不畫那一列。算法是這次程式開起來、第一次按
-        「讀取全部帳戶」時跳視窗問的，在那之前寫一個名字上去，看起來就像已經選好了
-        —— 而那時候顯示的其實是上次沿用下來的預設值。
+        「現金餘額」這一項固定顯示目前算出來的數字，2026/08/22 使用者要求：
+        訊息框那幾行 [餘額更新] 之後會去重（同樣的結果不再重複印，見
+        _cash_line），這裡就不能只靠「訊息框最後一行是多少」來回答「現在是
+        多少」——那一行可能是很久以前印的。負的比照名單上現金負的名字變紅字，
+        同一個規矩。
         """
-        rows = []
+        item = self._cash_item(name)
+        asked = self.path in self.cash_method_asked
 
-        if item is not None:
-            before = self.before.get((name, item["cell"]), item["current"])
-            after = item["proposed"] if item["will_write"] else item["current"]
-            value = (show(after) if values_match(before, after)
-                     else f"{show(before)} → {show(after)}")
+        self.method_label.configure(
+            text=f"現金算法：{planner.METHOD_NAMES[self.cash_method.get()]}" if asked else "")
+        cursor = "hand2" if asked and cash_method_toggle_enabled() else ""
+        if self.method_label.cget("cursor") != cursor:
+            self.method_label.configure(cursor=cursor)
 
-            # 「餘額轉負」擺在說明最前面 —— 後面那句「今日淨收付…」每天都在，
-            # 由正變負卻是難得一次，排在後面會被當成例行文字滑過去。
-            note = item["note"]
-            if self._cash_turned(item, before):
-                note = f"餘額轉負；{note}" if note else "餘額轉負"
-            rows.append(("balance", "現金餘額", value, note, _neg_tag(after)))
+        opening_method = self.cash_method.get() == planner.METHOD_OPENING
+        if opening_method:
+            self.opening_label.configure(text=f"今日初始現金餘額：{self._opening_text(name, item)}")
+        self._show_opening_row(opening_method)
 
-        if self.cash_method.get() == planner.METHOD_OPENING:
-            rows.append(("opening", "今日初始現金餘額", self._opening_text(name, item), "",
-                         _neg_tag(self._opening(name))))
+        if item is None:
+            self.balance_label.configure(text="現金餘額：—", foreground="")
+        else:
+            balance = item["proposed"] if item["will_write"] else item["current"]
+            number = to_num(balance, None)
+            self.balance_label.configure(
+                text=f"現金餘額：{show(balance)}",
+                foreground=self.colors.danger if number is not None and number < 0 else "")
 
-        if self.path in self.cash_method_asked:
-            # 不寫「（點一下換）」：那個入口本來就是給測試用的（.env 關得掉），
-            # 在正式畫面上等於一句每天都在、卻幾乎不會用到的提示。滑鼠移過去
-            # 游標會變手指（見 _on_cash_motion），要用的人找得到。
-            rows.append(("method", "現金算法",
-                         planner.METHOD_NAMES[self.cash_method.get()], "", "method"))
-
-        # 說明留給訊息框，表格只放名字跟值。空的說明不進去 —— 訊息框裡一行
-        # 「今日初始現金餘額：」後面什麼都沒有，比不寫還難懂。
-        self.cash_notes = [(title, note) for _key, title, _value, note, _tag in rows if note]
-
-        self.cash_tree.delete(*self.cash_tree.get_children())
-        for key, title, value, note, tag in rows:
-            self.cash_tree.insert("", "end", iid=key, values=(title, value),
-                                  tags=(tag,) if tag else ())
-        # 高度照實際有幾列給，多的空白留給底下的訊息框。一列都沒有的時候還是留 1
-        # ——Treeview 高度 0 在畫面上只剩一條表頭，看起來像壞掉。
-        self.cash_tree.configure(height=max(len(rows), 1))
-        # 欄寬照內容重算。這張表的列數會變（今日初始那一列只有一種算法有、
-        # 現金算法那一列問過才有），最長的字跟著換，所以每次填完都要重算一次。
-        fit_to_content(self.cash_tree)
+        # 「✓ 與網頁一致」小提示：這一位讀過（或修改過今日初始現金餘額）就有
+        # self.round_at，時間戳掛在這裡；被擋住（現金還沒設基準）或有提醒
+        # （例如「網頁庫存已無此檔」）在跑的時候不顯示——那時候不算「一致」，
+        # 提醒本身已經在講了，這裡不能講反話（見 docs/同步分頁訊息框改版.md）。
+        at = self.round_at.get(name)
+        quiet_ok = bool(at) and not self.warnings.get(name) and (item is None or not item["blocked"])
+        if quiet_ok:
+            time_text = at[11:19] if len(at) >= 19 else at
+            self.quiet_label.configure(text=f"✓ 與網頁一致（{time_text}）")
+        else:
+            self.quiet_label.configure(text="")
 
         self.opening_ready = (self.ledger is not None and item is not None
-                              and not item["blocked"]
-                              and self.cash_method.get() == planner.METHOD_OPENING)
-        self._show_opening_row(self.cash_method.get() == planner.METHOD_OPENING)
+                              and not item["blocked"] and opening_method)
         self._sync_buttons()
 
     def _opening(self, name):
@@ -352,35 +396,30 @@ class UiSyncMixin:
             text = f"{text} → {show(round(item['reset_to'] - item['net'], 2))}"
         return text
 
-    def _on_cash_click(self, event):
+    def _on_method_click(self, _event=None):
         """
-        現金表上點到「現金算法」那一列就換另一種算法（會先跳確認視窗）。
-        點別列不做事 —— 這張表其他列是純顯示。
+        點一下「現金算法」的名字：換成另一種。只有已經問過、名字露臉之後才點得到
+        ——這次執行還沒問過時 method_label 是空字串，點了也不該有反應。
         """
-        if self.cash_tree.identify_row(event.y) == "method":
+        if self.path in self.cash_method_asked:
             self._toggle_cash_method()
-
-    def _on_cash_motion(self, event):
-        """滑過「現金算法」那一列時游標變手指，不然沒有東西看得出那一列點得動。"""
-        want = "hand2" if self.cash_tree.identify_row(event.y) == "method" else ""
-        # 每次滑鼠移動都設一次的話，Tk 會不停重設游標，滑過表格時會閃。
-        if self.cash_tree.cget("cursor") != want:
-            self.cash_tree.configure(cursor=want)
 
     def _show_opening_row(self, show_it):
         """
-        用銀行餘額推算的日子，「修改今日初始現金餘額」那顆收起來，不占畫面。
+        用銀行餘額推算的日子，「今日初始現金餘額」與「修改」一起收起來，不占畫面。
 
-        它改的是初始餘額累加那一種算法的基準，今天既然不用那種算法，
-        擺著只是佔位置。基準本身不會消失，只是沒顯示：每天照樣設，
-        明天切回初始餘額累加就要用它。
+        它們講的是初始餘額累加那一種算法的基準，今天既然不用那種算法，擺著只是
+        佔位置。基準本身不會消失，只是沒顯示：每天照樣設，明天切回初始餘額累加
+        就要用它。
         """
-        if show_it == bool(self.opening_row.winfo_manager()):
+        if show_it == bool(self.opening_button.winfo_manager()):
             return
         if show_it:
-            self.opening_row.grid()
+            self.opening_label.grid()
+            self.opening_button.grid()
         else:
-            self.opening_row.grid_remove()
+            self.opening_label.grid_remove()
+            self.opening_button.grid_remove()
 
     def edit_opening(self):
         """
@@ -409,6 +448,7 @@ class UiSyncMixin:
         # 這顆按鈕動到的只有眼前這一位，寫入與落帳的範圍就跟著縮到他身上
         # —— 名單上別人那些「要寫」的格子是上一輪算的，不該被這一下順手寫出去。
         self.round_scope = {name}
+        self.round_at[name] = datetime.datetime.now().isoformat(timespec="seconds")
         self.fill_sync_tree()
 
         writes, total = self._collect_writes()
@@ -419,92 +459,100 @@ class UiSyncMixin:
         # 算出來剛好等於 Excel 上的數字，一格都不必寫 —— 但基準確實被改掉了，
         # 這一筆不落帳就等於沒按過（見 _commit_round）。
         recorded = self._commit_round()
-        self.replan()
+        # 順序不能反，理由同 ui_background._on_fetched／_on_written：
+        # refresh_history() 要先把剛落帳的這一筆讀回 self.history_rows，
+        # replan() 的 fill_sync_tree() 畫訊息框才看得到。
         self.refresh_history()
+        self.replan()
         self._say(f"{name} 的今日初始現金餘額改成 {show(opening)}，"
                   "跟 Excel 上的數字剛好一樣，沒有格子要寫。"
                   + (f"紀錄檔更新了 {recorded} 筆（見歷程）。" if recorded else ""))
 
-    def _head_line(self, name):
-        """
-        「這份資料是誰的、什麼時候讀的」那一句：`簡嘉懋　讀取於 19:54:23`。
-
-        原本是表格上方一行獨立的粗體標頭，2026/08/21 使用者要求收進訊息框
-        當第一行（見 _fill_notes、ui_layout._build_detail）。名字一定要跟資料
-        走在一起 —— 換人的時候第一眼要確認「換對了沒」，而畫面上另一個寫著名字
-        的地方是左邊名單那個反白，那講的是「我點了誰」，不是「右邊這些數字是誰的」。
-
-        讀取時間精準到秒，不到分鐘——分鐘不夠精準的話，剛讀完跟半小時前讀的
-        兩個時間點會長得一樣。
-
-        還沒讀過任何東西的時候整句留白（2026/08/21）——空的名單加空的表格，
-        自己就已經在說「還沒有資料」了，再寫一句只是把同一件事講第二次；
-        「然後要按哪顆」開機時狀態列已經講了（見 ui.py）。
-        """
-        if not name:
-            return ""
-
-        parts = [name + ("（模擬）" if name in self.fake_sheets else "")]
-        read = self.read_at.get(name)
-        parts.append(f"讀取於 {read:%H:%M:%S}" if read else "尚未讀取")
-        return "　".join(parts)
-
     def _fill_notes(self, name):
         """
-        第一行是「這份資料是誰的、什麼時候讀的」（`簡嘉懋　讀取於 19:54:23`，
-        見 _head_line）：2026/08/21 使用者要求把原本表格上方那行標頭也收進來，
-        以後有讀取動作就固定放在這個框的第一行。往下是原本兩張表「說明」欄的
-        內容（同一天整批搬過來，見 ui_layout.DETAIL_COLUMNS），最後才是提醒，
-        而且提醒只在「有事」的時候出聲。
-        現金那幾句排在提醒前面：「這個數字是怎麼算出來的」是每天都要看一眼的事，
-        提醒則是有事才有，排前面會把每天都在的那句話往下擠。已經被 planner 當成
-        提醒送出來的那一句（被擋住不寫的理由，「[現金] …」）不再重複一次。
+        訊息框內容：今天的歷程——直接篩 self.history_rows（sheet == name 且
+        at 是今天）——跟這一輪的股票提醒（`self.warnings[name]`，見
+        planner.plan）、這一位所屬組別的整組失敗原因（`self.problems`，見
+        `ui_background._on_fetched` 的 `problem_of`）混在一起，一起照時間
+        重排（見 _format_today_events），整體新的在最上面。
 
-        同一天拿掉的是另一行「簡嘉懋　現金 655　跟網頁一致」（也是使用者要求）：
-        現金在現金表第一列、要寫幾格是左邊名單上那個旗標（「要寫 3」／「✓」，
-        見 _fill_people），同一件事講兩次，只會讓每天都要讀的那幾句算式往下掉。
+        提醒、失敗原因都不堆在固定位置（2026/08/22 再訂正）：原本兩者都排在
+        所有歷程後面，帳號測久了訊息框累積很多行之後會被擠出這個小框的可視
+        範圍，要往下捲才看得到，等於沒提醒。改成掛時間戳、跟其他行一樣照
+        時間排序，混進同一個時間序（見 _warning_line／_error_line）——不會
+        永遠釘在哪裡，但也不會被埋掉，跟其他行一樣「新的擠掉舊的」。
 
-        20 個人的提醒全部堆在同一個框裡等於沒有提醒 —— 別人的事左邊名單上
-        已經用 ⚠ 標出來了，要看就換過去看。整組失敗（problems）例外，
-        那跟選中誰無關，一定要講。
+        **失敗原因現在按交易人分流**（2026/08/22 使用者要求，不要塞進系統
+        狀態列，也不要 20 個人共用同一份提醒）：`self.problems` 每一項帶著
+        `order`（第幾組），這裡用 `self.trader_of.get(order)` 反查是哪一位，
+        等於這個人就只把屬於自己那幾組的失敗原因併進自己的訊息框，換人看到
+        的是換人自己的。極少數「連是誰都查不出來」的情況（`trader_of` 也沒有
+        這個 order，通常是這組帳號從來沒有成功登入過、根本沒有名字可以歸戶）
+        沒有任何交易人的分頁掛得上，退回舊的做法：不管選中誰都顯示，前綴
+        補回 `TBB_ID_{order}` 自報身分（下面 fallback 那段；2026/08/22
+        使用者要求用這個名字而不是「第 N 組」——連不上人的時候，這個名字
+        才是能讓人直接回頭去 .env 對到是哪一行的線索）。
 
-        「操作中不要改 Excel 的現金餘額」不擺在這裡 —— 這個框在讀取完、寫入完
-        都還留著上一輪的內容，常駐在這裡等於讀完老半天還在講「正在做的時候
-        別碰」，反而誤導。那句話改成讀取中的忙碌訊息（見 start_fetch），
-        跟著狀態列一起出現、一起被下一句蓋掉。
+        現金被擋住的那幾句（`planner._cash` append 的 `[現金] ...`）還在
+        討論中，暫時維持原樣排在最後面，不進這個時間序。
+
+        「這一輪跟網頁一致、不用更新」這件事也不在這裡講（見
+        docs/同步分頁訊息框改版.md）：搬到右上角常駐狀態列的「✓ 與網頁一致」
+        小提示（見 _fill_status），原地更新不往下疊，跟這裡「今天發生了
+        什麼事」的定位分開。
+
+        原本第一行是「這份資料是誰的、什麼時候讀的」（`簡嘉懋　讀取於
+        19:54:23`），2026/08/22 使用者要求拿掉——每一行歷程自己就帶著時間戳，
+        再加一行整份資料的讀取時間是重複資訊。少了它，「這份資料是不是這一輪
+        剛讀的，還是上一輪留著的舊資料」這件事目前沒有畫面上的信號提醒（原本
+        靠這行的讀取時間分辨，見 ui.py 開頭「只更新一位有兩件事要守住」那段）
+        ——真的需要分辨時只能回頭看「歷程」分頁或訊息框裡最新一行歷程的時間。
+
+        現金結果連續沒變的那幾筆會被 `_dedupe_cash_rows` 收掉，不然每次讀取
+        都硬要覆蓋 B8（見 docs/現金餘額兩種算法.md）會讓這裡洗版——現在算
+        出來的實際數字，改看右上角常駐狀態列的「現金餘額」（見 _fill_status），
+        不必在這裡找。
         """
-        text = []
-        warns = list(self.warnings.get(name, []))
+        lines = []
         if name:
-            head = self._head_line(name)
-            if head:
-                text.append(head)
-            text += [f"{title}：{note}" for title, note in self.cash_notes
-                     if f"[現金] {note}" not in warns]
+            today = datetime.date.today()
+            rows = [row for row in self.history_rows
+                   if row.get("sheet") == name and within(row.get("at"), WHEN_TODAY, today)]
+            # 股票提醒、這一位的失敗原因都包成跟歷程事件同一種形狀
+            # （label 固定 "警告"／"異常"），才能混進 _dedupe_cash_rows／
+            # _format_today_events 同一套排序，不必另外寫一套合併邏輯。
+            # [現金] 開頭的還在討論中，不動它；失敗原因不套「今天」的篩選——
+            # 那是要留到「這一組自己再讀一次成功為止」的持續狀態，不是今天
+            # 才發生、過午夜就該消失的一次性事件（見 _refresh_problems）。
+            at = self.round_at.get(name) or ""
+            warning_rows = [{"at": at, "label": "警告", "text": warn}
+                           for warn in self.warnings.get(name, [])
+                           if not warn.startswith("[現金] ")]
+            error_rows = [{"at": problem["at"], "label": "異常", "text": problem["text"]}
+                         for problem in self.problems
+                         if self.trader_of.get(problem["order"]) == name]
+            lines.extend(_format_today_events(_dedupe_cash_rows(rows) + warning_rows + error_rows,
+                                              self.cash_method.get()))
 
-        text += warns
-        for problem in self.problems:
-            text.append(f"⚠ {problem}")
+        lines += [(warn, None) for warn in self.warnings.get(name, []) if warn.startswith("[現金] ")]
+        # fallback：這個 order 連是哪一位都反查不出來，沒有分頁掛得上，
+        # 不管選中誰都顯示。自報身分用 `TBB_ID_{order}`（2026/08/22 使用者
+        # 要求）而不是「第 N 組」——.env 就是用這個變數名稱編號的
+        # （見 login.load_accounts），連不上人的時候，這個名字才是能讓人
+        # 直接回頭去 .env 對到是哪一行的線索；「第 N 組」單看畫面猜不出
+        # 是哪一組帳密。一樣帶時間戳、跟 [異常] 同一個標籤，格式要統一，
+        # 不能因為是 fallback 就少了時間。
+        lines += [_error_line(problem["at"][11:19] if len(problem["at"]) >= 19 else problem["at"],
+                              f"TBB_ID_{problem['order']} {problem['text']}")
+                 for problem in self.problems
+                 if self.trader_of.get(problem["order"]) is None]
 
         self.warn_box.configure(state="normal")
         self.warn_box.delete("1.0", "end")
-        self.warn_box.insert("1.0", "\n".join(text))
-        self.warn_box.configure(state="disabled")
-
-    def clear_notes(self):
-        """
-        把訊息框清空。換現金算法的時候呼叫（見 _set_method）。
-
-        裡面每一句都是點「讀取」那一刻算出來的，而換算法換掉的正是「現金那個
-        數字怎麼來」：算式、被擋住的理由都可能不再成立，而新的那一種可能根本還沒
-        去查資料（銀行餘額與交割金額只在選了那種算法的那一輪才查）。留著舊的
-        比什麼都不寫更危險 —— 那幾句看起來跟畫面上現在的數字是一套的。
-
-        下一次讀取（或者在名單上換一位）就會連同新算法重新填好。
-        """
-        self.cash_notes = []
-        self.warn_box.configure(state="normal")
-        self.warn_box.delete("1.0", "end")
+        for index, (text, tag) in enumerate(lines):
+            if index:
+                self.warn_box.insert("end", "\n")
+            self.warn_box.insert("end", text, (tag,) if tag else ())
         self.warn_box.configure(state="disabled")
 
     def _sync_buttons(self):
@@ -518,7 +566,7 @@ class UiSyncMixin:
         self._apply_scope_state()
         # 「修改」不看 Excel 開著沒 —— 它改的是紀錄檔裡的基準，要寫 Excel 的時候
         # 寫入那邊自己會把檔案開起來。能不能按只看「這一位有沒有網頁資料」，
-        # 那是 _fill_cash 判的。用銀行餘額推算的日子整顆被藏起來
+        # 那是 _fill_status 判的。用銀行餘額推算的日子整顆被藏起來
         # （_show_opening_row），這裡照樣設 state —— 藏著的按鈕設得動，
         # 放回來的時候就已經是對的狀態了。
         self.opening_button.configure(

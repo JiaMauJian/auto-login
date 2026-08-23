@@ -13,7 +13,6 @@ Excel 上的現值一律被網頁值覆蓋，程式不記、不比對「這一�
 
 import ledger
 from excel_io import COL_COST, COL_QTY, CELL_BALANCE
-from recon import TRADE_NAMES
 from util import cash_formula, cell_name, same_number, show, to_num
 
 # 現金餘額的兩種算法（完整說明見 docs/現金餘額兩種算法.md）。
@@ -37,13 +36,17 @@ def merge_holdings(arrays):
     """
     把未實現損益整理成 {股號: {股數, 成本, 名稱}}。
 
-    網頁的資料是以「股票+交易別」為單位，同一檔可能佔好幾列（現股一列、融資一列），
-    但 Excel 一檔只有一列，所以要合併：股數直接相加，成本用股數加權平均
-    —— 直接取其中一列的均價會是錯的。
+    網頁的資料是以「股票+交易別」為單位，同一檔理論上可能佔好幾列，所以股數
+    直接相加、成本用股數加權平均合併——直接取其中一列的均價會是錯的。這條
+    合併邏輯留著是防資料真的不對時算出錯的持股，不是為了配一句提醒（見下）。
     另外照網頁自己的規則濾掉當沖與成本股數 0 的列，否則加總會跟畫面對不起來。
+
+    2026/08/22 使用者確認：同一檔同一天分批用現股買賣，網頁上券商已經先
+    平均好、只會有一列；會佔多列的其他交易別（融資等）在目前的交易方式下
+    不會發生。原本這裡「同一檔佔多列」時會多印一句「已用股數加權平均合併
+    成本」的提醒，因為這個情境不會真的發生，那句提醒已經拿掉。
     """
     merged = {}
-    notes = []
 
     for item in arrays:
         stkno = (item.get("stkno") or "").strip()
@@ -56,21 +59,15 @@ def merge_holdings(arrays):
         if qty == 0:
             continue
 
-        record = merged.setdefault(stkno, {"qty": 0.0, "amount": 0.0, "name": "", "trades": []})
+        record = merged.setdefault(stkno, {"qty": 0.0, "amount": 0.0, "name": ""})
         record["qty"] += qty
         record["amount"] += qty * to_num(item.get("priceavgn"))
         record["name"] = record["name"] or (item.get("stkna") or "").strip()
-        record["trades"].append(TRADE_NAMES.get(trade, trade))
 
-    for stkno, record in merged.items():
+    for record in merged.values():
         record["cost"] = round(record["amount"] / record["qty"], 4) if record["qty"] else 0.0
-        if len(record["trades"]) > 1:
-            notes.append(
-                f"{stkno} {record['name']} 在網頁上佔了 {len(record['trades'])} 列"
-                f"（{'、'.join(record['trades'])}），已用股數加權平均合併成本"
-            )
 
-    return merged, notes
+    return merged
 
 
 def settlement_total(arrays):
@@ -167,8 +164,7 @@ def plan(sheet_data, record, book, today, method=METHOD_OPENING):
     proposals = []
     warnings = []
 
-    holdings, notes = merge_holdings(record.get("未實現損益", []))
-    warnings.extend(notes)
+    holdings = merge_holdings(record.get("未實現損益", []))
 
     seen = set()
     for line in sheet_data["rows"]:
@@ -179,10 +175,10 @@ def plan(sheet_data, record, book, today, method=METHOD_OPENING):
         if found is None:
             # 網頁已經沒有這檔了。刻意不自動歸零 —— 使用者的流程是「先刪 Excel 再賣」，
             # 所以這通常代表忘了刪，該由人確認而不是程式清掉。
-            warnings.append(
-                f"第 {line['row']} 列「{line['label']}」在網頁庫存中已不存在，"
-                f"股數與成本維持原樣，請確認是否忘記刪除這一列"
-            )
+            # 2026/08/22 使用者要求縮短：訊息框現在混進逐筆歷程的時間序裡
+            # （見 ui_sync._fill_notes），不必再自帶「股數與成本維持原樣，請確認
+            # 是否忘記刪除這一列」這種說明——跟其他行同樣簡短。
+            warnings.append(f"第 {line['row']} 列「{line['label']}」在網頁庫存中已不存在")
             for which, col, current in (("qty", COL_QTY, line["qty"]),
                                         ("cost", COL_COST, line["cost"])):
                 proposals.append(_row(line["row"], col, "holding", code, which,
@@ -204,10 +200,8 @@ def plan(sheet_data, record, book, today, method=METHOD_OPENING):
 
     for code, found in holdings.items():
         if code not in seen:
-            warnings.append(
-                f"網頁有 {code} {found['name']}（{int(found['qty'])} 股）但 Excel 沒有這一列，"
-                f"不會自動新增，請自行決定放在哪一列"
-            )
+            # 2026/08/22 使用者要求縮短，理由同上一句「網頁庫存已無此檔」。
+            warnings.append(f"網頁有 {code} {found['name']}（{int(found['qty'])} 股）但 Excel 沒有這一列")
 
     proposals.append(_cash(sheet_data, record, book, today, warnings, method))
     return proposals, warnings

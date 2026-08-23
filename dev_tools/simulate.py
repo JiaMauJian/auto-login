@@ -61,14 +61,11 @@ FIXED_ACCOUNTS = {
     },
 
     "交易人B": {
-        "cash": 2_580_000,
-        "original_capital": 2_580_000,
+        "cash": 40_000,
+        "original_capital":200,
         "holdings": [
-            ("2059", "川湖", 4_000, 1057.0, 1150),
-            ("2344", "華邦電", 28_000, 28.3, 25),
-            ("2408", "南亞科", 52_000, 68.8, 65),
-            ("6213", "聯茂", 14_000, 146.0, 130),
-            ("6274", "台燿", 20_000, 227.0, 200),
+            ("0050", "元大台灣50", 300, 104.60, 300),
+            ("006208", "富邦台50", 200, 239.10, 200),
         ],
         "trades": [],
     },
@@ -556,19 +553,21 @@ def render_html(account, data):
 <section>
   <h2>當日淨收付</h2>
   <table id="mat"><thead><tr>
-    <th>代號</th><th>買賣</th><th>股數</th><th>單價</th><th>交割</th>
+    <th>代號</th><th>買賣</th><th>股數</th><th>單價</th>
     <th>價金</th><th>手續費</th><th>交易稅</th><th>淨收付</th><th></th>
   </tr></thead><tbody></tbody></table>
   <div class="total">淨收付合計：<span id="net">0</span></div>
   <div class="hint">
     全部刪掉 = 今天沒有成交，淨收付 0。<br>
-    「已交割」= 這一筆算成<b>前兩個交易日</b>成交、錢已經扣掉了（今天成交的要 T+2 才扣，
-    不可能已交割），所以它只進得了銀行餘額，不會被算成「還沒交割的錢」。<br>
+    「新增一筆 T+1 成交」= 這一筆算成<b>前一個交易日</b>成交、明天才交割，錢還沒扣，
+    跟一般成交（今天成交、T+2 交割）一樣都算「還沒交割的錢」——但交割金額查詢會分成
+    兩列，用來測<b>銀行餘額推算</b>要把好幾天的還沒交割的錢加起來，不能只看今天那一列。<br>
     注意：未實現損益那邊只要有今天的成交明細（就是這張表的內容），
     這裡卻是 0 的話，程式會刻意不動現金那一格 —— 那是防「收盤結帳後查不到當日資料」的保護。
   </div>
   <div style="margin-top:10px">
     <button id="add">新增一筆成交</button>
+    <button id="addT1">新增一筆 T+1 成交</button>
   </div>
 </section>
 
@@ -604,6 +603,9 @@ const SETTLE = stampOf(shiftDays(today, 2));
 // 才扣得掉，所以「今天成交、又已經交割」在真實世界裡不存在，假頁面也不該生出來
 // （程式有一道專門擋這種矛盾，見 planner._cash_blocked）。
 const PREV = stampOf(shiftDays(today, -2));
+// T+1：標成「T+1」的那幾筆算成前一個交易日成交，明天才交割。
+const NEXT1 = stampOf(shiftDays(today, 1));
+const PREV1 = stampOf(shiftDays(today, -1));
 document.getElementById('settle').textContent = SETTLE;
 
 function tickUnit(p) {{
@@ -638,17 +640,17 @@ function holdings() {{
 
 function tradeRow(trade) {{
   const tr = document.createElement('tr');
+  // 交割狀態不給選，靠「新增一筆成交」跟「新增一筆 T+1 成交」兩顆按鈕決定，
+  // 存在 dataset 裡（不是畫面上的欄位）。
+  tr.dataset.settle = trade.settled === true ? '1' : (trade.settled || '0');
   tr.innerHTML =
     '<td><input class="code" value="' + trade.code + '"></td>' +
     '<td><select class="bs"><option value="B">買</option><option value="S">賣</option></select></td>' +
     '<td><input class="tqty num" value="' + trade.qty + '"></td>' +
     '<td><input class="tprice num" value="' + trade.price + '"></td>' +
-    '<td><select class="settled">' +
-      '<option value="0">未交割</option><option value="1">已交割</option></select></td>' +
     '<td class="priceqty"></td><td class="fee"></td><td class="tax"></td><td class="payn"></td>' +
     '<td><button class="del">刪除</button></td>';
   tr.querySelector('.bs').value = trade.bs;
-  tr.querySelector('.settled').value = trade.settled ? '1' : '0';
   tr.querySelector('.del').addEventListener('click', () => {{ tr.remove(); refresh(); }});
   document.querySelector('#mat tbody').appendChild(tr);
 }}
@@ -661,7 +663,7 @@ function trades() {{
       bs: tr.querySelector('.bs').value,
       qty: num(tr.querySelector('.tqty')),
       price: num(tr.querySelector('.tprice')),
-      settled: tr.querySelector('.settled').value === '1',
+      settled: tr.dataset.settle,
     }};
     const amount = Math.round(trade.qty * trade.price);
     trade.priceqty = amount;
@@ -674,14 +676,21 @@ function trades() {{
 
 // ---- 組成跟真 API 一樣形狀的回應 ----
 
+// 交割日是方法二的關鍵：cdate 比今天晚才代表這筆錢還沒離開銀行帳戶。
+// 真的網站是 T+2；「已交割」整筆往前挪兩個交易日（前幾天成交、錢已經扣掉了）；
+// 「T+1」往前挪一個交易日成交、明天才交割（還沒扣，但跟今天成交的 T+2 不同一天）。
+function datesOf(t) {{
+  if (t.settled === '1') return {{ tdate: PREV, cdate: STAMP }};
+  if (t.settled === 'next1') return {{ tdate: PREV1, cdate: NEXT1 }};
+  return {{ tdate: STAMP, cdate: SETTLE }};
+}}
+
 function detailOf(t, index) {{
+  const d = datesOf(t);
   return {{
     tagName: 'stkdat', bhno: META.bhno, cseq: META.cseq,
     stkno: t.code, stkna: t.name, trade: '0', bs: t.bs,
-    // 交割日是方法二的關鍵：cdate 比今天晚才代表這筆錢還沒離開銀行帳戶。
-    // 真的網站是 T+2，這裡照樣往後推兩個交易日（遇到週末再往後挪）；
-    // 標成「已交割」的就整筆往前挪兩個交易日，變成「前幾天成交、錢已經扣掉了」。
-    tdate: t.settled ? PREV : STAMP, cdate: t.settled ? STAMP : SETTLE,
+    tdate: d.tdate, cdate: d.cdate,
     qty: String(t.qty), price: String(t.price), priceqty: String(t.priceqty),
     fee: String(t.fee), tax: String(t.tax), payn: String(t.payn),
     ordno: 'S' + String(index + 1).padStart(4, '0'),
@@ -706,13 +715,16 @@ function build() {{
     }};
   }});
 
-  const settle = list.map((t, i) => ({{
-    tagName: 'matsum', bhno: META.bhno, cseq: META.cseq,
-    stkno: t.code, stkna: t.name, trade: '0', bs: t.bs, stype: 'H',
-    tdate: t.settled ? PREV : STAMP, cdate: t.settled ? STAMP : SETTLE,
-    qty: String(t.qty), priceavg: String(t.price), priceqty: String(t.priceqty),
-    matdat: [Object.assign(detailOf(t, i), {{ tagName: 'matdat' }})],
-  }}));
+  const settle = list.map((t, i) => {{
+    const d = datesOf(t);
+    return {{
+      tagName: 'matsum', bhno: META.bhno, cseq: META.cseq,
+      stkno: t.code, stkna: t.name, trade: '0', bs: t.bs, stype: 'H',
+      tdate: d.tdate, cdate: d.cdate,
+      qty: String(t.qty), priceavg: String(t.price), priceqty: String(t.priceqty),
+      matdat: [Object.assign(detailOf(t, i), {{ tagName: 'matdat' }})],
+    }};
+  }});
 
   const ok = {{ retcode: '000000', retmsg: '' }};
   // Amount 的單位是分（真的回應長這樣：0000000089300 = 893.00），
@@ -725,13 +737,17 @@ function build() {{
 
   // 交割金額查詢（query610）：一天一列，金額是那一天要交割的淨額。真的網站不管
   // 有沒有成交，都會把最近幾個交易日各列一列（沒成交就是 0），所以這裡也是固定
-  // 兩列、金額 0 也照給 —— 「今天那一列在不在」是程式的一道檢查（見
+  // 三列、金額 0 也照給 —— 「今天那一列在不在」是程式的一道檢查（見
   // planner._cash_blocked），不能因為今天沒成交就讓它消失。
-  const sumOf = (settled) => list.filter(t => !!t.settled === settled)
+  // 三列分別是：已交割（前兩天成交、今天交割，錢已經在銀行餘額裡了）、
+  // T+1（前一天成交、明天交割，還沒交割）、未交割（今天成交、T+2 交割，還沒交割）——
+  // 「銀行餘額推算」要把 T+1 跟未交割兩列都加進去，只看未交割那一列會少算。
+  const sumOf = (settled) => list.filter(t => t.settled === settled)
       .reduce((s, t) => s + t.payn, 0);
   const due = [
-    {{ trade: PREV, cdate: STAMP, pay_amt: String(sumOf(true)) }},
-    {{ trade: STAMP, cdate: SETTLE, pay_amt: String(sumOf(false)) }},
+    {{ trade: PREV, cdate: STAMP, pay_amt: String(sumOf('1')) }},
+    {{ trade: PREV1, cdate: NEXT1, pay_amt: String(sumOf('next1')) }},
+    {{ trade: STAMP, cdate: SETTLE, pay_amt: String(sumOf('0')) }},
   ];
 
   return {{
@@ -793,12 +809,14 @@ function reroll() {{
 }}
 
 INIT_TRADES.forEach(tradeRow);
-document.getElementById('add').addEventListener('click', () => {{
+function addTrade(settled) {{
   const first = document.querySelector('#pnl tbody tr');
   tradeRow({{ code: first ? first.dataset.code : '2059', bs: 'B', qty: 1000,
-             price: first ? num(first.querySelector('.mkt')) : 100 }});
+             price: first ? num(first.querySelector('.mkt')) : 100, settled: settled }});
   refresh();
-}});
+}}
+document.getElementById('add').addEventListener('click', () => addTrade('0'));
+document.getElementById('addT1').addEventListener('click', () => addTrade('next1'));
 document.addEventListener('input', refresh);
 document.addEventListener('change', refresh);
 refresh();

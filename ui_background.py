@@ -181,7 +181,7 @@ class UiBackgroundMixin:
             self.current_sheet = name
             self.people.selection_set(name)
             self.people.see(name)
-            self._fill_detail()
+            self._fill_right()
 
     def _sync_scope_to_person(self):
         """
@@ -571,9 +571,15 @@ class UiBackgroundMixin:
 
         # 這一輪讀到的一律是「補上去」，不是「整份換掉」：一次只更新一位的時候，
         # 名單上其他人手上那份是上一輪的資料，清掉他們等於整份名單只剩一個人。
-        # 留著的代價是畫面上同時有好幾個時間點的資料，所以每一位都記下讀取時間，
-        # 訊息框第一行寫得出「讀取於 10:32:07」（見 ui_sync._head_line）。
-        now = datetime.datetime.now()
+        # 留著的代價是畫面上同時有好幾個時間點的資料——這件事原本靠訊息框第一行
+        # 「讀取於 10:32:07」提醒，2026/08/22 使用者要求拿掉那一行（見
+        # ui_sync._fill_notes），目前沒有別的畫面信號補這個位置。
+        # 這一輪的時間戳，右邊常駐狀態列「✓ 與網頁一致」小提示、以及底下失敗
+        # 原因要掛的時間都是它（見 ui.py 的 round_at 說明、ui_sync._fill_status／
+        # _fill_notes）——同一輪裡大家一起讀，蓋同一個時間沒關係。要在下面這個
+        # for 迴圈之前先算好，因為失敗原因當場就要記時間。
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+
         errors = payload["sheet_errors"]
         fresh = []
         for record in payload["records"]:
@@ -582,27 +588,33 @@ class UiBackgroundMixin:
                 self.trader_of[order] = name
 
             if record["problems"]:
-                problem = f"第 {order} 組：" + "；".join(record["problems"])
+                problem = "；".join(record["problems"])
             elif not name:
-                problem = f"第 {order} 組：讀不出這是哪一位交易人"
+                problem = "讀不出這是哪一位交易人"
             elif name in errors:
-                problem = f"第 {order} 組：" + errors[name]
+                problem = errors[name]
             else:
                 problem = None
 
             # 失敗原因跟著組別走：這一組這次成功就把上次的原因收掉，
             # 沒讀到的那幾組維持原樣 —— 別人的問題不會因為我這次讀成功就消失。
+            # 文字不再自帶「第 N 組：」前綴（2026/08/22 使用者要求）：這則原因
+            # 現在跟著這一組對應的交易人（見 ui_sync._fill_notes 用 trader_of
+            # 反查名字）顯示在他自己的訊息框裡，人是誰已經在框的標題上了，前綴
+            # 是重複資訊；真的還查不出是誰的那極少數情況，前綴改在顯示端現組
+            # （見 ui_sync._fill_notes 的 fallback 那段）。
             if problem:
-                self.problem_of[order] = problem
+                self.problem_of[order] = {"text": problem, "at": now}
                 continue
             self.problem_of.pop(order, None)
             self.records[name] = record
-            self.read_at[name] = now
             fresh.append(name)
 
         # 這一輪只准碰這幾位。寫入、落帳全部照它 —— 別人手上那份是舊資料，
         # 拿舊資料去寫 Excel 是「一次只更新一位」最貴的一種錯。
         self.round_scope = set(fresh)
+        for name in fresh:
+            self.round_at[name] = now
         self.sheet_data.update(payload["sheets"])
         self._refresh_problems()
         self._refresh_account_choices()
@@ -642,8 +654,13 @@ class UiBackgroundMixin:
         else:
             # 一格都不必寫，不代表沒事發生：今天的淨收付，是在這條路上落帳的。
             recorded = self._commit_round()
-            self.replan()
+            # 順序不能反：refresh_history() 才會把剛落帳的這一筆讀回
+            # self.history_rows，replan() 的 fill_sync_tree() 會用它畫訊息框
+            # ——先 replan 再 refresh 的話，訊息框會晚一輪才看到這一筆
+            # （2026/08/22 發現：模擬帳號改現金、按「讀取全部帳戶」，餘額立刻
+            # 更新但訊息框要按第二次才補上那一行）。
             self.refresh_history()
+            self.replan()
 
             # 有人沒完成的時候，「一致」的範圍只到對照得起來的那幾位為止。
             # 主詞跟著縮小，這句話才不會替沒完成的那幾位背書。
@@ -712,8 +729,10 @@ class UiBackgroundMixin:
                             if line["row"] == item["row"]:
                                 line["qty" if item["which"] == "qty" else "cost"] = item["proposed"]
 
-        self.replan()
+        # 順序不能反，理由同 _on_fetched 那個沒格子要寫的分支：refresh_history()
+        # 要先把剛落帳的這一筆讀回 self.history_rows，replan() 畫訊息框才看得到。
         self.refresh_history()
+        self.replan()
 
         # 刻意不跳視窗：一顆按鈕從頭做到尾，不要在最後又叫人按確定。程式做的
         # 變更沒辦法用 Ctrl+Z 復原，要反悔只能用備份，所以備份的位置要寫在
@@ -733,8 +752,13 @@ class UiBackgroundMixin:
         原因記在組別上而不是每讀一次就整串重來：一次只更新一位的時候，別人上一輪
         沒完成的事並沒有因此解決 —— 那些 ⚠ 要留在畫面上，直到那一組自己再讀一次
         成功為止。照組別排序，畫面上的順序才不會每讀一次就跳一次。
+
+        每一項帶著 `order`（不只 `text`／`at`）：ui_sync._fill_notes 要靠它
+        反查 `self.trader_of` 才知道這則失敗屬於哪一位交易人，該顯示在誰的
+        訊息框裡。
         """
-        self.problems = [self.problem_of[order] for order in sorted(self.problem_of)]
+        self.problems = [{"order": order, **self.problem_of[order]}
+                         for order in sorted(self.problem_of)]
 
     def _problem_note(self):
         """
@@ -951,7 +975,8 @@ class UiBackgroundMixin:
         self.records, self.sheet_data, self.proposals = {}, {}, {}
         self.warnings, self.problems = {}, []
         self.before = {}
-        self.problem_of, self.read_at, self.round_scope = {}, {}, set()
+        self.round_at = {}
+        self.problem_of, self.round_scope = {}, set()
         self.round_target = None
         self.current_sheet = None
         self.account_choice.current(0)
@@ -987,15 +1012,15 @@ class UiBackgroundMixin:
 
     def _refresh_method_label(self):
         """
-        算法變了（或換了 Excel）就把現金那張表重畫一次 —— 表上「現金算法」那一列
-        寫的就是它，而「今日初始現金餘額」那一列與底下那顆「修改」在不在也跟著它走
-        （哪一列要畫、按鈕收不收，全在 _fill_cash / _show_opening_row 判）。
+        算法變了（或換了 Excel）就把右邊常駐狀態列重畫一次 —— 「現金算法」寫的
+        就是它，而「今日初始現金餘額」與底下那顆「修改」在不在也跟著它走
+        （哪一項要畫、按鈕收不收，全在 ui_sync._fill_status / _show_opening_row 判）。
 
-        名字這次執行還沒問過就不畫那一列，但基準那一列與「修改」相反，還沒問過也要
-        照沿用下來的算法決定 —— 名字可以先不講（那只是還沒有答案），但一顆按下去
-        會蓋掉 B8 的東西不能等到問完才收起來。兩件事都在 _fill_cash 裡。
+        名字這次執行還沒問過就不畫，但基準與「修改」相反，還沒問過也要照沿用
+        下來的算法決定 —— 名字可以先不講（那只是還沒有答案），但一顆按下去會
+        蓋掉 B8 的東西不能等到問完才收起來。兩件事都在 _fill_status 裡。
         """
-        self._refill_cash()
+        self._fill_right()
 
     def _toggle_cash_method(self):
         """
@@ -1004,6 +1029,10 @@ class UiBackgroundMixin:
         先跳一個確認視窗 —— 這顆管全部 20 位、換錯會直接蓋掉現金那一格的算法，
         誤觸的代價比多一次點擊高。預設答案是「取消」，跟 ui_history 清除歷程
         那顆同一個規矩：有風險的操作，手滑按下 Enter 也不該真的動到。
+
+        confirm_style="primary"：焦點鎖「否」、Enter 觸發取消的安全機制不變，
+        只是「是」的顏色 2026/08/22 使用者要求跟同一天新增的「今天的現金餘額
+        怎麼算」那顆藍色「確定」統一，不用預設的警示橘色（見 ask_confirm）。
         """
         other = (planner.METHOD_OPENING if self.cash_method.get() == planner.METHOD_BANK
                   else planner.METHOD_BANK)
@@ -1012,7 +1041,8 @@ class UiBackgroundMixin:
                 "切換現金算法",
                 f"現金算法要從「{planner.METHOD_NAMES[self.cash_method.get()]}」"
                 f"換成「{planner.METHOD_NAMES[other]}」嗎？\n\n"
-                f"全額交割當天要留在「{planner.METHOD_NAMES[planner.METHOD_OPENING]}」。"):
+                f"全額交割當天要留在「{planner.METHOD_NAMES[planner.METHOD_OPENING]}」。",
+                confirm_style="primary"):
             return
         self._set_method(other, asked=True)
 
@@ -1024,6 +1054,10 @@ class UiBackgroundMixin:
         選了哪一種只在這次執行內有效，不寫進紀錄檔 —— 下次開程式一律回到
         「初始餘額累加」（見 _default_method）。「這次問過了」同樣只放記憶體，
         那是為了不要同一次執行裡跳第二次。
+
+        訊息框不必在這裡另外清——它現在直接讀歷程檔（見 ui_sync._fill_notes），
+        換算法不會讓任何舊資料留在畫面上，_refresh_method_label／replan 各自
+        重畫一次就已經是最新狀態。
         """
         self.cash_method.set(method)
         if asked:
@@ -1031,8 +1065,6 @@ class UiBackgroundMixin:
         self._refresh_method_label()
         if self.proposals:
             self.replan()
-        # replan 重畫完才清：它會把訊息框重新填一次，順序反過來等於沒清。
-        self.clear_notes()
 
     def _maybe_ask_cash_method(self):
         """
@@ -1046,15 +1078,11 @@ class UiBackgroundMixin:
         一次（變成一個要人閉著眼睛按掉的東西），但關掉程式重開就當作沒問過 ——
         使用者可能在中間發現今天有全額交割、想換答案，不必先去改 Excel 備份。
 
-        取消也算問過了（這次執行內）。
+        這個視窗沒有「取消」（2026/08/22 使用者要求，見 ask_cash_method），
+        一定會拿到使用者自己選的答案，不必再處理「沒選就關掉」那條路。
         """
         if self.ledger is None or self.path in self.cash_method_asked:
             return
 
         picked = ask_cash_method(self.root, self.family, self.cash_method.get())
-        if picked is None:
-            self.cash_method_asked.add(self.path)
-            # 取消也算問過了，用的是沿用下來的那一種。
-            self._refresh_method_label()
-            return
         self._set_method(picked, asked=True)

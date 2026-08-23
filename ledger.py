@@ -43,6 +43,7 @@ import json
 
 LEDGER_SUFFIX = "-同步紀錄.json"
 HISTORY_SUFFIX = "-同步歷程.jsonl"
+HISTORY_KEEP_DAYS = 10
 
 # 檔名跟著 Excel 的檔名走，而不是固定叫「持股同步紀錄.json」。
 # 萬一同一個資料夾裡有第二份持股表，兩者的現金基準混在一起是災難級的錯誤，
@@ -84,6 +85,8 @@ class Ledger:
                     f"可以把它改名備份起來，程式會重新建立（現金基準下次登入會重設）。"
                 ) from exc
 
+        self.prune_history()
+
     def sheet(self, name):
         """取得某個分頁的紀錄，沒有就建一個空的。"""
         sheets = self.data.setdefault("sheets", {})
@@ -114,6 +117,43 @@ class Ledger:
         with self.history_path.open("a", encoding="utf-8") as handle:
             for event in events:
                 handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def prune_history(self, keep_days=HISTORY_KEEP_DAYS):
+        """
+        只留最近 keep_days 天的歷程，超過的直接丟掉，不進備份資料夾。
+
+        跟 clear_history 不一樣：那是使用者按按鈕、整批收進「備份」；這是開檔
+        時自動做的保養，本來就打算讓舊的消失，不留副本才叫「自動清除」。
+        解析不出日期的行（舊格式、手改壞掉）保留，寧可多留不砍錯。
+        """
+        if not self.history_path.is_file():
+            return
+
+        cutoff = (datetime.date.today()
+                  - datetime.timedelta(days=keep_days)).isoformat()
+        kept = []
+        dropped = False
+        for line in self.history_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+                at = event.get("at") or ""
+            except json.JSONDecodeError:
+                at = ""
+            if len(at) >= 10 and at[:10] < cutoff:
+                dropped = True
+                continue
+            kept.append(stripped)
+
+        if not dropped:
+            return
+
+        text = "".join(line + "\n" for line in kept)
+        temp = self.history_path.with_name(self.history_path.name + ".tmp")
+        temp.write_text(text, encoding="utf-8")
+        temp.replace(self.history_path)
 
     def clear_history(self):
         """
