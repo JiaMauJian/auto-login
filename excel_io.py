@@ -15,10 +15,8 @@ Excel 讀寫。只認得持股管理表的這幾格，其餘全是公式，一�
 """
 
 import codecs
-import datetime
 import os
 import re
-import shutil
 import time
 from pathlib import Path
 
@@ -46,8 +44,6 @@ MARKER_ENV_KEY = "EXCEL_CONTROL_MARKER"
 def marker_enabled():
     """.env 的 EXCEL_CONTROL_MARKER 沒設或設 1 就開著；設 0 就整個關掉這個功能。"""
     return env_int(MARKER_ENV_KEY, 1) != 0
-
-BACKUP_KEEP = 10
 
 # Excel 實例在半路死掉時會看到的 HRESULT。
 #   0x800A01A8  物件不見了（Open 成功之後，下一句就撲空）
@@ -200,7 +196,6 @@ def clear_all_markers(path):
     if not marker_enabled() or path is None or not path.is_file():
         return
     try:
-        backup(path)
         excel, workbook, attached = open_workbook(path, True)
     except Exception:
         return
@@ -250,7 +245,7 @@ def open_workbook(path, write, attempts=3):
     檔案已經開在 Excel 裡時就直接接上那個實例，不必為了跑這支程式先關檔。
     接上的好處不只是方便：讀到的是你畫面上的即時內容（含還沒存檔的修改）。
     寫入之後一樣會存檔 —— 留給人自己按 Ctrl+S 聽起來像多一道確認，實際上是
-    「紀錄檔記成寫過了、檔案卻沒存」這個破口的來源。反悔靠寫入前那份備份。
+    「紀錄檔記成寫過了、檔案卻沒存」這個破口的來源。
 
     attached=True 時絕對不能 Close 或 Quit —— 那是使用者的視窗，關掉他會很錯愕。
 
@@ -258,8 +253,8 @@ def open_workbook(path, write, attempts=3):
     ----------------------------------
     Office 沒啟用時，Excel 起來之後那道啟用檢查失敗會把自己收掉重來，
     Open 明明成功，下一句碰 Worksheets 就是 OLE error 0x800A01A8。
-    錯誤發生在半路最麻煩 —— 那時備份做了、可能還寫了一半。所以開完先碰一下
-    確認物件是活的，死的就整個丟掉、換一個新的 Excel 再試。
+    錯誤發生在半路最麻煩，所以開完先碰一下確認物件是活的，
+    死的就整個丟掉、換一個新的 Excel 再試。
     """
     trouble = ""
     for attempt in range(attempts):
@@ -325,16 +320,3 @@ def close_workbook(excel, book, attached):
             action()
         except Exception:
             pass
-
-
-def backup(path):
-    """寫入前先備份，只留最近幾份。"""
-    folder = path.parent / "備份"
-    folder.mkdir(exist_ok=True)
-    dest = folder / f"{path.stem}_{datetime.datetime.now():%Y%m%d_%H%M%S}{path.suffix}"
-    shutil.copy2(path, dest)
-
-    old_files = sorted(folder.glob(f"{path.stem}_*{path.suffix}"))
-    for old in old_files[:-BACKUP_KEEP]:
-        old.unlink()
-    return dest

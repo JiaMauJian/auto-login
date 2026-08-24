@@ -2,7 +2,7 @@
 在持股管理 Excel 補上模擬用的分頁（交易人A、交易人B…），測完再一鍵移除。
 
     python dev_tools/sim_excel.py                 只看會做什麼（試算，安全）
-    python dev_tools/sim_excel.py --write          真的加分頁（會先自動備份）
+    python dev_tools/sim_excel.py --write          真的加分頁
     python dev_tools/sim_excel.py --count 5        只加 5 個
     python dev_tools/sim_excel.py --remove --write 把模擬分頁與它們在紀錄檔裡的資料清掉
 
@@ -20,7 +20,7 @@
 模擬分頁是加在正在用的那份 Excel 裡，紀錄檔（同步紀錄.json / 同步歷程.jsonl）
 是跟著 Excel 檔名走的，所以假分頁的資料會跟真分頁躺在同一份紀錄檔裡。
 測完手工清會清不乾淨（尤其是歷程那種一行一筆的檔案），所以清理這件事要程式做。
-移除前一律先備份 Excel 與歷程檔。
+歷程檔是只增不改的檔案，移除模擬紀錄前會先留一份原檔（見 remove_sheets）。
 """
 
 import json
@@ -166,8 +166,6 @@ def add_sheets(path, workbook, count, write):
         print("以上是試算結果，檔案沒有被動過。確認無誤後加上 --write 才會生效。")
         return
 
-    print(f"已備份: {excel_io.backup(path)}")
-
     for name in todo:
         # Copy 的參數一定要用位置傳（Before, After），不能寫 Copy(After=...)：
         # win32com 的動態呼叫吃不到這個具名參數，會被當成「兩個都沒給」，
@@ -180,7 +178,7 @@ def add_sheets(path, workbook, count, write):
         if workbook.Worksheets.Count != before + 1:
             raise RuntimeError(
                 f"複製分頁沒有生效（分頁數還是 {before}）。檔案沒有存檔，"
-                f"原檔沒有被動過，備份也還在。"
+                f"原檔沒有被動過。"
             )
 
         sheet = workbook.Worksheets(workbook.Worksheets.Count)
@@ -249,7 +247,6 @@ def remove_sheets(path, workbook, write):
         return
 
     if names:
-        print(f"已備份: {excel_io.backup(path)}")
         for name in names:
             workbook.Worksheets(name).Delete()
             print(f"  已刪除分頁「{name}」")

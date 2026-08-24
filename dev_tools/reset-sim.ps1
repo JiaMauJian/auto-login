@@ -17,8 +17,9 @@
 # 股數/成本/現金基準就會照網頁值覆蓋/初始化好。
 #
 # 執行前請先把這份 Excel 關閉——sim_excel.py 會擋開著的檔案（動的是分頁結構，
-# 跟開著的 Excel 打架）。每一步都會自動備份 Excel 與歷程檔，但清掉的紀錄檔/
-# 歷程還是回不去，先確認目前的模擬測試進度不需要保留再執行。
+# 跟開著的 Excel 打架）。移除模擬分頁那一步會先備份一份歷程檔（只增不改的檔案，
+# 這裡是唯一改內容的地方），但清掉的紀錄檔/歷程還是回不去，Excel 本身
+# 2026/08/24 起不再自動備份，先確認目前的模擬測試進度不需要保留再執行。
 
 $ErrorActionPreference = "Stop"
 
@@ -26,7 +27,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 
 Write-Host "即將把模擬帳號（交易人A~S）重設回 FIXED_ACCOUNTS 的原始數字。" -ForegroundColor Cyan
-Write-Host "這 19 個帳號目前的同步紀錄與歷程會被清掉（會先自動備份，但清掉的部分回不去）。" -ForegroundColor Yellow
+Write-Host "這 19 個帳號目前的同步紀錄與歷程會被清掉（歷程會先備份，但清掉的部分回不去）。" -ForegroundColor Yellow
 $answer = Read-Host "確定要繼續嗎？(y/N)"
 if ($answer -ne "y" -and $answer -ne "Y") {
     Write-Host "已取消，沒有動到任何檔案。"
