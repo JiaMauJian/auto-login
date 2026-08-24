@@ -175,9 +175,9 @@ def center_on(win, parent):
     win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
 
 
-def ask_opening_balance(parent, family, name, current, item):
+def ask_opening_balance(parent, family, name, current):
     """
-    改一個人的「今日初始現金餘額」。回傳新的開盤前金額，取消或留空就回 None。
+    改一個人的「今日初始現金餘額」。回傳新的基準，取消或留空就回 None。
 
     這裡曾經有另一個對話框：程式自己判斷「今天可能已經開過了」，讀完網頁資料就
     跳出來、一次問完所有分頁。它被這顆按鈕取代了 —— 同一個問題，程式問是「猜
@@ -185,8 +185,11 @@ def ask_opening_balance(parent, family, name, current, item):
     內容；該跳的時候沒跳，或跳的時候填錯，當天就再也沒有入口。基準現在一直寫在
     畫面上，看到不對再按，不必由程式決定什麼時候該問誰。
 
-    填的是「開盤前」而不是「現在正確的餘額」：開盤前的現金是今天唯一不會再變的
-    量，往上加多少由程式自己算（見 planner.apply_cash_reset）。
+    2026/08/24 拿掉了「先心算加上今日淨收付」那一步：這裡填的就是「今日初始
+    現金餘額」本身，不必先想今天成交了多少、答案是不是已經含了今天的淨收付。
+    net 還是會在套用時自動加上去、寫進 Excel（見 planner.apply_cash_reset），
+    只是不必在這個對話框先預覽一次會變成什麼——按下去之後那一格會寫什麼，
+    畫面跟訊息框上看得到。
     """
     win = tk.Toplevel(parent)
     win.title("修改今日初始現金餘額")
@@ -199,46 +202,20 @@ def ask_opening_balance(parent, family, name, current, item):
     outer.pack(fill="both", expand=True)
 
     ttk.Label(outer, justify="left", text=(
-        f"「{name}」今日開盤前的現金餘額"
+        f"「{name}」今日初始現金餘額"
     )).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-    lines = (("今日初始現金餘額", show(current)),
-             (f"今日淨收付（{item['net_rows']} 筆成交）", show(item["net"])))
-    for index, (title, value) in enumerate(lines, start=1):
-        ttk.Label(outer, text=title, style="Hint.TLabel").grid(row=index, column=0,
-                                                              sticky="w", pady=2)
-        ttk.Label(outer, text=value).grid(row=index, column=1, sticky="e",
-                                          padx=(24, 0), pady=2)
+    ttk.Label(outer, text="目前", style="Hint.TLabel").grid(row=1, column=0,
+                                                          sticky="w", pady=2)
+    ttk.Label(outer, text=show(current)).grid(row=1, column=1, sticky="e",
+                                              padx=(24, 0), pady=2)
 
     text = tk.StringVar(value="" if current is None else show(current))
-    row = len(lines) + 1
 
-    ttk.Label(outer, text="Excel現金餘額改成").grid(row=row, column=0,
-                                                sticky="w", pady=(10, 2))
+    ttk.Label(outer, text="改成").grid(row=2, column=0, sticky="w", pady=(10, 2))
     entry = ttk.Entry(outer, width=16, font=(family, FONT_SIZE), justify="right",
                       textvariable=text)
-    entry.grid(row=row, column=1, sticky="e", padx=(24, 0), pady=(10, 2))
-
-    # 結果邊打邊算。要核對的是「按下去會變成什麼」，自己看得到就不必先在心裡
-    # 算一次再賭它跟程式算的一樣。
-    ttk.Label(outer, text="會變成", style="Hint.TLabel").grid(
-        row=row + 1, column=0, sticky="w", pady=2)
-    result = ttk.Label(outer, text="維持原樣", style="Hint.TLabel")
-    result.grid(row=row + 1, column=1, sticky="e", padx=(24, 0), pady=2)
-
-    def update(*_args):
-        raw = text.get().strip().replace(",", "")
-        if not raw:
-            result.configure(text="維持原樣", style="Hint.TLabel")
-            return
-        opening = to_num(raw, None)
-        if opening is None:
-            result.configure(text="看不懂", style="Manual.TLabel")
-            return
-        result.configure(text=show(round(opening + item["net"], 2)), style="Auto.TLabel")
-
-    text.trace_add("write", update)
-    update()
+    entry.grid(row=2, column=1, sticky="e", padx=(24, 0), pady=(10, 2))
 
     def confirm(*_args):
         raw = text.get().strip().replace(",", "")
@@ -255,7 +232,7 @@ def ask_opening_balance(parent, family, name, current, item):
         win.destroy()
 
     buttons = ttk.Frame(outer)
-    buttons.grid(row=row + 3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+    buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
     ttk.Button(buttons, text="取消", command=win.destroy,
               bootstyle="secondary").pack(side="left", padx=(0, 8))
     ttk.Button(buttons, text="確定", command=confirm,

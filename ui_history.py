@@ -21,17 +21,15 @@ def item_order(label):
     return (1, inside, 0 if label.startswith("股數") else 1)
 
 
-def describe_change(by, old, new):
+def describe_change(old, new):
     """
-    歷程那一欄要寫什麼。
+    歷程那一欄要寫什麼：「舊值 → 新值」。
 
-    「交接」的新舊值講的是**程式的記憶**，不是格子的值：交接就是把
-    「我記得這格是多少」改成 Excel 上現在的數字，Excel 本身一格都沒動。
-    如果照 program 那樣印成「1 → 0」，看起來會像程式把數字改壞了，
-    所以新值那邊寫「改記」，點明變的是記憶。
+    2026/08/24 使用者要求簡化：原本「交接」（`by == "adopt"`）印成
+    「1 → 改記 0」，用「改記」點明變的是程式記憶、不是 Excel 格子——
+    但那句話本身就要多想一下，拿掉之後跟其他行同一個形狀，
+    是不是交接已經有 [今日初始餘額] 標籤跟後面的 note 講了。
     """
-    if by == "adopt":
-        return f"{show(old)} → 改記 {show(new)}"
     return f"{show(old)} → {show(new)}"
 
 
@@ -41,16 +39,15 @@ def history_line(event):
     Treeview 的六個欄位（2026/08/23 改用 Text，理由跟同步分頁訊息框一樣：
     欄寬固定會切字，改成單行文字自動換行就不會切到，見
     ui_layout._build_history_tab）。來源（程式／人工／交接）不再特別強調，
-    2026/08/23 使用者要求拿掉——`by` 只留給 describe_change 判斷「交接」
-    要不要印成「改記」。
+    2026/08/23 使用者要求拿掉；2026/08/24 連 describe_change 裡「交接」
+    印成「改記」那條特例也拿掉了，`by` 不再需要傳進去。
 
     回傳 (文字, tag)：現金餘額變負的那一筆標紅（"neg"），跟同步頁訊息框、
     左邊名單同一套「負現金就紅」的規矩（見 ui_sync._cash_line、
     ui_layout.py 的 "negative" tag），2026/08/23 使用者要求加上。
     """
-    by = event.get("by", "")
     time_text = (event.get("at") or "").replace("T", " ")
-    change = describe_change(by, event.get("old"), event.get("new"))
+    change = describe_change(event.get("old"), event.get("new"))
     note = event.get("note", "")
     line = f"{time_text}　{event.get('sheet', '')}　[{event.get('label', '')}]　{change}"
     if note:
@@ -81,7 +78,7 @@ def _merge_stock_group(events):
         first = next(iter(parts.values()))
         time_text = (first.get("at") or "").replace("T", " ")
         change_text = "　".join(
-            f"{key} {describe_change(parts[key].get('by', ''), parts[key].get('old'), parts[key].get('new'))}"
+            f"{key} {describe_change(parts[key].get('old'), parts[key].get('new'))}"
             for key in ("股數", "成本") if key in parts)
         lines.append((f"{time_text}　{first.get('sheet', '')}　[{title}]　{change_text}", None))
     return lines
@@ -201,7 +198,7 @@ class UiHistoryMixin:
 
     def clear_history(self):
         """
-        把歷程收進「備份」資料夾，畫面清空。
+        把歷程檔刪掉，畫面清空。
 
         清掉的只有「誰在什麼時候改了哪一格」這本日記，不會動到紀錄檔 ——
         每一格歸誰管、現金的基準與流水都在那邊，所以清完再同步，
@@ -214,19 +211,16 @@ class UiHistoryMixin:
         if not ask_confirm(
                 self.root,
                 "清除歷程",
-                f"要清掉全部 {len(self.history_rows)} 筆歷程嗎？\n\n"
-                "舊的歷程檔會改名收進「備份」資料夾，不是真的刪掉。\n"
+                f"要清掉全部 {len(self.history_rows)} 筆歷程嗎？這會直接刪掉，不會留備份。\n\n"
                 "每一格歸誰管、現金的基準都記在另一個紀錄檔裡，不受影響。",
                 confirm_style="primary"):
             return
 
         try:
-            saved = self.ledger.clear_history()
+            self.ledger.clear_history()
         except OSError as exc:
             messagebox.showerror("清不掉", f"歷程檔可能正被別的程式開著：\n{exc}")
             return
 
         self.refresh_history()
-        # 收去哪裡要寫在狀態列上，不然「備份」兩個字等於白講 —— 人找不到的備份
-        # 跟沒有備份是一樣的。
-        self._say(f"歷程已清空。舊的收在 {saved}" if saved else "歷程已清空。")
+        self._say("歷程已清空。")

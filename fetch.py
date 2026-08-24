@@ -1,9 +1,10 @@
 """
 登入並抓回帳務資料的原始回應。只讀網頁，不碰 Excel。
 
-固定抓兩支：未實現損益、當日淨收付。現金餘額用「銀行餘額推算」那種算法時
-再多抓交割金額與銀行餘額（見 docs/現金餘額兩種算法.md）—— 用另一種算法的日子
-一次都用不到，20 個帳號省下 40 次往返。
+固定抓兩支：未實現損益、交割金額。交割金額查詢（query610）裡「今天」那一列
+的 pay_amt 就是今日淨收付，兩種現金算法共用（見 docs/現金餘額兩種算法.md），
+不必再另外查一支「當日淨收付」。現金餘額用「銀行餘額推算」那種算法時再多抓
+銀行餘額 —— 用另一種算法的日子用不到，20 個帳號省下 20 次往返。
 
 抓資料的方式是在已登入的分頁裡呼叫網站自己的 AJAX（POST /tbb/MainController），
 沿用頁面現成的 B64_XOR_Encode / XOR_KEY 與 cookie，不做畫面解析 —— 表格是 JS
@@ -26,9 +27,9 @@ def settle_problem(rows):
 
         {"trade": "20260821", "cdate": "20260825", "pay_amt": "-238"}
 
-    一列都沒有就是不對。真的網站不管有沒有成交，都會把最近幾個交易日各列一列
-    （沒成交的那幾天是 0），所以「空的」代表這支查詢沒查成，不是「沒有錢要交割」——
-    當成 0 會讓還沒扣的錢憑空消失，而畫面上不會有任何徵兆。
+    一列都沒有就是不對。這頁的設計是永遠回最近 3 個交易日各一列（含今天，沒成交
+    就是 0），所以「空的」代表這支查詢沒查成，不是「沒有錢要交割」——當成 0 會讓
+    還沒扣的錢憑空消失，而畫面上不會有任何徵兆（見 docs/現金餘額兩種算法.md）。
 
     每一列的交割日與金額也要讀得懂：讀不懂交割日就無法判斷該不該補，
     讀不懂金額就不知道要補多少，兩種都只能整格擋住。
@@ -45,13 +46,17 @@ def settle_problem(rows):
     return None
 
 
-def bank_problem(rows, cid):
+def bank_problem(rows):
     """
     銀行餘額回應能不能用。可以就回 None，不能就回一句給人看的話。
 
-    這支查詢的回應裡**沒有 bhno/cseq**，所以現有那道「這份資料是不是這個人的」核對
-    用不上，只剩銀行帳號裡含著客戶號這個線索（1112-0108640 的帳號是 71017108640）。
-    銀行餘額是單一數字，抄錯人不會有任何徵兆，所以這道再弱也要做。
+    這支查詢的回應裡**沒有 bhno/cseq**，沒辦法直接核對身分，但同一輪最先查的
+    未實現損益已經核過一次（見呼叫端註解），同一頁面同一組 cookie 連著查完，
+    中途不會換身分，所以這支就跟著信得過，不再另外核對。
+
+    2026/08/24 拿掉「銀行帳號裡要含著客戶號」那道弱核對：邱博笙的實際銀行帳號
+    本來就不含客戶號（交易帳號跟銀行帳號本來就是兩組不相干的數字），這道規則
+    對他是誤判，會每次都把現金格擋住，卻沒有真的抓到任何一次抓錯人。
 
     多於一筆的情況沒有人看過（可能是綁了兩個銀行帳戶），不知道該用哪一個就不要猜。
     """
@@ -60,11 +65,6 @@ def bank_problem(rows, cid):
     if len(rows) > 1:
         accounts = "、".join(str(row.get("bnkacc") or "?") for row in rows)
         return f"銀行餘額查詢回傳了 {len(rows)} 個帳戶（{accounts}），不知道該用哪一個"
-
-    account = str(rows[0].get("bnkacc") or "")
-    trimmed = (cid or "").lstrip("0")
-    if trimmed and trimmed not in account:
-        return f"銀行帳號 {account} 裡看不到客戶號 {cid}，這筆餘額可能不是這個人的"
     return None
 
 
@@ -318,8 +318,10 @@ def collect(context, selected, store=None, need_bank=False):
     """
     逐一確保登入並抓資料。selected 是 [(第幾組, 帳號設定)]，回傳每組一筆記錄。
 
-    need_bank 是「現金餘額這次要用銀行餘額推算」。只有那時候才多查銀行餘額與交割
-    金額兩支 —— 20 個帳號就是 40 次多餘的往返，而用另一種算法的日子一次都用不到。
+    need_bank 是「現金餘額這次要用銀行餘額推算」。只有那時候才多查銀行餘額這支 ——
+    20 個帳號就是 20 次多餘的往返，而用另一種算法的日子完全用不到。交割金額
+    （query610）兩種算法都要抓，不受 need_bank 影響：opening 拿它「今天」那一列
+    算今日淨收付，bank 拿它算還沒交割的錢，一支頂兩支用。
 
     **一組登入完就立刻抓完他的資料**，不是全部登入完再回頭抓。整個瀏覽器只有一組
     cookie，登入下一組就等於把上一組的身分換掉了（伺服器那邊的 session 還活著，
@@ -355,21 +357,17 @@ def collect(context, selected, store=None, need_bank=False):
                 "branchId": "1" + bid, "custId": cid,
                 "range": "stksum,stkdat", "stock_no": "",
             }),
-            "當日淨收付": ("queryInstantAccount_new", {
-                "branchId": "1" + bid, "custId": cid,
-                "his": "y", "queryType": "1",
-                "range": "stksum,stkdat,matsum,matdat", "stock_no": "",
-            }),
+            # 交割金額查詢就是網站上「交割金額查詢」那一頁（account/layoutRWD.jsp?type=3）
+            # 自己打的那一支，回的正好是「接下來每一天各要交割多少」，一天一列，
+            # 「今天」那一列的 pay_amt 就是今日淨收付。兩種現金算法都要它，不受
+            # need_bank 影響：opening 只用今天那一列，bank 還要用到 cdate 比今天晚的
+            # 那幾列。2026/08/21 對過答案，跟撈十天淨收付逐筆看 cdate 算出來一樣（都是
+            # -238）；2026/08/24 確認收盤前後都準。
+            "交割金額": ("query610", {"branchId": "1" + bid, "custId": cid}),
         }
 
         if need_bank:
-            # 現金餘額第二種算法要的兩支（見 docs/現金餘額兩種算法.md）。
-            #
-            # 交割金額查詢就是網站上「交割金額查詢」那一頁（account/layoutRWD.jsp?type=3）
-            # 自己打的那一支，回的正好是「接下來每一天各要交割多少」，一天一列。
-            # 上一版是「撈十天的淨收付再逐筆看 cdate」算同一件事，2026/08/21 對過答案
-            # 兩邊一樣（都是 -238），但這支只要一次往返、也不必自己算日期區間。
-            queries["交割金額"] = ("query610", {"branchId": "1" + bid, "custId": cid})
+            # 現金餘額第二種算法多要的這支（見 docs/現金餘額兩種算法.md）。
             queries["銀行餘額"] = ("queryBankBalance",
                                    {"branchId": "1" + bid, "custId": cid})
 
@@ -398,23 +396,25 @@ def collect(context, selected, store=None, need_bank=False):
             # 每一列都帶 bhno/cseq。跟這個分頁登入的身分不符，就是 session 被別人頂掉了。
             codes = account_codes(data)
             if codes and codes != {record["account_code"]}:
+                who = record["account_code"]
+                if record.get("sheet_name"):
+                    who += f"（{record['sheet_name']}）"
                 record["problems"].append(
                     f"{title} 的資料屬於 {'、'.join(sorted(codes))}，"
-                    f"與登入的 {record['account_code']} 不符（session 可能被其他帳號頂掉）"
+                    f"與登入的 {who} 不符（session 可能被其他帳號頂掉）"
                 )
                 continue
 
             if title in ("銀行餘額", "交割金額"):
                 # 這兩支的回應形狀跟其他的不一樣（data 不是 arrays），而且裡面都沒有
-                # bhno/cseq，上面那道核對等於沒做 —— 所以另外檢查一次。
-                #
-                # 交割金額連「銀行帳號裡含著客戶號」這種弱核對都沒有，身分完全靠
-                # 同一輪的當日淨收付撐著：那支每一列都有 bhno/cseq，對不上就會被
-                # 上面那道擋下來、record 裡不會有「當日淨收付」，而現金那一格
-                # 沒有它就整格不寫（見 planner._cash_blocked）。所以 session 被別人
-                # 頂掉時，這支就算悄悄回了別人的資料，也走不到 Excel 上。
+                # bhno/cseq，上面那道核對等於沒做——但身分完全靠同一輪最先查的未實現
+                # 損益撐著：那支每一列都有 bhno/cseq，對不上就會被上面那道擋下來、
+                # record 裡不會沒有「未實現損益」，這個分頁後面的持股提案會整批冒出
+                # 「網頁庫存已無此檔」的警告，人一眼就看得出不對勁。同一頁面、同一組
+                # cookie 連著查完這一輪，中途不會換身分，所以未實現損益核過一次，
+                # 後面這幾支就跟著信得過，不用再各自核對一次。
                 rows = data.get("data") or []
-                problem = (bank_problem(rows, cid) if title == "銀行餘額"
+                problem = (bank_problem(rows) if title == "銀行餘額"
                            else settle_problem(rows))
                 if problem:
                     record["problems"].append(problem)

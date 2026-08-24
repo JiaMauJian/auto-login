@@ -465,8 +465,8 @@ def render_html(account, data):
         # 畫面上不會平白冒出差額。要測「兩種算法對不上」的情境，就改這一格，
         # 或把某一筆成交改成「已交割」。
         "bank": bank_balance(account["name"]),
-        # 真的那個是 71017108640（含客戶號 0108640），fetch.bank_problem 會拿
-        # 客戶號去比對，所以假的也要含著它，否則模擬帳號會全部被擋下來。
+        # 真的那個是 71017108640（含客戶號 0108640）；2026/08/24 起
+        # fetch.bank_problem 不再拿客戶號去比對這欄，這裡沿用同樣格式只是圖方便。
         "bnkacc": "7101" + account["cust_id"],
     }
 
@@ -551,19 +551,21 @@ def render_html(account, data):
 </section>
 
 <section>
-  <h2>當日淨收付</h2>
+  <h2>成交明細</h2>
   <table id="mat"><thead><tr>
     <th>代號</th><th>買賣</th><th>股數</th><th>單價</th>
     <th>價金</th><th>手續費</th><th>交易稅</th><th>淨收付</th><th></th>
   </tr></thead><tbody></tbody></table>
   <div class="total">淨收付合計：<span id="net">0</span></div>
   <div class="hint">
-    全部刪掉 = 今天沒有成交，淨收付 0。<br>
+    這張表餵給未實現損益（股數/成本）跟交割金額查詢（今日淨收付、還沒交割的錢）
+    兩支，是唯一的資料來源。全部刪掉 = 今天沒有成交，淨收付 0。<br>
     「新增一筆 T+1 成交」= 這一筆算成<b>前一個交易日</b>成交、明天才交割，錢還沒扣，
     跟一般成交（今天成交、T+2 交割）一樣都算「還沒交割的錢」——但交割金額查詢會分成
     兩列，用來測<b>銀行餘額推算</b>要把好幾天的還沒交割的錢加起來，不能只看今天那一列。<br>
-    注意：未實現損益那邊只要有今天的成交明細（就是這張表的內容），
-    這裡卻是 0 的話，程式會刻意不動現金那一格 —— 那是防「收盤結帳後查不到當日資料」的保護。
+    注意：未實現損益那邊只要有今天的成交明細（就是這張表的內容），交割金額查詢裡
+    卻沒有今天那一列或今天金額是 0，程式會刻意不動現金那一格 —— 那是防「收盤結帳後
+    查不到當日資料」的保護。
   </div>
   <div style="margin-top:10px">
     <button id="add">新增一筆成交</button>
@@ -715,17 +717,6 @@ function build() {{
     }};
   }});
 
-  const settle = list.map((t, i) => {{
-    const d = datesOf(t);
-    return {{
-      tagName: 'matsum', bhno: META.bhno, cseq: META.cseq,
-      stkno: t.code, stkna: t.name, trade: '0', bs: t.bs, stype: 'H',
-      tdate: d.tdate, cdate: d.cdate,
-      qty: String(t.qty), priceavg: String(t.price), priceqty: String(t.priceqty),
-      matdat: [Object.assign(detailOf(t, i), {{ tagName: 'matdat' }})],
-    }};
-  }});
-
   const ok = {{ retcode: '000000', retmsg: '' }};
   // Amount 的單位是分（真的回應長這樣：0000000089300 = 893.00），
   // 假的也要照給，不然模擬跑得過、真帳號一上線就差 100 倍。
@@ -752,7 +743,6 @@ function build() {{
 
   return {{
     '未實現損益': Object.assign({{ arrays: pnl }}, ok),
-    '當日淨收付': Object.assign({{ arrays: settle }}, ok),
     '交割金額': Object.assign({{ data: due }}, ok),
     '銀行餘額': Object.assign({{ data: [{{
       qry_date: STAMP, qry_times: '090000',

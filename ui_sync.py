@@ -31,12 +31,11 @@ def _cash_formula(event):
     打頭是重複資訊——算法名稱已經講了是哪一種算法，數字才是這一行真正要看的
     東西，所以只取第一個 " = " 之後的部分。
 
-    只有「讀取」這條路自動算出來的現金事件是這個形狀；`by == "adopt"` 的兩種
-    （今天第一次登入設基準、「修改今日初始現金餘額」沒有格子要寫）在 _cash_line
-    就先分流掉了，不會走到這裡。但「修改今日初始現金餘額」如果真的寫了格子
-    （`by == "program"`），note 是 apply_cash_reset 自己的散文說明，一樣沒有
-    這個「標籤 = 算式 = 結果」的形狀（沒有第二個 " = "），這裡分不出算法、
-    也不必硬套，原樣印出 note 就好。
+    `by == "adopt"` 的兩種（今天第一次登入設基準、「修改今日初始現金餘額」沒有
+    格子要寫）在 _cash_line 就先分流掉了，不會走到這裡。「修改今日初始現金
+    餘額」如果真的寫了格子（`by == "program"`），note 是 apply_cash_reset 算的，
+    2026/08/24 起跟自動算出來那句共用 planner._formula_note，形狀一樣，這裡
+    不用特別分流。最後的 `note or show(...)` 只是留給格式萬一對不上時的保底。
     """
     note = event.get("note") or ""
     if note.startswith("銀行餘額") and " = " in note:
@@ -123,8 +122,9 @@ def _error_line(time_text, text):
 
 def _dedupe_cash_rows(rows):
     """
-    現金那幾筆事件，結果（`new`）跟上一筆顯示過的一樣就丟掉，不進訊息框
-    （2026/08/22 使用者要求）。
+    現金那幾筆事件，結果（`new`）跟同一種算法上一筆顯示過的一樣就丟掉，不進
+    訊息框（2026/08/22 使用者要求；2026/08/24 訂正成「同一種算法分開比」，
+    見下）。
 
     現金每次讀取一定會覆蓋 Excel、也一定會記進歷程（見
     docs/現金餘額兩種算法.md「B8 無條件覆蓋」）——這裡動的只是訊息框要不要
@@ -132,27 +132,36 @@ def _dedupe_cash_rows(rows):
     每一筆。比對的是算出來的結果，不是整句算式：算式裡淨收付的細節可能每次
     都有一點出入，但只要最後的餘額沒變，對使用者來說就是「沒事」。
 
-    「今天第一筆」一定留著（`last_shown` 用 `None` 當哨兵，`same_number` 對
-    None 一律回 False，所以第一筆永遠算「跟上一筆不一樣」）；`by == "adopt"`
-    的今日初始餘額、`by == "program"` 的正常寫入，只要結果相同一樣算重複，
-    一起比——使用者要看的是「這個數字有沒有變」，不是它是哪一種事件寫的。
+    2026/08/24 訂正：原本不分算法，`by == "adopt"` 的今日初始餘額跟
+    `by == "program"` 的正常寫入全部混在一起比。切換現金算法（初始餘額累加
+    ↔ 銀行餘額推算）之後，新算法第一次算出的結果只要數字剛好跟切換前最後
+    一筆一樣，就會被當成「沒變」吞掉，使用者看不到新算法真的重算過一次。
+    現在「銀行餘額推算」自成一組 key，只跟自己上一筆比；「今日初始餘額」
+    跟「初始餘額累加」的寫入還是同一組——它們本來就是同一個基準（baseline
+    剛設好、還沒加淨收付；或加了淨收付但淨收付是 0），數字相同時本來就該
+    只顯示一次，這條沒有變。
+
+    「今天第一筆」（每一組 key 各自的第一筆）一定留著（`last_shown` 用
+    `None` 當哨兵，`same_number` 對 None 一律回 False）。
 
     照時間先後比對，不是照畫面顯示的順序（畫面是新的在最上面）。
     """
     ordered = sorted(rows, key=lambda row: row.get("at") or "")
-    kept, last_shown = [], None
+    kept, last_shown = [], {}
     for row in ordered:
         if row.get("label") != "現金餘額":
             kept.append(row)
             continue
+        note = row.get("note") or ""
+        key = "bank" if note.startswith("銀行餘額") else "opening"
         new = row.get("new")
-        if not same_number(last_shown, new):
+        if not same_number(last_shown.get(key), new):
             kept.append(row)
-            last_shown = new
+            last_shown[key] = new
     return kept
 
 
-def _format_today_events(rows, method):
+def _format_today_events(rows):
     """
     把某一位「今天」的歷程事件（含 `label == "警告"` 的股票提醒、
     `label == "異常"` 的整組帳號失敗合成列，見 UiSyncMixin._fill_notes），
@@ -162,6 +171,20 @@ def _format_today_events(rows, method):
     列的順序排在最後——不管歷程檔裡實際寫入的先後（planner.commit 是股票先、
     現金最後才 append）。整體新的在最上面，跟「歷程」分頁
     ui_history._fill_history 同一個慣例。
+
+    現金那三筆裡如果 [今日初始餘額]（`by == "adopt"`，來自 planner.initialize）
+    跟 [餘額更新]（`by == "program"`，來自 planner.commit）同一個 at 都有——
+    今天第一次讀取這個人時最常見——[餘額更新] 排在上面：它是這一輪實際
+    套用公式寫進 Excel 的結果，時間上也確實晚於「先把 B8 收成起點」那一步，
+    「整體新的在最上面」這個慣例套到同一個 at 裡也該一樣（2026/08/24 使用者
+    訂正；原本兩者維持歷程檔裡的寫入先後，[今日初始餘額] 反而排在上面）。
+
+    [今日初始餘額] 只有在「這一輪」也用「銀行餘額推算」寫出結果時才拿掉——
+    銀行餘額推算用不到這個基準，兩個一起印會讓人以為基準是算式的一部分
+    （2026/08/23 使用者要求）。判斷依據是這一輪 cash_events 裡有沒有算法是
+    銀行餘額推算的 program 事件，不是「現在選的是哪個算法」：2026/08/24 之前
+    是看現在選哪個算法，切換算法之後，連當天稍早、還在用另一種算法時留下的
+    [今日初始餘額] 也會被現在的算法選擇連坐一起拿掉（使用者訂正）。
     """
     groups, order = {}, []
     for row in rows:
@@ -179,10 +202,10 @@ def _format_today_events(rows, method):
         error_events = [row for row in group if row.get("label") == "異常"]
         warning_events = [row for row in group if row.get("label") == "警告"]
         cash_events = [row for row in group if row.get("label") == "現金餘額"]
-        if method == planner.METHOD_BANK:
-            # [今日初始餘額] 只有「初始餘額累加」算法會拿基準去加今日淨收付；
-            # 「銀行餘額推算」算的時候完全用不到這個基準，印出來只會讓人
-            # 誤以為它也是算式的一部分（2026/08/23 使用者要求）。
+        # [餘額更新]（program）排在 [今日初始餘額]（adopt）前面，見上方 docstring。
+        cash_events.sort(key=lambda row: row.get("by") == "adopt")
+        if any(row.get("by") == "program" and (row.get("note") or "").startswith("銀行餘額")
+               for row in cash_events):
             cash_events = [row for row in cash_events if row.get("by") != "adopt"]
         stock_events = [row for row in group
                         if row.get("label", "").startswith(("股數（", "成本（"))]
@@ -440,7 +463,7 @@ class UiSyncMixin:
 
         cash = self.ledger.sheet(name)["cash"]
         opening = ask_opening_balance(self.root, self.family, name,
-                                      ledger_mod.opening_balance(cash), item)
+                                      ledger_mod.opening_balance(cash))
         if opening is None:
             return
 
@@ -531,8 +554,7 @@ class UiSyncMixin:
             error_rows = [{"at": problem["at"], "label": "異常", "text": problem["text"]}
                          for problem in self.problems
                          if self.trader_of.get(problem["order"]) == name]
-            lines.extend(_format_today_events(_dedupe_cash_rows(rows) + warning_rows + error_rows,
-                                              self.cash_method.get()))
+            lines.extend(_format_today_events(_dedupe_cash_rows(rows) + warning_rows + error_rows))
 
         lines += [(warn, None) for warn in self.warnings.get(name, []) if warn.startswith("[現金] ")]
         # fallback：這個 order 連是哪一位都反查不出來，沒有分頁掛得上，

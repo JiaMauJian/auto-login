@@ -529,11 +529,18 @@ class UiBackgroundMixin:
         呼叫這裡，但只有第一輪真的動得了 —— 介面不必自己記「今天設過了沒」。
         這裡只負責挑出「這一組這次讀到、而且 Excel 那一頁也真的讀到了」的分頁 ——
         這次沒讀到的一律跳過，沒讀到的東西不能拿來當起點。
+
+        時間戳跟著 self.round_at 走，不再自己另外呼叫 datetime.now()（2026/08/24
+        修正）——這裡跟 _commit_round 原本各叫各的 datetime.now()，登入到寫入中間
+        隔著 Excel COM 寫入的好幾秒，兩邊蓋到的秒數幾乎不會一樣。ui_sync
+        ._format_today_events 判斷「[今日初始餘額] 要不要跟這一輪的 [餘額更新]
+        併在一起」靠的正是兩者 at 相不相等，at 對不起來就會兩行都印出來，銀行
+        餘額推算那天畫面上多出一行講不出用途的「今日初始餘額」。同一輪本來就該
+        算同一個時間點，改用 round_at 就是把這個假設落實。
         """
         if self.ledger is None:
             return 0
 
-        at = datetime.datetime.now().isoformat(timespec="seconds")
         events = []
         for record in records:
             name = record.get("sheet_name")
@@ -544,6 +551,7 @@ class UiBackgroundMixin:
             # 帳號代號在登入的當下就知道了，順手記進紀錄檔 ——
             # 使用者有可能登入完就沒有再按讀取。
             book["account_code"] = record.get("account_code", "")
+            at = self.round_at.get(name) or datetime.datetime.now().isoformat(timespec="seconds")
             events.extend(planner.initialize(data, book, name, self.today, at))
 
         if not events:
@@ -684,11 +692,15 @@ class UiBackgroundMixin:
         對話框最該接住的情況），沒有任何一格需要寫。那個答案這時只存在提案裡，
         不落帳就會跟著整輪一起丟掉，下一次讀取拿沒被修正的基準再算一次，
         今天的淨收付就被加了第二次 —— 而畫面上不會有任何徵兆。
+
+        時間戳跟 _initialize 一樣改用 self.round_at（2026/08/24 修正，理由見
+        _initialize 的說明）——不再自己叫 datetime.now()，這一輪的 [今日初始
+        餘額] 才會跟這裡寫出來的 [餘額更新] 落在同一個 at，訊息框的併行/去重
+        判斷才對得起來。
         """
         if self.ledger is None:
             return 0
 
-        at = datetime.datetime.now().isoformat(timespec="seconds")
         events = []
         for name, items in self.proposals.items():
             # 跟 _collect_writes 同一個範圍。落帳記的是「這一輪發生了什麼」，
@@ -696,6 +708,7 @@ class UiBackgroundMixin:
             if name not in self.round_scope:
                 continue
             book = self.ledger.sheet(name)
+            at = self.round_at.get(name) or datetime.datetime.now().isoformat(timespec="seconds")
             events.extend(planner.commit(items, book, name, self.today, at))
         self.ledger.save()
         self.ledger.append_history(events)

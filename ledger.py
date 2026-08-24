@@ -22,6 +22,23 @@ baseline_value 就是介面上那個「今日初始現金餘額」—— 今天�
 B8。那個時間點今天要買賣什麼都還沒發生，所以它必定是今天的起點
 （見 planner.initialize）。
 
+baseline_value 不落地：只留在記憶體，不寫進紀錄檔
+--------------------------------------------------
+2026/08/24 起，cash 這個子物件不再存進 *-同步紀錄.json，每次程式重開都是一張
+白紙，靠這次執行「當天第一次讀到的 B8」重新設起點。以前會把它存到磁碟，是怕
+程式中途異常、或執行到一半有人手改 Excel，重開之後想沿用「今天真正第一次」
+那個基準，不要被中間髒掉的 B8 污染。這兩種情況現在都簡化掉了——出事的話由
+使用者自己重設 Excel 上的現金餘額，不必程式在背後多存一份保險。
+
+代價：同一天內如果程式中途重開，新的這次執行不知道今天其實已經讀過，會把
+重開當下的 B8（可能已經含了今天前半天寫進去的淨收付）當成新的起點，重新加一次
+今天的淨收付，等於重複算到。這是刻意接受的取捨，不是遺漏。
+
+只要程式沒有重開，「當天鎖一次」還是原樣：同一次執行裡，基準只在第一次讀到
+這個人時設定（baseline_date 對到今天就跳過，見 planner.initialize），之後
+同一天內不管讀幾次都沿用同一個基準，不會每讀一次就重新去抓 B8——這樣淨收付
+（網頁給的是「今天累計」而不是「這次新增」）才不會被重複加。
+
 跨日累加的版本試過：基準只設一次，applied 把每天的淨收付一路往後疊。它的代價是
 漏跑一天就永遠少一段，而且要補得回頭一天一天對。改成每天重設之後，昨天有沒有跑過、
 跑得對不對都不影響今天 —— 今天的起點就是今天看到的 B8，沒有舊帳要算。
@@ -85,6 +102,11 @@ class Ledger:
                     f"可以把它改名備份起來，程式會重新建立（現金基準下次登入會重設）。"
                 ) from exc
 
+        # 現金基準不落地（見檔案開頭說明）：不管磁碟上的舊檔案裡有沒有殘留
+        # cash 欄位，每次程式啟動都當作沒看過，讓它在這次執行裡從頭重設。
+        for book in self.data.get("sheets", {}).values():
+            book.pop("cash", None)
+
         self.prune_history()
 
     def sheet(self, name):
@@ -103,8 +125,19 @@ class Ledger:
         self.save()
 
     def save(self):
-        """先寫暫存檔再換掉本尊，避免寫到一半斷電留下一個殘缺的帳本。"""
-        text = json.dumps(self.data, ensure_ascii=False, indent=2)
+        """
+        先寫暫存檔再換掉本尊，避免寫到一半斷電留下一個殘缺的帳本。
+
+        cash 不寫進去（見檔案開頭「baseline_value 不落地」）：self.data 裡
+        還留著它，讓這次執行接下來照樣讀寫得到，只是序列化成 JSON 的這一份
+        故意跳過，下次啟動才會是一張白紙。
+        """
+        sheets = {
+            name: {key: value for key, value in book.items() if key != "cash"}
+            for name, book in self.data.get("sheets", {}).items()
+        }
+        payload = dict(self.data, sheets=sheets)
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
         temp = self.path.with_name(self.path.name + ".tmp")
         temp.write_text(text, encoding="utf-8")
         temp.replace(self.path)
@@ -120,10 +153,10 @@ class Ledger:
 
     def prune_history(self, keep_days=HISTORY_KEEP_DAYS):
         """
-        只留最近 keep_days 天的歷程，超過的直接丟掉，不進備份資料夾。
+        只留最近 keep_days 天的歷程，超過的直接丟掉。
 
-        跟 clear_history 不一樣：那是使用者按按鈕、整批收進「備份」；這是開檔
-        時自動做的保養，本來就打算讓舊的消失，不留副本才叫「自動清除」。
+        跟 clear_history 不一樣：那是使用者按按鈕、整批清空；這是開檔時
+        自動做的保養，只砍舊的、留近期的。
         解析不出日期的行（舊格式、手改壞掉）保留，寧可多留不砍錯。
         """
         if not self.history_path.is_file():
@@ -157,23 +190,15 @@ class Ledger:
 
     def clear_history(self):
         """
-        清掉歷程。回傳收起來的檔案位置，本來就沒有歷程就回傳 None。
-
-        檔案不刪，改名收進「備份」資料夾。歷程是拿來對帳的東西 ——「那天那一格
-        是誰改的」問不出來的代價，遠大於多留一個檔案；按錯一顆按鈕就永久失去
-        追溯能力，那顆按鈕不該存在。
+        清掉歷程，檔案直接刪掉，不留備份。回傳 True，本來就沒有歷程就回傳 False。
 
         只動歷程，不動 self.data：現金基準跟流水都記在紀錄檔那邊，
         清歷程等於撕掉日記本，不是把帳算掉。
         """
         if not self.history_path.is_file():
-            return None
-        folder = self.history_path.parent / "備份"
-        folder.mkdir(exist_ok=True)
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = folder / f"{self.history_path.stem}_{stamp}{self.history_path.suffix}"
-        self.history_path.replace(dest)
-        return dest
+            return False
+        self.history_path.unlink()
+        return True
 
 
 def cash_after(cash, day, net):

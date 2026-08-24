@@ -17,7 +17,7 @@
 
 所以「順序寫錯」在這裡一定會被抓到，不必等到真的有 20 組帳號。
 
-跑四種情境，每一種都要求「每組拿到自己的四份資料、沒有任何 problem」：
+跑四種情境，每一種都要求「每組拿到自己的三份資料、沒有任何 problem」：
 
     第一次讀取        兩組都要重新登入
     第二次讀取        cookie 還在，一次都不該重登（重登＝慢、又要驗證碼）
@@ -58,7 +58,8 @@ def _payload(cmd, owner):
         return {"retcode": "000000",
                 "data": [{"trade": "20260821", "cdate": "20260825", "pay_amt": "-238"}]}
     if cmd == "queryBankBalance":
-        # bnkacc 要含著客戶號，否則 fetch.bank_problem 會擋（那道弱核對本來就在）。
+        # bnkacc 隨便給一個能通過 fetch.bank_problem 基本檢查（有回傳、只有一筆）的值即可，
+        # 2026/08/24 起 fetch.bank_problem 已經不核對客戶號是否含在銀行帳號裡。
         return {"retcode": "000000",
                 "data": [{"Amount": "0000000089300", "bnkacc": "7101" + cid}]}
     return {"retcode": "000000",
@@ -142,7 +143,7 @@ def _check(title, records, accounts, no_login=False):
         want = f"1{account['branch_id']}-{account['cust_id']}"
         got = [k for k in record
                if k not in ("order", "problems", "account_code", "sheet_name")]
-        good = (not record["problems"] and len(got) == 4
+        good = (not record["problems"] and len(got) == 3
                 and record.get("account_code") == want)
         print(f"    第 {record['order']} 組 {account['id']}："
               f"身分 {record.get('account_code') or '（沒有）'}、抓到 {len(got)} 份"

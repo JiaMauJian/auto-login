@@ -70,19 +70,6 @@ def merge_holdings(arrays):
     return merged
 
 
-def settlement_total(arrays):
-    """當日淨收付合計。跳過成交股數 0 的列，跟網頁畫面的算法一致。"""
-    net = 0.0
-    rows = 0
-    for item in arrays:
-        for mat in item.get("matdat") or []:
-            if str(mat.get("qty") or "").strip() == "0":
-                continue
-            rows += 1
-            net += to_num(mat.get("payn"))
-    return net, rows
-
-
 def bank_balance(rows):
     """
     銀行餘額（元）。讀不到、或讀不懂就回 None —— 絕對不要回 0。
@@ -239,8 +226,10 @@ def apply_cash_reset(item, opening):
     item["reset_to"] = target
     item["record_net"] = False          # calibrate 會把流水一起寫好
     item["will_write"] = not same_number(item["current"], target)
-    item["note"] = (f"今日初始現金餘額 {show(opening)} + 今日淨收付 {show(item['net'])}"
-                    f"（{item['net_rows']} 筆成交），從今天起重新起算")
+    # 跟 _cash() 自動算出來的那句用同一個形狀（見 _formula_note），人手動改
+    # 跟程式自動設基準現在是同一件事，不必再多講「從今天起重新起算」。
+    item["note"] = _formula_note(
+        "今日初始現金餘額", opening, [("今日淨收付", item["net"])], target)
     return item
 
 
@@ -254,33 +243,28 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
     只算選中的那一種。曾經兩種都算、把另一種也顯示在畫面上當對帳訊號，後來拿掉了
     —— 差額講不出是哪一種原因造成的（全額交割？匯撥？有人手改過 B8？），
     對「今天要用哪一種」這個決定幫不上忙，而那個決定的依據（今天有沒有買全額交割股）
-    本來就只有人知道。省下來的還有兩支查詢：用 opening 的日子完全不必碰銀行餘額。
+    本來就只有人知道。省下來的還有一支查詢：用 opening 的日子完全不必碰銀行餘額。
     """
     row, col = CELL_BALANCE
     balance = sheet_data["balance"]
     cash = book["cash"]
 
-    # 當日淨收付兩種算法都要抓：opening 拿它算餘額；bank 用不到它算餘額，但
-    # 「重設基準」要它，而且它是這一輪唯一一支「每一列都帶 bhno/cseq」的現金相關
-    # 資料 —— 銀行餘額與交割金額都沒有回顯帳號，身分核對全靠它擋在前面
-    # （見 fetch.collect 與下面 _cash_blocked 的第一道）。
-    net, rows = settlement_total(record.get("當日淨收付", []))
+    # 交割金額（query610）兩種算法都要抓：opening 只拿「今天」那一列當今日淨收付；
+    # bank 還要拿 cdate 比今天晚的那幾列算還沒交割的錢。這支沒有回顯帳號，身分核對
+    # 靠同一輪最先查的未實現損益擋在前面（見 fetch.collect 那段注解）。
+    pending_items, pending, today_amount = pending_rows(
+        record.get("交割金額", []), today)
+    net = today_amount or 0.0
 
     proposal = _row(row, col, "cash", "cash", "balance", "現金餘額", balance, net, None)
     proposal["net"] = net
-    proposal["net_rows"] = rows
     proposal["method"] = method
     proposal["record_net"] = False
     # 淨收付本身信不過的時候立起來。這一格連「重設基準」都不該讓人按 ——
     # 拿一個已知是錯的 net 去 calibrate，等於把今天的成交永久算進基準裡。
     proposal["blocked"] = False
 
-    bank = pending = today_amount = None
-    pending_items = []
-    if method == METHOD_BANK:
-        bank = bank_balance(record.get("銀行餘額"))
-        pending_items, pending, today_amount = pending_rows(
-            record.get("交割金額", []), today)
+    bank = bank_balance(record.get("銀行餘額")) if method == METHOD_BANK else None
     proposal["bank"] = bank
     proposal["pending"] = pending
     proposal["pending_items"] = pending_items
@@ -289,7 +273,7 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
         proposal["note"] = "B8 是空的或不是數字，請先填一個現金餘額"
         return proposal
 
-    reason = _cash_blocked(record, today, method, net, bank, today_amount)
+    reason = _cash_blocked(record, today, method, bank, today_amount)
     if reason is not None:
         proposal["note"] = reason
         proposal["blocked"] = True
@@ -303,16 +287,16 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
         return proposal
 
     if method == METHOD_BANK:
-        amounts = [amount for _label, amount in pending_items]
+        # 這一種不寫公式，直接寫算出來的數字（2026/08/24 使用者要求）——
+        # formula 留 None，_collect_writes 就會退回用 proposed。
         proposal["proposed"] = round(bank + pending, 2)
-        proposal["formula"] = cash_formula(bank, *amounts)
         proposal["note"] = _bank_note(bank, pending_items)
     else:
         proposal["proposed"] = ledger.cash_after(cash, today, net)
         proposal["formula"] = cash_formula(cash.get("baseline_value"), net)
         # 不接「（N 筆成交）」（2026/08/21 使用者要求）。這一句要回答的是
         # 「這個餘額怎麼來的」，筆數不在算式上，接在後面只是把一句已經很長的
-        # 話再拉長。筆數還在 net_rows 裡，「修改今日初始現金餘額」那個視窗有列。
+        # 話再拉長。
         proposal["note"] = _formula_note(
             "今日初始現金餘額", cash.get("baseline_value"),
             [("今日淨收付", net)], proposal["proposed"])
@@ -378,49 +362,47 @@ def _formula_note(base_label, base, items, total, tail=""):
     return f"{base_label} + {names} = {numbers} = {show(total)}{tail}"
 
 
-def _cash_blocked(record, today, method, net, bank, today_amount):
+def _cash_blocked(record, today, method, bank, today_amount):
     """
     現金這一格該不該整個擋住不寫。要擋就回一句給人看的話，不擋回 None。
     回空字串也是擋，只是不多講那一句 —— 用在「別的地方已經講過了」的情況。
 
-    兩種算法各有各的破口，但形狀一樣：某一項資料其實是「查不到」，
-    而查不到跟「就是 0」在數字上長得一模一樣。分不出來的時候一律不寫 ——
-    少寫一次人看得到，寫錯一次沒有人會發現。
+    兩種算法共用交割金額（query610）這一支，破口的形狀也一樣：某一項資料其實是
+    「查不到」，而查不到跟「就是 0」在數字上長得一模一樣。分不出來的時候一律不寫
+    —— 少寫一次人看得到，寫錯一次沒有人會發現。
     """
-    if "當日淨收付" not in record:
-        return "今日淨收付沒有讀到，現金這格先不動"
+    if "交割金額" not in record:
+        return "交割金額查詢沒有讀到，現金這格先不動"
 
-    if method == METHOD_BANK:
-        if bank is None:
-            # 擋住但不說話（2026/08/21 使用者要求）。這一道只剩兩種觸發方式，
-            # 兩種都不需要這句話：查詢真的失敗時，fetch 已經把具體原因寫進
-            # record["problems"]（見 fetch.bank_problem），畫面上那句講得比這句清楚；
-            # 剩下的情況是讀完才用點名字換算法（測試用入口，.env 關得掉），
-            # 那是自己剛手動改的，不必再被提醒一次。
-            return ""
-        if "交割金額" not in record:
-            return "交割金額查詢沒有讀到，算不出還有哪幾天沒交割，現金這格先不動"
-        # 交叉檢查：未實現損益說今天有成交，交割金額查詢卻說今天沒有錢要交割。
-        # 今天成交的要 T+2 才扣，所以那筆錢一定還掛在這支查詢上；掛不上就是這份
-        # 資料不對（收盤結帳後這支還準不準，沒有人在那個時段查過）。少算的正好是
-        # 今天成交的那一整筆，而畫面上不會有任何徵兆，所以整格不寫。
-        if traded_today(record.get("未實現損益", []), today) and not today_amount:
-            return ("未實現損益顯示今天有成交，交割金額查詢裡今天卻沒有金額"
-                    "（收盤結帳後可能查不到），現金這格先不動")
-        return None
+    # 網站不管有沒有成交，最近幾個交易日一律各給一列（見 fetch.settle_problem），
+    # 所以「今天」那一列理論上一定在；不在代表這份資料不對，不是「今天沒有淨收付」。
+    if today_amount is None:
+        return "交割金額查詢裡沒有今天的資料，現金這格先不動"
 
-    # 交叉檢查：未實現損益說今天有成交，淨收付卻是 0，兩邊矛盾。
-    # 最可能的原因是收盤結帳後查不到當日資料了，這時候記 0 會讓餘額默默漏掉今天。
-    # 只擋現金這一格，持股照樣可以寫。
-    if net == 0 and traded_today(record.get("未實現損益", []), today):
-        return ("未實現損益顯示今天有成交、淨收付卻是 0"
-                "（收盤結帳後可能查不到當日資料），現金這格先不動")
+    # 交叉檢查：未實現損益說今天有成交，交割金額查詢卻說今天沒有錢要交割。
+    # 今天成交的要 T+2 才扣，所以那筆錢一定還掛在這支查詢上；掛不上就是這份
+    # 資料不對（收盤結帳後這支還準不準，沒有人在那個時段查過）。少算的正好是
+    # 今天成交的那一整筆，而畫面上不會有任何徵兆，所以整格不寫。
+    if traded_today(record.get("未實現損益", []), today) and not today_amount:
+        return ("未實現損益顯示今天有成交，交割金額查詢裡今天卻沒有金額"
+                "（收盤結帳後可能查不到），現金這格先不動")
+
+    if method == METHOD_BANK and bank is None:
+        # 擋住但不說話（2026/08/21 使用者要求）。這一道只剩兩種觸發方式，
+        # 兩種都不需要這句話：查詢真的失敗時，fetch 已經把具體原因寫進
+        # record["problems"]（見 fetch.bank_problem），畫面上那句講得比這句清楚；
+        # 剩下的情況是讀完才用點名字換算法（測試用入口，.env 關得掉），
+        # 那是自己剛手動改的，不必再被提醒一次。
+        return ""
+
     return None
 
 
 # 現金的初始化每天都會發生一次，值常常跟昨天一樣（昨天收盤多少，今天就從多少開始），
 # 所以歷程上會出現一排「893 → 893」。說明寫清楚它是什麼，那一列才讀得懂。
-OPENING_NOTE = "今日初始現金餘額（今天第一次登入時的 B8）"
+# 2026/08/24 使用者要求簡化：拿掉「（今天第一次登入時的 B8）」那句解釋，
+# 歷程那一行已經有 [現金餘額] 標籤跟時間，不必再多講一次這是什麼時候的事。
+OPENING_NOTE = "今日初始現金餘額"
 
 
 def initialize(sheet_data, book, sheet_name, today, at):
