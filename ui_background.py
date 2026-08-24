@@ -23,7 +23,7 @@ from login import app_dir, configure_browsers_path, open_context
 from ui_common import ask_cash_method, ask_confirm
 
 # 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
-STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入"}
+STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "logged_out": "登出"}
 
 # 瀏覽器起不來時，錯誤視窗最上面那段人話。traceback 講的是 Playwright 的內部狀況，
 # 對使用者沒有意義，真正能動手的只有下面這兩件事。
@@ -244,6 +244,32 @@ class UiBackgroundMixin:
              self.cash_method.get() == planner.METHOD_BANK),
         ))
 
+    def start_logout_all(self):
+        """
+        「全部登出並關閉瀏覽器」：不管現在是誰的回合，把整個瀏覽器 session 收掉。
+
+        跟登入/讀取不一樣，這顆不靠 excel_open 擋——沒開 Excel 也可能已經開著
+        瀏覽器登入著（例如剛按過「登入」還沒選檔案），一樣該登得出去、關得掉。
+        瀏覽器根本沒開過（執行緒不在或還沒起來）就不必勞師動眾丟一個指令進去，
+        直接在這裡回話。
+        """
+        if self.busy:
+            return
+        if self.browser_thread is None or not self.browser_thread.is_alive():
+            self._say("瀏覽器沒有開著，不用登出。")
+            return
+        if not ask_confirm(
+                self.root,
+                "登出並關閉瀏覽器",
+                "確定要登出所有帳號並關閉瀏覽器嗎？\n\n"
+                "瀏覽器裡任何你自己開的分頁（例如看盤視窗）也會一起關掉。",
+                confirm_style="primary"):
+            return
+
+        self._set_busy(True, "登出中，瀏覽器會自己關掉，請稍候…")
+        self.browser_waiting += 1
+        self.browser_cmd_queue.put(("logout", None))
+
     def _browser_worker(self):
         """
         背景：整個瀏覽器 session 的生命週期都在這個執行緒裡，一直活到使用者自己把
@@ -304,6 +330,32 @@ class UiBackgroundMixin:
                     continue
                 if cmd == "stop":
                     break
+                if cmd == "logout":
+                    # clear_cookies 是這個網站定義的「登出」（見 login.do_login 換
+                    # 帳號那段的說明）：JSESSIONID 這類 cookie 是伺服器唯一認人的
+                    # 依據，清掉就等於把手上這批帳號一次全部登出。USER_DATA_DIR
+                    # 指到的是持久化 profile 時尤其要做這一步——不清就直接關瀏覽器，
+                    # cookie 還留在磁碟上，下次開起來網站可能直接把人當成還登入著。
+                    payload = {}
+                    try:
+                        if context is not None:
+                            try:
+                                context.clear_cookies()
+                            except PlaywrightError:
+                                pass
+                            context.close()
+                        if browser is not None:
+                            browser.close()
+                    except Exception:
+                        payload = {"error": traceback.format_exc()}
+                    finally:
+                        # 跟使用者自己把瀏覽器關掉走同一條路（見 ensure_browser 裡
+                        # _browser_alive 判斷失敗那段）：context 收成 None，下一次
+                        # 登入/讀取自己會重開一個乾淨的瀏覽器，不必特別處理這個狀態。
+                        context = browser = None
+                        store = fetch_mod.new_store()
+                    self.queue.put(("logged_out", payload))
+                    continue
 
                 fetch_records, kind = jobs[cmd]
                 # 「讀取」那條路多帶一個 need_bank（這次要不要查銀行餘額，見
@@ -375,10 +427,6 @@ class UiBackgroundMixin:
         excel = workbook = sheet = None
         pythoncom.CoInitialize()
         try:
-            # 備份在開 Excel 之前做：這時候檔案還沒有人開著，複製到的一定是
-            # 乾淨的內容；而且萬一後面整段失敗，備份已經先拿到手了。
-            saved = excel_io.backup(path)
-
             excel, workbook, attached = excel_io.open_workbook(path, True)
             try:
                 for name, cells in writes.items():
@@ -393,12 +441,11 @@ class UiBackgroundMixin:
                 # 原本接上時刻意不存、留給人自己按 Ctrl+S 當作多一道確認，但那道
                 # 確認換來的是一個更糟的破口：紀錄檔在寫入「成功」之後就記成寫過了，
                 # 人只要沒按 Ctrl+S（或關檔時選「不要儲存」），帳本就跟檔案分家，
-                # 而且畫面上不會有任何徵兆。反悔的路已經有更好的一條 —— 寫入前
-                # 一定會備份。
+                # 而且畫面上不會有任何徵兆。
                 workbook.Save()
             finally:
                 excel_io.close_workbook(excel, workbook, attached)
-            payload = {"backup": str(saved), "attached": attached}
+            payload = {"attached": attached}
         except Exception as exc:
             payload = {"error": traceback.format_exc()}
             if excel_io.is_dead_object(exc):
@@ -421,7 +468,7 @@ class UiBackgroundMixin:
         那一筆報成失敗，讓迴圈活下去。
         """
         handlers = {"logged_in": self._on_logged_in, "fetched": self._on_fetched,
-                    "written": self._on_written}
+                    "written": self._on_written, "logged_out": self._on_logged_out}
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
@@ -747,16 +794,23 @@ class UiBackgroundMixin:
         self.refresh_history()
         self.replan()
 
-        # 刻意不跳視窗：一顆按鈕從頭做到尾，不要在最後又叫人按確定。程式做的
-        # 變更沒辦法用 Ctrl+Z 復原，要反悔只能用備份，所以備份的位置要寫在
-        # 狀態列上，人才找得到。
-        # 提醒擺在備份路徑前面：路徑很長，接在後面的字會被擠出狀態列外面。
+        # 刻意不跳視窗：一顆按鈕從頭做到尾，不要在最後又叫人按確定。
         #
         # 接上使用者開著的 Excel 時不再另外註明（2026/08/21 使用者要求）。
         # 那句話是寫給「以為自己開著的那份沒被改到」的人看的，而畫面上的數字
         # 本來就跟 Excel 一致、存檔也一律會做，兩種情況對人來說沒有差別。
-        self._say(f"已自動寫入 {self.write_count} 格並存檔。"
-                  f"{self._problem_note()}備份在 {payload['backup']}")
+        self._say(f"已自動寫入 {self.write_count} 格並存檔。{self._problem_note()}")
+
+    def _on_logged_out(self, payload):
+        self.browser_waiting = max(0, self.browser_waiting - 1)
+        self._set_busy(False)
+
+        if "error" in payload:
+            self._say("登出失敗")
+            messagebox.showerror("登出失敗", _error_text(payload))
+            return
+
+        self._say("已全部登出並關閉瀏覽器。下次按「登入」或「讀取」會重新開一個瀏覽器。")
 
     def _refresh_problems(self):
         """
@@ -822,7 +876,7 @@ class UiBackgroundMixin:
         --------------------------
         程式自己也開得起來（沒開著時 excel_io 會在背景 DispatchEx 一個隱形的），
         但 Office 沒啟用的機器上，那個背景 Excel 會在啟用檢查失敗後把自己收掉，
-        同步是跑到一半才炸的 —— 那時備份做了、搞不好還寫了幾格。所以這裡改成
+        同步是跑到一半才炸的 —— 那時搞不好已經寫了幾格。所以這裡改成
         由使用者親手把檔開起來，程式接上他那個視窗：看得見、讀到的是畫面上的
         即時內容、寫完他也馬上看得到。沒開起來就不給登入，把問題擋在最前面。
 
@@ -1089,7 +1143,7 @@ class UiBackgroundMixin:
 
         故意不記進紀錄檔、只放記憶體：問過一次是為了同一次執行裡不要每讀一次就跳
         一次（變成一個要人閉著眼睛按掉的東西），但關掉程式重開就當作沒問過 ——
-        使用者可能在中間發現今天有全額交割、想換答案，不必先去改 Excel 備份。
+        使用者可能在中間發現今天有全額交割、想換答案。
 
         這個視窗沒有「取消」（2026/08/22 使用者要求，見 ask_cash_method），
         一定會拿到使用者自己選的答案，不必再處理「沒選就關掉」那條路。

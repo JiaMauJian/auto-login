@@ -226,6 +226,15 @@ class UiLayoutMixin:
         self.fetch_button = ttk.Button(top, text="讀取全部帳戶", bootstyle="primary", command=self.start_fetch)
         self.fetch_button.grid(row=2, column=0, sticky="ew", pady=(6, 0))
 
+        # 「全部登出並關閉瀏覽器」擺在讀取下面，跟上面三顆同一直行、同樣寬——
+        # 但它不是流程的第四步，是反過來結束這一段瀏覽器 session 的動作，
+        # 使用者離開座位或要換一批帳號跑之前按一次（見 ui_background.start_logout_all）。
+        # 不跟 excel_open 掛勾（見 UiSyncMixin._sync_buttons）：跟有沒有選 Excel 檔無關，
+        # 只要瀏覽器開著就能按。
+        self.logout_button = ttk.Button(top, text="全部登出並關閉瀏覽器", bootstyle="secondary",
+                                        command=self.start_logout_all)
+        self.logout_button.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+
         # 右邊留白那一欄負責吃掉多餘寬度，左邊那一直行才不會被拉開。
         top.columnconfigure(3, weight=1)
 

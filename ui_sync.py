@@ -578,13 +578,17 @@ class UiSyncMixin:
         self.warn_box.configure(state="disabled")
 
     def _sync_buttons(self):
-        """上面那兩顆能不能按。畫面上會變灰的按鈕現在只剩它們。"""
+        """上面那幾顆能不能按。畫面上會變灰的按鈕就剩它們。"""
         # Excel 沒開著就不給登入，也不給讀取 —— 讀取自己會順便登入，只擋登入的話
         # 這道關卡按另一顆按鈕就繞過去了。擋在最前面的理由是後面每一步都要 Excel：
         # 讀完要拿它的現值算提案，寫入更是直接改它。
         ready = self.excel_open and not self.busy
         self.login_button.configure(state="normal" if ready else "disabled")
         self.fetch_button.configure(state="normal" if ready else "disabled")
+        # 「全部登出並關閉瀏覽器」不跟 excel_open 掛勾 —— 它管的是瀏覽器 session，
+        # 跟有沒有選 Excel 檔無關；沒有瀏覽器可登出時按下去只會被 start_logout_all
+        # 自己擋下來、在狀態列講一句，這裡不必先幫它擋。
+        self.logout_button.configure(state="normal" if not self.busy else "disabled")
         self._apply_scope_state()
         # 「修改」不看 Excel 開著沒 —— 它改的是紀錄檔裡的基準，要寫 Excel 的時候
         # 寫入那邊自己會把檔案開起來。能不能按只看「這一位有沒有網頁資料」，
