@@ -64,7 +64,7 @@ edit_opening）。那顆按鈕只在今天用「初始餘額累加」的時候�
 ------------------
 上面那個是其中一種（「初始餘額累加」）。另一種是「銀行餘額推算」：
 
-    現金餘額 = 銀行餘額 + 還沒交割的淨收付
+    現金餘額 = 銀行餘額 + 淨收付(T+0) + 淨收付(T+1)
 
 兩種並存不是備援，是各有各正確的日子：全額交割股當天，錢在成交當下就從銀行餘額
 扣走、但同一筆還掛在當日淨收付上（下午才更新改正），那天只有初始餘額累加是對的；
@@ -247,7 +247,7 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
             except RuntimeError as exc:
                 self.ledger_error = str(exc)
 
-        # 現金餘額用哪一種算法。刻意是一個總開關（20 位一起切），不是一人一個 ——
+        # 現金餘額用哪一種算法。刻意是一個總開關（多人一起切），不是一人一個 ——
         # 大家買賣的標的一樣，全額交割那天是全部一起中。
         self.cash_method = tk.StringVar(value=self._default_method())
         # 這次執行問過算法的檔案路徑。刻意只放記憶體，不寫進紀錄檔 —— 要問的是
