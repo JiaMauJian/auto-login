@@ -307,7 +307,10 @@ def do_login(context, tbb_id, tbb_password, page=None):
                 pass
 
     page.on("response", on_verify_response)
-    page.goto(LOGIN_URL)
+    # domcontentloaded 就夠：接下來的 mode_link/id_input/canvas 各自的 wait_for
+    # 才是真正的把關點，不必等整頁資源（圖片、廣告等）都載完（同一招見
+    # fetch._open_account_page，那邊實測省下不少時間）。
+    page.goto(LOGIN_URL, wait_until="domcontentloaded")
 
     # 頁面預設是「帳號登入」模式，欄位 placeholder 為「帳號」；
     # 必須先點「身份證登入」，網站的 JS 才會把同一個欄位切換成「身分證」模式。
@@ -364,8 +367,10 @@ def do_login(context, tbb_id, tbb_password, page=None):
 
     # 等待要在按下登入「之前」就開始，否則換頁太快會來不及攔到。
     # 換頁一完成就往下走，不用固定乾等；沒換頁時（登入被擋在原頁）逾時當作正常情況吞掉。
+    # domcontentloaded 就收工：do_login 一返回，_ensure_one 會立刻再 goto 帳戶頁，
+    # 等這裡的 load（含圖片等資源）只是白等。
     try:
-        with page.expect_navigation(wait_until="load", timeout=LOGIN_NAV_TIMEOUT_MS):
+        with page.expect_navigation(wait_until="domcontentloaded", timeout=LOGIN_NAV_TIMEOUT_MS):
             page.locator("#Image22").click()
     except PlaywrightTimeoutError:
         print(f"[{tbb_id}] 送出後頁面沒有跳轉，請確認是否登入失敗。")
