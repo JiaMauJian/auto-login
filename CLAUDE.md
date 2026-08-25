@@ -25,8 +25,8 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
 
 | 檔案 | 職責 |
 | --- | --- |
-| `login.py` | 登入、開瀏覽器、cookie store（換人＝換 cookie，不是重登） |
-| `fetch.py` | 抓網頁資料（`collect()`），登入完立刻抓完那一組才換下一組 |
+| `login.py` | 登入、開瀏覽器 |
+| `fetch.py` | 抓網頁資料（`collect()`）、cookie store（換人＝換 cookie，不是重登），登入完立刻抓完那一組才換下一組 |
 | `recon.py` | AJAX 重放，只讀不寫，偵察新查詢用（`python recon.py 1`） |
 | `planner.py` | 網頁資料 × Excel 現值 × 紀錄檔 → 一張「變更提案」清單，純計算 |
 | `ledger.py` | 紀錄檔讀寫、現金基準、歷程追加 |
