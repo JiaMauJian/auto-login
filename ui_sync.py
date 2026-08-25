@@ -251,7 +251,8 @@ class UiSyncMixin:
         """
         items = self.proposals.get(name, [])
         flagged = bool(self.warnings.get(name)) or any(
-            self.trader_of.get(problem["order"]) == name for problem in self.problems)
+            self.trader_of.get(problem["order"]) == name for problem in self.problems) or (
+            name in self.cash_baseline_errors and self.cash_method.get() == planner.METHOD_OPENING)
 
         cash = next((item for item in items if item["kind"] == "cash"), None)
         if cash is None:
@@ -554,6 +555,12 @@ class UiSyncMixin:
             error_rows = [{"at": problem["at"], "label": "異常", "text": problem["text"]}
                          for problem in self.problems
                          if self.trader_of.get(problem["order"]) == name]
+            # B8 空白設不成今日初始餘額只在「初始餘額累加」算法底下要緊——銀行餘額
+            # 推算根本不讀 B8，這則提醒對那個算法只是噪音（2026/08/25 使用者要求）。
+            baseline_error = self.cash_baseline_errors.get(name)
+            if baseline_error and self.cash_method.get() == planner.METHOD_OPENING:
+                error_rows.append({"at": baseline_error["at"], "label": "異常",
+                                   "text": baseline_error["text"]})
             lines.extend(_format_today_events(_dedupe_cash_rows(rows) + warning_rows + error_rows))
 
         lines += [(warn, None) for warn in self.warnings.get(name, []) if warn.startswith("[現金] ")]
@@ -585,7 +592,7 @@ class UiSyncMixin:
         ready = self.excel_open and not self.busy
         self.login_button.configure(state="normal" if ready else "disabled")
         self.fetch_button.configure(state="normal" if ready else "disabled")
-        # 「全部登出並關閉瀏覽器」不跟 excel_open 掛勾 —— 它管的是瀏覽器 session，
+        # 「全部登出」不跟 excel_open 掛勾 —— 它管的是瀏覽器 session，
         # 跟有沒有選 Excel 檔無關；沒有瀏覽器可登出時按下去只會被 start_logout_all
         # 自己擋下來、在狀態列講一句，這裡不必先幫它擋。
         self.logout_button.configure(state="normal" if not self.busy else "disabled")

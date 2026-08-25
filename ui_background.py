@@ -246,7 +246,7 @@ class UiBackgroundMixin:
 
     def start_logout_all(self):
         """
-        「全部登出並關閉瀏覽器」：不管現在是誰的回合，把整個瀏覽器 session 收掉。
+        「全部登出」：不管現在是誰的回合，把整個瀏覽器 session 收掉。
 
         跟登入/讀取不一樣，這顆不靠 excel_open 擋——沒開 Excel 也可能已經開著
         瀏覽器登入著（例如剛按過「登入」還沒選檔案），一樣該登得出去、關得掉。
@@ -599,7 +599,15 @@ class UiBackgroundMixin:
             # 使用者有可能登入完就沒有再按讀取。
             book["account_code"] = record.get("account_code", "")
             at = self.round_at.get(name) or datetime.datetime.now().isoformat(timespec="seconds")
-            events.extend(planner.initialize(data, book, name, self.today, at))
+            new_events, blocked = planner.initialize(data, book, name, self.today, at)
+            events.extend(new_events)
+            # B8 是空的，今日初始現金餘額設不成：讀幾次都一樣，不會自動好，
+            # 掛一則 [異常] 讓人回頭去 Excel 補（見 ui_sync._fill_notes）。
+            # 讀到非空的 B8 就代表補好了，把上一輪掛著的提醒收掉。
+            if blocked:
+                self.cash_baseline_errors[name] = {"text": "EXCEL 現金餘額是空白，無法設定今日初始餘額", "at": at}
+            else:
+                self.cash_baseline_errors.pop(name, None)
 
         if not events:
             return 0

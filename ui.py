@@ -182,6 +182,10 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         self.proposals = {}      # 分頁名 -> 提案清單
         self.warnings = {}       # 分頁名 -> 提醒
         self.problems = []       # 這一輪畫在提醒框裡的失敗原因（由 problem_of 攤平而來）
+        # 分頁名 -> {"text", "at"}：這一位的 B8 是空的，今日初始現金餘額設不成
+        # （見 planner.initialize 的 blocked、ui_background._initialize）。跟
+        # problem_of 一樣留著不隨每輪重讀清空，直到這一位真的讀到非空的 B8 為止。
+        self.cash_baseline_errors = {}
         # 歷程檔整份讀進記憶體的結果，refresh_history() 每次 commit 完都會重填一次。
         # 這裡先給空清單：_build() 會在 refresh_history() 第一次被呼叫之前就先畫一次
         # 右邊的訊息框（見 ui_sync._fill_notes），沒有這行會在那一刻找不到這個屬性。

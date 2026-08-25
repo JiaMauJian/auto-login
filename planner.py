@@ -421,17 +421,25 @@ def initialize(sheet_data, book, sheet_name, today, at):
 
     跳過之後那一格不是就沒有出口了 —— 當天想改餘額由人明講，走 apply_cash_reset
     （介面上現金那一條底下的「今日初始現金餘額　[修改]」）。
+
+    回傳 (events, blocked)：B8 是空的沒辦法當起點時 events 是空清單、
+    blocked 是 True——基準設不成這件事不能悶著不講，靜靜回空清單的話，
+    畫面上只會看到「還沒有今日初始現金餘額，這組讀到網頁資料就會自動設定」
+    這句話一直掛著、卻永遠不會自動好（B8 不填，讀幾次都一樣），呼叫端要用
+    blocked 去掛一則 [異常] 提醒（見 ui_background._initialize）。
     """
     balance = sheet_data["balance"]
     cash = book["cash"]
-    if balance is None or cash.get("baseline_date") == today.isoformat():
-        return []
+    if cash.get("baseline_date") == today.isoformat():
+        return [], False
+    if balance is None:
+        return [], True
 
     row, col = CELL_BALANCE
     item = _row(row, col, "cash", "cash", "balance", "現金餘額", balance, None, None)
     was = cash.get("last_written")
     ledger.calibrate(cash, balance, today, 0.0, False, at)
-    return [_event(at, sheet_name, item, "adopt", was, balance, OPENING_NOTE)]
+    return [_event(at, sheet_name, item, "adopt", was, balance, OPENING_NOTE)], False
 
 
 def commit(proposals, book, sheet_name, today, at):
