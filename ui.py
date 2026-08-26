@@ -148,11 +148,12 @@ _on_tab_changed（切分頁時兩個分頁都要碰的膠水邏輯）。方法�
 import datetime
 import queue
 import tkinter as tk
+import traceback
 from tkinter import messagebox
 
 import excel_io
 import ledger as ledger_mod
-from login import load_accounts
+from login import load_accounts, log_crash
 from ui_background import UiBackgroundMixin
 from ui_cert import UiCertMixin
 from ui_history import UiHistoryMixin
@@ -295,6 +296,20 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
 
 def main():
     root = tk.Tk()
+
+    def on_callback_error(exc, val, tb):
+        """
+        Tkinter 預設把按鈕/事件callback 裡沒接住的例外 print 到 stderr —— exe 是
+        --windowed 打包沒有主控台，等於整個吃掉，畫面上只看得到「按下去沒反應」。
+        跟 login.log_crash 共用同一份 crash.log，事後請使用者把檔案內容貼出來就好。
+        """
+        detail = "".join(traceback.format_exception(exc, val, tb))
+        log_crash(detail)
+        messagebox.showerror("發生未預期的錯誤",
+                             f"{val}\n\n詳細內容已經寫進 crash.log。", parent=root)
+
+    root.report_callback_exception = on_callback_error
+
     app = SyncApp(root)
 
     def on_close():

@@ -109,6 +109,53 @@ def _verdict(expect_code, got_codes, no_data_hint):
     return f"錯！資料屬於 {'、'.join(sorted(got_codes))}，不是自己的（{expect_code}）"
 
 
+def _measure_ok(expect_code, got_codes):
+    """跟 _verdict 同一個比對，只回 True/False/None（沒攔到資料，測不出來）。給結論彙整用。"""
+    if not got_codes:
+        return None
+    return got_codes == {expect_code}
+
+
+def _conclude(results, last_order):
+    """
+    把每個分頁的兩種測法結果，收成一句人看得懂的結論。
+
+    只看「被晾著、cookie 已經不是自己的」那幾個分頁（排除最後登入那組——它的
+    cookie 本來就是自己的，兩種測法一定都對，不能拿來當證據）。
+    """
+    displaced = [r for r in results if r["expect_code"] and r["order"] != last_order]
+    if not displaced:
+        return "帳號數不足（至少要兩組真帳號、且都成功登入），測不出結論。"
+
+    v1 = [r["measure1_ok"] for r in displaced if r["measure1_ok"] is not None]
+    v2 = [r["measure2_ok"] for r in displaced if r["measure2_ok"] is not None]
+
+    if not v1 and not v2:
+        return ("兩種測法這次都沒能攔到查詢結果（可能剛好都沒有庫存資料可以核對身分），"
+                "測不出結論，建議再跑一次，或看報告細節。")
+
+    if not v1:
+        return ("測法一（分頁自己重新整理）這次沒攔到任何查詢結果，測不出它靠不靠 cookie，"
+                "看報告細節自己判斷。")
+
+    if all(v1) and v2 and not all(v2):
+        return ("證實了你的觀察：分頁自己重新整理查得到自己的資料（不靠 cookie），"
+                "但現在 fetch.py 的做法（背景直接呼叫 API，只看瀏覽器目前的 cookie）會查到別人的資料。"
+                "值得深入研究怎麼讓 fetch.py 也用上這個機制，有機會不必換 cookie、甚至平行處理。")
+
+    if not all(v1):
+        return ("沒有證實你的觀察：分頁自己重新整理，也查得到別人的資料，不是每次回頭點都對。"
+                "你之前手動開分頁的經驗，可能剛好都是登入完立刻看（或剛好點到最後登入那組）。"
+                "目前 fetch.py「換 cookie」的架構還不能拿掉，細節看報告。")
+
+    if v2 and all(v2):
+        return ("這一次兩種測法都對，沒有重現出「認錯人」的現象——跟 fetch.py 之前踩過的 bug"
+                "（20 組帳號抓錯資料）矛盾，建議多跑幾次、或確認這次真的沒有中途被重新登入，"
+                "不能當作定論。")
+
+    return "測法一、測法二的結果不完全一致，看報告細節自己判斷。"
+
+
 def _login_all(context, accounts):
     """
     依序登入每一組帳號，過程中刻意不做任何 cookie 互換——這才是在模擬使用者
@@ -122,7 +169,10 @@ def _login_all(context, accounts):
     spare = context.pages[0] if context.pages else None
 
     for order, account in enumerate(accounts, start=1):
-        print(f"[{order}/{len(accounts)}] 登入 {account['id']}…")
+        # 不印身分證字號（即 account["id"]，見 login.do_login）——這支腳本承諾過
+        # 不碰它，跟 recon.py／check_cookie_swap.py 同一個規矩：只講「第幾組」，
+        # 真正的身分要登入完、從 sessionStorage 拿到帳號代碼才報。
+        print(f"[{order}/{len(accounts)}] 登入第 {order} 組…")
         page = do_login(context, account["id"], account["password"], spare)
         spare = None
 
@@ -139,7 +189,6 @@ def _login_all(context, accounts):
 
         tabs.append({
             "order": order,
-            "id": account["id"],
             "page": page,
             "expect_code": expect_code,
             "url_after_login": url_after_login,
@@ -153,14 +202,23 @@ def _login_all(context, accounts):
 
 def _test_tab(tab):
     """
-    對一個分頁跑兩種測法，回傳這一組的報告文字（list of str）。
+    對一個分頁跑兩種測法，回傳 (報告文字 list of str, 結構化結果 dict)。
+
+    結構化結果給 _conclude 彙整結論用：
+        {"order", "expect_code", "measure1_ok", "measure2_ok"}
+    measure*_ok 是 True/False/None（None＝沒攔到資料，測不出來）。
 
     這時候瀏覽器目前帶著的 cookie 一定不是這個分頁自己的了（除非它剛好是
     最後登入那組）——兩種測法都是在問同一件事：不靠換 cookie，這個分頁
     能不能查回自己的資料。
+
+    報告跟 result 都不放身分證字號（tab 裡本來就沒存，見 _login_all）——
+    只用帳號代碼（1112-0108640 這種），跟 recon.py／check_cookie_swap.py 同一個規矩。
     """
     page, expect_code = tab["page"], tab["expect_code"]
-    lines = [f"--- 第 {tab['order']} 組（{tab['id']}，帳號代碼 {expect_code or '（沒有）'}）---"]
+    lines = [f"--- 第 {tab['order']} 組（帳號代碼 {expect_code or '（沒有）'}）---"]
+    result = {"order": tab["order"], "expect_code": expect_code,
+              "measure1_ok": None, "measure2_ok": None}
 
     token_len = _token_len(tab["url_after_login"])
     lines.append(
@@ -170,11 +228,11 @@ def _test_tab(tab):
 
     if not expect_code:
         lines.append("這一組當初就沒有登入成功，兩種測法都跳過。")
-        return lines
+        return lines, result
 
     if page.is_closed():
         lines.append("分頁已經被關掉了，兩種測法都跳過。")
-        return lines
+        return lines, result
 
     # 測法一：分頁自己重新整理，看網站自己內部查詢回來的是誰的。
     bodies = []
@@ -197,6 +255,7 @@ def _test_tab(tab):
     else:
         page.remove_listener("response", on_response)
         codes1 = _collect_codes_from_bodies(bodies)
+        result["measure1_ok"] = _measure_ok(expect_code, codes1)
         lines.append(
             "測法一（分頁自己重新整理，模擬回頭點連結）："
             + _verdict(expect_code, codes1, "這次沒攔到網站自己打的查詢，或剛好沒有庫存資料可以核對身分")
@@ -212,20 +271,97 @@ def _test_tab(tab):
         lines.append(f"測法二（現在的抓資料方式，直接呼叫 API）：查詢失敗，跳過（{str(raw)[:150]}）")
     else:
         codes2 = account_codes(data)
+        result["measure2_ok"] = _measure_ok(expect_code, codes2)
         lines.append(
             "測法二（現在的抓資料方式，直接呼叫 API）："
             + _verdict(expect_code, codes2, "這次剛好沒有庫存資料可以核對身分")
         )
 
-    return lines
+    return lines, result
+
+
+def _collect(context, accounts):
+    """
+    核心流程：登入全部帳號（不換 cookie）、反過來逐一測試。回傳 (報告文字 list, 結構化結果 list)。
+
+    CLI（main）跟圖形介面（run_headless）共用這一段，差別只在誰負責開/關瀏覽器、
+    測完要不要留著給人繼續點。
+    """
+    report = []
+    results = []
+    tabs = _login_all(context, accounts)
+
+    report.append("全部登入完成。瀏覽器目前帶著的 cookie 只會是最後一組的；")
+    report.append("接下來反過來測，從最先登入、被晾最久的那一組開始看。")
+    report.append("")
+
+    for tab in reversed(tabs):
+        lines, result = _test_tab(tab)
+        report.extend(lines)
+        report.append("")
+        results.append(result)
+
+    return report, results
+
+
+def run_headless(accounts):
+    """
+    給圖形介面用：跑完整套偵察，回傳 (report_path, conclusion)。
+
+    呼叫者要自己丟到背景執行緒跑（會真的開瀏覽器、依序登入，慢）。跟 main() 不同，
+    這裡測完就把瀏覽器關掉，不留著等人手動操作——GUI 沒有終端機讓人看著它，
+    留著也沒人知道要去點。
+    """
+    out_dir = app_dir() / OUTPUT_DIR_NAME
+    out_dir.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+    configure_browsers_path()
+
+    report = [
+        f"偵察時間: {datetime.now():%Y/%m/%d %H:%M:%S}",
+        f"本次測試組數: {len(accounts)}",
+        "目的：確認『不靠換 cookie，分頁能不能各自查回自己的資料』，見檔案最上面的說明。",
+        "",
+    ]
+    results = []
+
+    with sync_playwright() as p:
+        context, browser = open_context(p)
+        try:
+            body, results = _collect(context, accounts)
+            report.extend(body)
+        except PlaywrightTimeoutError:
+            report.append("登入逾時，找不到欄位，網站版面可能已變更。")
+        except PlaywrightError as exc:
+            report.append(f"瀏覽器操作失敗：{exc}")
+        finally:
+            try:
+                context.close()
+                if browser is not None:
+                    browser.close()
+            except PlaywrightError:
+                pass
+
+    conclusion = _conclude(results, len(accounts))
+    report.append("=" * 70)
+    report.append("結論：")
+    report.append(conclusion)
+
+    report_path = out_dir / f"{stamp}_session偵察.txt"
+    report_path.write_text("\n".join(report), encoding="utf-8")
+    return report_path, conclusion
 
 
 def main():
     accounts = [a for a in load_accounts() if not a.get("fake")]
-    if len(accounts) < 2:
-        print(f"至少要兩組真帳號才測得出東西。請確認 {app_dir()} 的 .env 裡有 "
-              f"TBB_ID_1/TBB_PASSWORD_1、TBB_ID_2/TBB_PASSWORD_2...")
+    if len(accounts) < 1:
+        print(f"至少要一組真帳號才跑得起來。請確認 {app_dir()} 的 .env 裡有 "
+              f"TBB_ID_1/TBB_PASSWORD_1...")
         sys.exit(1)
+    if len(accounts) < 2:
+        print("!! 目前只有一組真帳號，這次只是跑一遍流程確認腳本本身沒問題，"
+              "測不出『分頁會不會認錯人』——那個結論至少要兩組帳號才有意義。")
 
     out_dir = app_dir() / OUTPUT_DIR_NAME
     out_dir.mkdir(exist_ok=True)
@@ -240,25 +376,21 @@ def main():
         "",
     ]
 
+    results = []
     with sync_playwright() as p:
         context, browser = open_context(p)
 
         try:
-            tabs = _login_all(context, accounts)
-
-            report.append("全部登入完成。瀏覽器目前帶著的 cookie 只會是最後一組的；")
-            report.append("接下來反過來測，從最先登入、被晾最久的那一組開始看。")
-            report.append("")
-
-            # 反著測回去：先測「最先登入、被晾最久」的那幾組，最能看出問題。
-            for tab in reversed(tabs):
-                report.extend(_test_tab(tab))
-                report.append("")
-
+            body, results = _collect(context, accounts)
+            report.extend(body)
         except PlaywrightTimeoutError:
             report.append("登入逾時，找不到欄位，網站版面可能已變更。")
         except PlaywrightError as exc:
             report.append(f"瀏覽器操作失敗：{exc}")
+
+        report.append("=" * 70)
+        report.append("結論：")
+        report.append(_conclude(results, len(accounts)))
 
         report_path = out_dir / f"{stamp}_session偵察.txt"
         report_path.write_text("\n".join(report), encoding="utf-8")
