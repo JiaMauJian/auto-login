@@ -230,8 +230,10 @@ class UiBackgroundMixin:
         # 這一輪要做的是誰，按下去的當下就記起來：等結果回來的這幾十秒裡，
         # 使用者隨時可能在左邊名單上點別人（範圍會跟著換），報告卻是在講剛才那一輪。
         # 先問今天用哪一種算法（每天第一次），因為它決定這一輪要不要多查銀行餘額。
+        # 使用者取消就整個收手——不登入、不讀取、不進 busy 狀態，維持按下去之前的樣子。
         self.today = datetime.date.today()
-        self._maybe_ask_cash_method()
+        if not self._maybe_ask_cash_method():
+            return
 
         who = self.round_target = self._scope_name()
         self._ensure_browser_thread()
@@ -1206,7 +1208,9 @@ class UiBackgroundMixin:
 
     def _maybe_ask_cash_method(self):
         """
-        這次程式開起來、第一次按「讀取全部帳戶」時，先問今天要用哪一種算法。
+        這次程式開起來、第一次按「讀取全部帳戶」（含第一次按的「登入+讀取」）時，
+        先問今天要用哪一種算法。回傳 True 才可以繼續讀取，False 表示使用者取消，
+        呼叫端（start_fetch）要整個收手，不能當作已經問過。
 
         問在抓資料之前：算法決定要不要去查銀行餘額那兩支，選在後面就得再讀一次。
         它也不需要任何資料才問得出口 —— 判斷依據是「今天有沒有買全額交割股」，
@@ -1216,11 +1220,18 @@ class UiBackgroundMixin:
         一次（變成一個要人閉著眼睛按掉的東西），但關掉程式重開就當作沒問過 ——
         使用者可能在中間發現今天有全額交割、想換答案。
 
-        這個視窗沒有「取消」（2026/08/22 使用者要求，見 ask_cash_method），
-        一定會拿到使用者自己選的答案，不必再處理「沒選就關掉」那條路。
+        2026/08/26 之前這個視窗沒有取消：X 跟 Escape 都關不掉。改回可以取消是因為
+        使用者只是想按「登入」，卻按到第一次讀取前才會出現、標籤是「登入+讀取」的
+        同一顆鈕（見 ui_layout 那顆鈕的 labeling），這個視窗跳出來又走不掉，只能
+        把整支程式關掉重開。取消不會套用任何算法（answer 是 None），也不記進
+        cash_method_asked——下次不管是按「登入+讀取」還是「讀取全部帳戶」都會
+        重新問一次，不會卡在「問過但沒答案」的中間狀態。
         """
         if self.ledger is None or self.path in self.cash_method_asked:
-            return
+            return True
 
         picked = ask_cash_method(self.root, self.family, self.cash_method.get())
+        if picked is None:
+            return False
         self._set_method(picked, asked=True)
+        return True

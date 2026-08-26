@@ -320,13 +320,18 @@ def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否"
 
 def ask_cash_method(parent, family, current):
     """
-    今天的現金餘額要用哪一種算法。回傳選定的算法，一定是使用者自己按「確定」
-    選出來的那一個。
+    今天的現金餘額要用哪一種算法。回傳選定的算法；取消（按「取消」、X 或 Escape）
+    回傳 None，呼叫端要當成「這次不讀取了」處理，不能套用任何一種算法。
 
-    沒有「取消」，X 跟 Escape 也都關不掉（2026/08/22 使用者要求）——這裡不是
-    「要不要做」的確認，是「兩個都得選一個」，沒有「先不選、之後再說」的空間；
-    使用者沒意識到自己選了哪個就把視窗關掉，程式卻默默套用了某一種算法，
-    是比多問一次更危險的事。要離開只有一條路：看清楚選的是哪一個，按「確定」。
+    2026/08/22 到 2026/08/26 之間這裡是沒有取消的：X 跟 Escape 都關不掉，理由是
+    「兩個都得選一個，沒有先不選、之後再說的空間」。2026/08/26 使用者不小心把
+    「登入」按成第一次讀取前才會出現的「登入+讀取」（見 ui_background 那顆按鈕的
+    labeling），這個視窗跳出來又走不掉，最後只能把整支程式關掉重開。問題不在
+    「選錯了會不會被吃掉」——會走到這裡一定是還沒選過，answer 是 None 就什麼都
+    不會套用——而是「跳出來的時機不是使用者要的」時，原本設計完全沒給退路。
+    所以恢復取消：取消不會偷偷套用任何算法，只是讓呼叫端把這次的「讀取」整個
+    收回去（見 ui_background._maybe_ask_cash_method），不影響「選好了會不會被
+    誤蓋掉」這件事。
 
     只問，不算給你看。曾經在這裡列出「哪幾位的兩種算法對不上、差多少」，後來拿掉了：
     算法是全部人共用的一個開關，逐人列出來看起來像可以一位一位挑；而且差額講不出
@@ -374,16 +379,18 @@ def ask_cash_method(parent, family, current):
         answer["method"] = choice.get()
         win.destroy()
 
-    # 沒有「取消」——兩個選項都選好了（預設就是比較安全的那一種），這裡不存在
-    # 「不想選」的狀態，只有「選哪一個」，不必給一顆多餘的按鈕。
+    def cancel(*_args):
+        win.destroy()
+
     buttons = ttk.Frame(outer)
     buttons.grid(row=6, column=0, sticky="e", pady=(12, 0))
+    ttk.Button(buttons, text="取消", command=cancel,
+              bootstyle="secondary").pack(side="left", padx=(0, 8))
     ttk.Button(buttons, text="確定", command=confirm,
               bootstyle="primary").pack(side="left")
 
-    # X 跟 Escape 都不關窗（見上面 docstring）——WM_DELETE_WINDOW 換成 no-op，
-    # 沒有 bind Escape 就等於什麼都不做（ttk 元件預設不吃這個鍵）。
-    win.protocol("WM_DELETE_WINDOW", lambda: None)
+    win.protocol("WM_DELETE_WINDOW", cancel)
+    win.bind("<Escape>", cancel)
     win.bind("<Return>", confirm)
     center_on(win, parent)
     win.grab_set()
