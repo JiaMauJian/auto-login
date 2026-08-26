@@ -18,19 +18,26 @@ fetch.py 的抓資料邏輯假設「整個瀏覽器只有一組 cookie，換帳�
 --------------
 依序登入好幾組帳號（每組一個新分頁，過程中刻意不做任何 cookie 互換——這才是
 在模擬使用者手動開分頁的情境）。全部登入完、瀏覽器目前帶著的 cookie 只剩
-「最後登入那組」的之後，回頭測每一個分頁，兩種測法並列比較：
+「最後登入那組」的之後，回頭測每一個分頁，三種測法並列比較：
 
     測法一：分頁自己重新整理（模擬「回頭點分頁裡的連結」），看網站自己內部
             查詢回來的資料屬於誰。
     測法二：套用 fetch.py 現在的做法，直接對這個分頁背景呼叫查詢 API，
-            看回來的資料屬於誰。
+            看回來的資料屬於誰。一組一組依序做，跟現在 fetch.py 的順序一樣。
+    測法三：（2026/08/26 新增）不是一組一組依序做，是用 Promise.all 真的同時
+            對每一組帳號各發一次背景查詢 API，看會不會彼此撞在一起。測法二
+            就算每次都對，也只證明「事後依序查不會錯」，沒證明「好幾組同時
+            查也不會錯」——而「同時查」才是真正評估「抓資料改平行處理」
+            划不划算時，實際會發生的情境。
 
 如果測法一每次都對、測法二會錯，就證實了使用者的觀察：網站有辦法讓分頁
 「認出自己」，只是現在抓資料的方式沒吃到那個機制，值得再深入查怎麼讓
 fetch.py 也用上（有機會整套拿掉「換 cookie」這個步驟，抓資料也許能一次
 對好幾組平行處理，而不是被迫一組一組來）。如果兩種測法都錯，代表使用者
 之前的操作方式可能其實是「登入完立刻看」（每次點的都剛好是最後一組），
-而不是真的任意回頭點都對。
+而不是真的任意回頭點都對。測法三則是額外拿來單獨回答「平行處理到底安不
+安全」這個問題：就算測法一、二都對，只要測法三出現撞資料，代表現在的
+換 cookie 依序做法還不能拿掉。
 
 安全性
 ------
@@ -50,6 +57,8 @@ session。網址裡如果偵測到類似 session 識別碼的片段，只記錄�
 結果愈可信——這支只是多開幾個分頁，不會動到任何一組帳號本身的資料。
 """
 
+import contextlib
+import io
 import json
 import re
 import sys
@@ -80,6 +89,32 @@ SESSION_TOKEN_RE = re.compile(r"jsessionid=([^&;?/#]+)", re.IGNORECASE)
 # 重新整理之後，給網站自己內部的查詢一點時間跑完，再去看攔到了什麼回應。
 # 不用固定等更久：等不到就是等不到，報告裡會老實寫「沒攔到」。
 SETTLE_AFTER_RELOAD_MS = 2000
+
+# 測法三用：跟 recon.FETCH_JS 幾乎一樣，差別是這裡一次接收好幾組帳號的查詢參數，
+# 用 Promise.all 一次送出去——這才是「真的同時」，不是 Python 這邊一個一個呼叫
+# page.evaluate（那樣還是被 Python 排隊，測不出瀏覽器真的同時發送會不會撞在一起）。
+CONCURRENT_FETCH_JS = """
+async ({ requests }) => {
+    if (typeof B64_XOR_Encode !== 'function' || typeof XOR_KEY === 'undefined') {
+        return requests.map(() => ({
+            error: '這個頁面找不到 B64_XOR_Encode / XOR_KEY，common.js 可能沒載入'
+        }));
+    }
+    const one = async ({ cmd, paramInfo }) => {
+        const body = new URLSearchParams();
+        body.set('CMD', cmd);
+        body.set('Param', B64_XOR_Encode(JSON.stringify(paramInfo), XOR_KEY));
+        const resp = await fetch('/tbb/MainController?timestamp=' + Date.now(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            body: body.toString(),
+            credentials: 'same-origin',
+        });
+        return { status: resp.status, text: await resp.text() };
+    };
+    return Promise.all(requests.map(one));
+}
+"""
 
 
 def _token_len(url):
@@ -156,6 +191,99 @@ def _conclude(results, last_order):
     return "測法一、測法二的結果不完全一致，看報告細節自己判斷。"
 
 
+def _test_concurrent(tabs):
+    """
+    測法三：不像測法一/二一組一組來，這裡用 Promise.all 真的同時對每一組帳號各發
+    一次背景查詢 API，看會不會彼此撞在一起。
+
+    不管由哪個分頁發起都一樣——cookie 是整個 context 共用的，這個網站分辨「查誰的
+    資料」本來就不是靠「哪個分頁按下去」，是靠送出去的 branchId/custId 參數（跟
+    fetch.py 現在的做法相同）。挑最後登入那組的分頁來發起，只是因為它一定還活著、
+    還在帳戶頁上，不是因為發起的分頁有特殊地位。
+
+    刻意不用 Python 這邊開執行緒/多個 page.evaluate 來模擬「同時」：Playwright 的
+    同步 API 不能跨執行緒共用，硬做反而會出錯或變相排隊，測不出真正的同時。用
+    瀏覽器自己的 Promise.all 在單一個 evaluate 呼叫裡一次送出去，才是「同時」
+    這件事該有的樣子。
+
+    回傳 (報告文字 list, {order: True/False/None})。
+    """
+    live = [t for t in tabs if t["expect_code"] and not t["page"].is_closed()]
+    lines = ["--- 測法三：所有分頁同時（真的並行）呼叫背景 API ---"]
+
+    if len(live) < 2:
+        lines.append("帳號數不足（至少要兩組登入成功的帳號），跳過。")
+        return lines, {}
+
+    requests_payload = [
+        {
+            "cmd": "queryInstantAccount_new",
+            "paramInfo": {
+                "branchId": "1" + tab["expect_code"][1:].split("-", 1)[0],
+                "custId": tab["expect_code"][1:].split("-", 1)[1],
+                "range": "stksum,stkdat", "stock_no": "",
+            },
+        }
+        for tab in live
+    ]
+
+    runner = live[-1]["page"]
+    try:
+        responses = runner.evaluate(CONCURRENT_FETCH_JS, {"requests": requests_payload})
+    except (PlaywrightError, PlaywrightTimeoutError) as exc:
+        lines.append(f"同時呼叫失敗，整批跳過（{exc}）")
+        return lines, {}
+
+    verdicts = {}
+    for tab, resp in zip(live, responses):
+        expect_code = tab["expect_code"]
+        if isinstance(resp, dict) and resp.get("error"):
+            lines.append(f"第 {tab['order']} 組（{expect_code}）：{resp['error']}")
+            verdicts[tab["order"]] = None
+            continue
+
+        raw = resp.get("text", "") if isinstance(resp, dict) else ""
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            lines.append(f"第 {tab['order']} 組（{expect_code}）：查詢失敗或回應不是 JSON")
+            verdicts[tab["order"]] = None
+            continue
+
+        codes = account_codes(data)
+        verdicts[tab["order"]] = _measure_ok(expect_code, codes)
+        lines.append(
+            f"第 {tab['order']} 組（{expect_code}）："
+            + _verdict(expect_code, codes, "這次剛好沒有庫存資料可以核對身分")
+        )
+
+    return lines, verdicts
+
+
+def _conclude_concurrent(results):
+    """
+    測法三專用的結論，跟 _conclude 分開講——問的是不同的問題。_conclude 關心的是
+    「登入能不能同時做」跟「事後依序查會不會錯」；這裡關心的是「好幾組帳號同時
+    呼叫背景 API，會不會彼此撞在一起」，這才是評估「抓資料改平行處理」划不划算
+    真正該看的證據。
+
+    這裡不排除最後登入那組：三個請求是同時發出去的，彼此互為對照，沒有哪一組是
+    「自己 cookie 本來就對」的安全牌可以躺著過。
+    """
+    checked = [r["measure3_ok"] for r in results if r.get("measure3_ok") is not None]
+    if not checked:
+        return "測法三這次沒攔到任何一組的查詢結果，測不出結論。"
+
+    if all(checked):
+        return ("測法三：同時平行呼叫，每一組都拿到自己的資料，沒有彼此撞在一起——"
+                "這是「拿掉換 cookie、抓資料改平行處理」這條路最直接的正面證據，值得認真評估。")
+
+    wrong = sum(1 for ok in checked if not ok)
+    return (f"測法三：{wrong}/{len(checked)} 組同時查詢時串到別人的資料——"
+            "真的同時呼叫背景 API 會撞在一起，現在「換 cookie、依序做」的架構還不能拿掉，"
+            "除非先查清楚是什麼原因撞車、能不能避開。")
+
+
 def _login_all(context, accounts):
     """
     依序登入每一組帳號，過程中刻意不做任何 cookie 互換——這才是在模擬使用者
@@ -164,6 +292,12 @@ def _login_all(context, accounts):
     全部登入完之後，瀏覽器帶著的 cookie 只會是最後一組的，前面每一組的分頁
     都是「被晾在那裡、cookie 已經不是自己的」狀態——這正是測法一、測法二
     要拿來測試的處境。
+
+    順便記錄每一組登入時，login.do_login 有沒有觸發它自己那條「登入頁沒有出現
+    登入表單，清掉 cookie 再試一次」的備援路（見 login.py:316-323）。那段程式碼
+    背後的假設是「換人登入、瀏覽器帶著上一組的 cookie，表單就會被卡住」——這個
+    假設本身其實沒被真的驗證過，值得跟「回頭點分頁還是認得出自己」那個謎一樣，
+    用實際跑出來的行為對照一次，而不是照單全收程式註解說的話。
     """
     tabs = []
     spare = context.pages[0] if context.pages else None
@@ -173,7 +307,14 @@ def _login_all(context, accounts):
         # 不碰它，跟 recon.py／check_cookie_swap.py 同一個規矩：只講「第幾組」，
         # 真正的身分要登入完、從 sessionStorage 拿到帳號代碼才報。
         print(f"[{order}/{len(accounts)}] 登入第 {order} 組…")
-        page = do_login(context, account["id"], account["password"], spare)
+
+        # do_login 內部會印身分證字號跟明文驗證碼（給終端機用的除錯訊息，不是這支
+        # 腳本印的）。這裡整段攔下來，只從裡面找「有沒有觸發清 cookie 備援路」這
+        # 一個是非值，攔到的原始文字用完即丟，絕對不會流進報告或存檔。
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            page = do_login(context, account["id"], account["password"], spare)
+        needed_cookie_clear = "登入頁沒有出現登入表單" in buffer.getvalue()
         spare = None
 
         page.goto(ACCOUNT_PAGE, wait_until="domcontentloaded")
@@ -192,6 +333,7 @@ def _login_all(context, accounts):
             "page": page,
             "expect_code": expect_code,
             "url_after_login": url_after_login,
+            "needed_cookie_clear": needed_cookie_clear,
         })
 
         if not expect_code:
@@ -205,8 +347,10 @@ def _test_tab(tab):
     對一個分頁跑兩種測法，回傳 (報告文字 list of str, 結構化結果 dict)。
 
     結構化結果給 _conclude 彙整結論用：
-        {"order", "expect_code", "measure1_ok", "measure2_ok"}
+        {"order", "expect_code", "measure1_ok", "measure2_ok", "measure3_ok"}
     measure*_ok 是 True/False/None（None＝沒攔到資料，測不出來）。
+    measure3_ok 這裡先填 None，等 _collect 跑完 _test_concurrent 之後才補上——
+    測法三是所有分頁一次做，不是這支逐一測分頁的函式管得到的範圍。
 
     這時候瀏覽器目前帶著的 cookie 一定不是這個分頁自己的了（除非它剛好是
     最後登入那組）——兩種測法都是在問同一件事：不靠換 cookie，這個分頁
@@ -218,7 +362,7 @@ def _test_tab(tab):
     page, expect_code = tab["page"], tab["expect_code"]
     lines = [f"--- 第 {tab['order']} 組（帳號代碼 {expect_code or '（沒有）'}）---"]
     result = {"order": tab["order"], "expect_code": expect_code,
-              "measure1_ok": None, "measure2_ok": None}
+              "measure1_ok": None, "measure2_ok": None, "measure3_ok": None}
 
     token_len = _token_len(tab["url_after_login"])
     lines.append(
@@ -295,11 +439,38 @@ def _collect(context, accounts):
     report.append("接下來反過來測，從最先登入、被晾最久的那一組開始看。")
     report.append("")
 
+    # login.py 那條「換人登入表單被卡住、要清 cookie 才給」的備援路，
+    # 這次跑下來到底有沒有真的被觸發——見 _login_all 的說明。
+    triggered = [t["order"] for t in tabs if t.get("needed_cookie_clear")]
+    if triggered:
+        report.append(
+            f"!! 第 {'、'.join(str(o) for o in triggered)} 組登入時，瀏覽器帶著別組的 cookie 導致"
+            "登入頁一開始沒有畫出表單，程式自動清掉 cookie 才成功——這證實了 login.py 那個假設，"
+            "換分頁登入下一組確實會被前一組的 cookie 卡住。"
+        )
+    else:
+        report.append(
+            "這次每一組登入時，登入表單都是一開始就直接出現，沒有一組觸發「清 cookie 才給表單」"
+            "那條備援路——這跟 login.py 原本那個「換人登入一定會被上一組 cookie 卡住」的假設不符，"
+            "值得懷疑那個假設是不是不成立（或只在特定情況才會發生），如果真的不會卡，"
+            "「在同一個瀏覽器 profile 裡做到真平行登入」可能比之前想的更有機會，"
+            "但這裡只驗證了「表單看不看得到」，登入送出後同一份 cookie 還是會被下一組頂掉，"
+            "細節仍要另外查。"
+        )
+    report.append("")
+
     for tab in reversed(tabs):
         lines, result = _test_tab(tab)
         report.extend(lines)
         report.append("")
         results.append(result)
+
+    concurrent_lines, concurrent_verdicts = _test_concurrent(tabs)
+    report.extend(concurrent_lines)
+    report.append("")
+    for result in results:
+        if result["order"] in concurrent_verdicts:
+            result["measure3_ok"] = concurrent_verdicts[result["order"]]
 
     return report, results
 
@@ -344,13 +515,16 @@ def run_headless(accounts):
                 pass
 
     conclusion = _conclude(results, len(accounts))
+    concurrent_conclusion = _conclude_concurrent(results)
     report.append("=" * 70)
     report.append("結論：")
     report.append(conclusion)
+    report.append("")
+    report.append(concurrent_conclusion)
 
     report_path = out_dir / f"{stamp}_session偵察.txt"
     report_path.write_text("\n".join(report), encoding="utf-8")
-    return report_path, conclusion
+    return report_path, f"{conclusion}\n\n{concurrent_conclusion}"
 
 
 def main():
@@ -391,6 +565,8 @@ def main():
         report.append("=" * 70)
         report.append("結論：")
         report.append(_conclude(results, len(accounts)))
+        report.append("")
+        report.append(_conclude_concurrent(results))
 
         report_path = out_dir / f"{stamp}_session偵察.txt"
         report_path.write_text("\n".join(report), encoding="utf-8")

@@ -548,8 +548,10 @@ class UiLayoutMixin:
         self.session_test_button.grid(row=0, column=0, sticky="w")
 
         ttk.Label(box, text="會另外開一個瀏覽器，依序登入全部真帳號（不做任何 cookie 互換），"
-                            "測完自動關閉，結論用彈出視窗告訴你。至少要兩組真帳號才測得出東西，"
-                            "跑之前請先按「同步」分頁的「全部登出」把原本那個瀏覽器關掉。",
+                            "測完自動關閉，結論用彈出視窗告訴你。除了分頁自己重新整理、依序背景呼叫 "
+                            "API 這兩種測法，還會加測「所有分頁同時平行呼叫背景 API」會不會撞在一起。"
+                            "至少要兩組真帳號才測得出東西，跑之前請先按「同步」分頁的「全部登出」"
+                            "把原本那個瀏覽器關掉。",
                   style="Hint.TLabel", wraplength=wide(760)).grid(
             row=1, column=0, sticky="w", pady=(4, 0))
 
