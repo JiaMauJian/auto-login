@@ -18,7 +18,6 @@ import excel_io
 import ledger as ledger_mod
 import planner
 import fetch as fetch_mod
-import recon_session
 from fetch import collect, login_only
 from login import app_dir, configure_browsers_path, open_context
 from ui_common import ask_cash_method, ask_confirm
@@ -273,50 +272,6 @@ class UiBackgroundMixin:
         self.browser_waiting += 1
         self.browser_cmd_queue.put(("logout", None))
 
-    def start_session_test(self):
-        """
-        「測試：分頁到底靠不靠 cookie 認人」（見 recon_session.py 開頭的說明）。
-
-        這支測試要另外開一個獨立瀏覽器，依序登入每一組真帳號、刻意不做任何
-        cookie 互換——這跟 _browser_worker 養著的那個瀏覽器是兩回事，不能同時
-        開：USER_DATA_DIR 那個資料夾同一時間只能被一個 Chrome 用。所以擋在
-        browser_thread 還活著的時候，請使用者自己先按「全部登出」關掉它。
-
-        跟登入/讀取不一樣，這裡不看 excel_open——這支測試完全不碰 Excel。
-        """
-        if self.busy:
-            return
-        if self.browser_thread is not None and self.browser_thread.is_alive():
-            messagebox.showwarning(
-                "先關掉現有的瀏覽器",
-                "這個測試要另外開一個獨立的瀏覽器登入好幾組帳號，不能跟「登入」/「讀取」"
-                "用的那個瀏覽器同時開著（同一個 Profile 資料夾不能被兩個 Chrome 同時用）。\n\n"
-                "請先到「同步」分頁按「全部登出」關掉目前的瀏覽器，再試一次。", parent=self.root)
-            return
-
-        accounts = [a for a in self.accounts if not a.get("fake")]
-        if not accounts:
-            messagebox.showerror("沒有真帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。",
-                                 parent=self.root)
-            return
-        if len(accounts) < 2 and not ask_confirm(
-                self.root, "只有一組真帳號",
-                "這個測試至少要兩組真帳號才測得出「分頁認不認得出自己」的結論——"
-                "只有一組的話，跑了也只能確認測試本身沒有壞掉。\n\n"
-                "現在只有一組，仍要繼續嗎？", confirm_style="primary"):
-            return
-
-        self._set_busy(True, "偵察分頁認人機制中，會另外開一個瀏覽器依序登入，請不要關掉它…")
-        threading.Thread(target=self._session_test_worker, args=(accounts,), daemon=True).start()
-
-    def _session_test_worker(self, accounts):
-        try:
-            report_path, conclusion = recon_session.run_headless(accounts)
-            payload = {"report_path": report_path, "conclusion": conclusion}
-        except Exception:
-            payload = {"error": traceback.format_exc()}
-        self.queue.put(("session_test", payload))
-
     def _browser_worker(self):
         """
         背景：整個瀏覽器 session 的生命週期都在這個執行緒裡，一直活到使用者自己把
@@ -515,8 +470,7 @@ class UiBackgroundMixin:
         那一筆報成失敗，讓迴圈活下去。
         """
         handlers = {"logged_in": self._on_logged_in, "fetched": self._on_fetched,
-                    "written": self._on_written, "logged_out": self._on_logged_out,
-                    "session_test": self._on_session_test}
+                    "written": self._on_written, "logged_out": self._on_logged_out}
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
@@ -868,20 +822,6 @@ class UiBackgroundMixin:
 
         self._say("已全部登出並關閉瀏覽器。下次按「登入」或「讀取」會重新開一個瀏覽器。")
 
-    def _on_session_test(self, payload):
-        self._set_busy(False)
-
-        if "error" in payload:
-            self._say("分頁認人偵察失敗")
-            messagebox.showerror("偵察失敗", _error_text(payload))
-            return
-
-        self._say("分頁認人偵察完成，見彈出視窗。")
-        messagebox.showinfo(
-            "分頁到底靠不靠 cookie 認人",
-            f"{payload['conclusion']}\n\n完整報告：{payload['report_path']}",
-            parent=self.root)
-
     def _refresh_problems(self):
         """
         把「第幾組 -> 失敗原因」攤平成畫面上那一串。
@@ -917,9 +857,6 @@ class UiBackgroundMixin:
         self.busy = busy
         # 寫到一半換檔沒有意義，這一輪要動哪個檔早就決定了。
         self.excel_button.configure(state="disabled" if busy else "normal")
-        # 忙著的時候（不管是同步那邊在動，還是這支測試自己在跑）都不能再點一次
-        # ——兩個都會去搶同一個 USER_DATA_DIR 的瀏覽器。
-        self.session_test_button.configure(state="disabled" if busy else "normal")
         self._sync_clear_button()
         if busy:
             self.progress.pack(side="right", padx=(8, 12), pady=6)

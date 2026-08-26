@@ -470,7 +470,6 @@ class UiLayoutMixin:
 
         self._build_profile_section(frame)
         self._build_migrate_section(frame)
-        self._build_diagnostics_section(frame)
 
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
@@ -531,30 +530,5 @@ class UiLayoutMixin:
 
         box.rowconfigure(1, weight=1)
         box.columnconfigure(0, weight=1)
-
-    def _build_diagnostics_section(self, parent):
-        """
-        一次性的診斷工具，跟憑證/Profile 沒有直接關係，但同樣是「開一個獨立瀏覽器
-        做點事」的性質，順路收在這個分頁。
-
-        目前只有一個：偵察分頁到底靠不靠 cookie 認人（見 recon_session.py 開頭的
-        說明）——用來判斷 fetch.py 要不要拿掉「換人要換 cookie」這一步。
-        """
-        box = ttk.LabelFrame(parent, text="診斷", padding=8)
-        box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-
-        self.session_test_button = ttk.Button(
-            box, text="測試：分頁到底靠不靠 cookie 認人",
-            command=self.start_session_test, bootstyle="primary-outline")
-        self.session_test_button.grid(row=0, column=0, sticky="w")
-
-        ttk.Label(box, text="會另外開一個瀏覽器，依序登入全部真帳號（不做任何 cookie 互換），"
-                            "測完自動關閉，結論用彈出視窗告訴你。除了分頁自己重新整理、依序背景呼叫 "
-                            "API 這兩種測法，還會加測「所有分頁同時平行呼叫背景 API」會不會撞在一起，"
-                            "最後再另開一個瀏覽器測「並行登入」——好幾組帳號真的同時（重疊時間）"
-                            "送出登入，看會不會互相卡住或撞成別人的身分。至少要兩組真帳號才測得出東西，"
-                            "跑之前請先按「同步」分頁的「全部登出」把原本那個瀏覽器關掉。",
-                  style="Hint.TLabel", wraplength=wide(760)).grid(
-            row=1, column=0, sticky="w", pady=(4, 0))
 
         box.columnconfigure(0, weight=1)
