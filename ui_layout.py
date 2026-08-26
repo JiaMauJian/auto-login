@@ -6,8 +6,8 @@ import ttkbootstrap as ttk
 
 import profile_tools
 from ui_common import (
-    ALL_CHOICE, CELL_PAD, FONT_SIZE, HINT_SIZE, WHEN_TODAY, WHEN_WEEK, WINDOW_H, WINDOW_W,
-    cash_method_toggle_enabled, pick_font, wide, work_area,
+    ALL_CHOICE, APP_VERSION, CELL_PAD, FONT_SIZE, HINT_SIZE, WHEN_TODAY, WHEN_WEEK, WINDOW_H,
+    WINDOW_W, cash_method_toggle_enabled, pick_font, wide, work_area,
 )
 
 
@@ -16,8 +16,9 @@ class UiLayoutMixin:
 
     def _build(self):
         family = pick_font()
-        self.root.title("持股同步" + (f"（模擬模式：另有 {len(self.fake_sheets)} 個假帳號）"
-                                     if self.fake_sheets else ""))
+        self.root.title(f"持股同步 {APP_VERSION}"
+                        + (f"（模擬模式：另有 {len(self.fake_sheets)} 個假帳號）"
+                           if self.fake_sheets else ""))
         # 字放大了版面就要跟著大，但不能大到超出桌面可用區 —— 視窗比可用區還高
         # 的話，最下面那行狀態列會被工作列蓋住，而那是報告寫入結果的地方。
         # .env 填了 UI_WIDTH/UI_HEIGHT 就用他填的，可用區這一關照樣要過。
