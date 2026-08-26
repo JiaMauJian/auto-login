@@ -39,6 +39,28 @@ fetch.py 也用上（有機會整套拿掉「換 cookie」這個步驟，抓資�
 安全」這個問題：就算測法一、二都對，只要測法三出現撞資料，代表現在的
 換 cookie 依序做法還不能拿掉。
 
+並行登入測試（2026/08/26 新增，跟測法一二三是不同問題）
+----------------------------------------------------
+前面測法一二三問的是「登入完成之後，抓資料會不會撞在一起」；這裡問的是
+「登入這個過程本身，好幾組真的同時（重疊時間）做，會不會互相打斷」——
+這是使用者想確認「20 組帳號能不能真的並行登入」時，真正卡住的那一關。
+
+`login.do_login` 裡有一條假設寫死的備援路：瀏覽器帶著別組的 cookie 時，
+登入頁不會畫出表單，要先清掉 cookie 才行；如果好幾組同時搶這份共用 cookie，
+理論上會互相干擾。但這個假設有沒有真的成立，从来没有人拿「真的同時」的
+情境測過——`_login_all` 那個依序登入的偵測只驗證了「依序」不會卡（本來就
+已經在正式環境用著），不能代表「同時」也不會卡。
+
+`_test_login_concurrency` 用 Playwright 的 async API（`asyncio.gather`）
+真的讓好幾組 `do_login` 同時推進——這是唯一能做到「真同時」的辦法：
+Playwright 的同步 API 不能跨執行緒安全共用，硬用執行緒模擬只會變相排隊或
+直接出錯。全部登入動作做完之後，回頭核對每個分頁最後停在誰的身分上，
+跟前面測法一二三已經驗證過的「第幾組真正是誰」對照表比對，才是「並行
+登入有沒有撞車」最直接的證據。
+
+這一段一定要在前面測法一二三那個同步瀏覽器已經關掉之後才會開始——兩邊
+用的是同一個 USER_DATA_DIR，同一時間只能被一個 Chrome 行程用。
+
 安全性
 ------
 只讀、不寫，不會碰 Excel、不會下單、不會改網站上任何東西——跟 recon.py
@@ -57,6 +79,7 @@ session。網址裡如果偵測到類似 session 識別碼的片段，只記錄�
 結果愈可信——這支只是多開幾個分頁，不會動到任何一組帳號本身的資料。
 """
 
+import asyncio
 import contextlib
 import io
 import json
@@ -65,17 +88,25 @@ import sys
 import traceback
 from datetime import datetime
 
+from playwright.async_api import Error as AsyncPlaywrightError, TimeoutError as AsyncPlaywrightTimeoutError
+from playwright.async_api import async_playwright
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from fetch import PAGE_READY_JS
 from login import (
+    LOGIN_NAV_TIMEOUT_MS,
+    LOGIN_URL,
+    SWITCH_USER_TIMEOUT_MS,
+    VERIFY_SETTLE_MS,
     app_dir,
     configure_browsers_path,
     do_login,
+    launch_options,
     load_accounts,
     open_context,
     pause,
+    user_data_dir,
     wait_until_finished,
 )
 from recon import ACCOUNT_PAGE, SESSION_JS, account_codes, query
@@ -284,6 +315,195 @@ def _conclude_concurrent(results):
             "除非先查清楚是什麼原因撞車、能不能避開。")
 
 
+async def _async_open_context(p):
+    """
+    login.open_context 的 async 版本，只給並行登入測試用。launch_options/user_data_dir
+    是純資料函式（不呼叫 Playwright），直接沿用 login.py 那兩支，不必重寫；真正要
+    port 的只有實際開瀏覽器那幾行 API 呼叫。刻意不做 login.open_context 那套「找不到
+    Chromium 就自動安裝」的備援——這支只在既有的同步流程已經成功開過瀏覽器之後才會跑，
+    Chromium 不存在的情況早在那邊就會先爆掉。
+    """
+    options = launch_options()
+    profile_path = user_data_dir()
+    if profile_path is None:
+        browser = await p.chromium.launch(**options)
+        return await browser.new_context(no_viewport=True), browser
+    profile_path.mkdir(parents=True, exist_ok=True)
+    context = await p.chromium.launch_persistent_context(
+        str(profile_path), no_viewport=True, **options)
+    return context, None
+
+
+async def _async_do_login(context, tbb_id, tbb_password, page):
+    """
+    login.do_login 的 async 版本，一步一步照抄，只把每個 Playwright 呼叫加上 await。
+
+    只給這支測試用：Playwright 的同步 API 不能跨執行緒安全共用，沒辦法用它測「好幾組
+    do_login 真的同時在跑」；async API 用 asyncio.gather 可以讓好幾個分頁的自動化
+    流程真的並行推進，是唯一測得出「登入本身能不能並行」的辦法。
+
+    這裡跟 login.do_login 是兩份程式碼，以後改了那邊的登入流程（選擇器、等待邏輯），
+    這裡要記得跟著改，不然這支測試測的就不是真正線上在跑的流程。
+
+    回傳 {"triggered_fallback", "nav_ok"}；不回傳身分，身分要等全部登入動作都做完、
+    大家不再搶同一份 cookie 之後才去帳戶頁核對（見 _test_login_concurrency）。
+    """
+    verify_number = {}
+
+    async def on_verify_response(resp):
+        if "VerifyNumberServlet" in resp.url:
+            try:
+                verify_number["value"] = (await resp.text()).strip()
+            except Exception:
+                pass
+
+    page.on("response", on_verify_response)
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded")
+
+    mode_link = page.locator("a:visible", has_text="身份證登入").first
+    triggered_fallback = False
+    try:
+        await mode_link.wait_for(state="visible", timeout=SWITCH_USER_TIMEOUT_MS)
+    except AsyncPlaywrightTimeoutError:
+        triggered_fallback = True
+        await context.clear_cookies()
+        await page.goto(LOGIN_URL)
+        mode_link = page.locator("a:visible", has_text="身份證登入").first
+        await mode_link.wait_for(state="visible", timeout=15000)
+    await mode_link.click()
+
+    id_input = page.locator("#ind-tab1 #id")
+    await id_input.wait_for(state="visible", timeout=15000)
+    await page.wait_for_function(
+        "document.querySelector('#ind-tab1 #id').placeholder === '身分證'",
+        timeout=5000,
+    )
+    await id_input.fill(tbb_id)
+    await page.locator("#pass").fill(tbb_password)
+    await page.locator("#VerifyNumber canvas").wait_for(state="visible", timeout=15000)
+
+    for _ in range(30):
+        if "value" in verify_number:
+            break
+        await page.wait_for_timeout(100)
+
+    await page.wait_for_timeout(VERIFY_SETTLE_MS)
+
+    if "value" in verify_number:
+        await page.locator("#NumberLabel").fill(verify_number["value"])
+
+    await page.wait_for_timeout(VERIFY_SETTLE_MS)
+
+    nav_ok = True
+    try:
+        async with page.expect_navigation(wait_until="domcontentloaded",
+                                           timeout=LOGIN_NAV_TIMEOUT_MS):
+            await page.locator("#Image22").click()
+    except AsyncPlaywrightTimeoutError:
+        nav_ok = False
+
+    return {"triggered_fallback": triggered_fallback, "nav_ok": nav_ok}
+
+
+async def _test_login_concurrency(accounts, expect_by_order):
+    """
+    測「登入」本身能不能真的並行（重疊時間，不是依序）——跟測法一二三問的是不同問題：
+    那三個測的是「登入完成之後，抓資料會不會撞在一起」；這個測的是「登入這個過程
+    本身，好幾組真的同時做，會不會互相打斷」。
+
+    expect_by_order 是前面同步流程（_login_all）已經依序驗證過的「第幾組真正是誰」
+    對照表——這裡不用再重新猜一次，直接拿它當標準答案，跟並行登入完之後每個分頁
+    最後停在誰的身分上做比對，才是「有沒有撞車」最直接的證據（比「有沒有换页」
+    這種表面訊號可靠）。
+
+    一定要在前面那個同步瀏覽器已經關掉之後才能呼叫——兩邊用的是同一個 USER_DATA_DIR，
+    同一時間只能被一個 Chrome 行程用。
+
+    回傳 (報告文字 list, 結論字串)。
+    """
+    lines = ["", "=" * 70, "登入本身能不能並行（重疊時間，不是依序）", "=" * 70]
+
+    if len(accounts) < 2:
+        lines.append("帳號數不足（至少要兩組真帳號），跳過。")
+        return lines, "帳號數不足，測不出結論。"
+
+    async with async_playwright() as p:
+        context, browser = await _async_open_context(p)
+        try:
+            pages = [await context.new_page() for _ in accounts]
+            results = await asyncio.gather(
+                *(_async_do_login(context, acc["id"], acc["password"], page)
+                  for acc, page in zip(accounts, pages)),
+                return_exceptions=True,
+            )
+
+            rows = []
+            for order, result in enumerate(zip(accounts, pages, results), start=1):
+                account, page, outcome = result
+                row = {"order": order, "page": page, "got_code": None}
+                rows.append(row)
+                if isinstance(outcome, Exception):
+                    lines.append(f"第 {order} 組：登入過程發生例外（{outcome}）")
+                    row["page"] = None
+                    continue
+                fallback_note = "有觸發清 cookie 備援路" if outcome["triggered_fallback"] else "沒有觸發清 cookie 備援路"
+                nav_note = "有換頁（送出成功）" if outcome["nav_ok"] else "沒有換頁（可能被擋在原頁）"
+                lines.append(f"第 {order} 組：登入表單{fallback_note}；送出後{nav_note}")
+
+            # 全部登入動作都做完、沒有人再動 cookie 之後，才回頭核對每個分頁最後
+            # 停在誰的身分上——這一步才是重疊時間搶 cookie 有沒有撞在一起的
+            # 最終判準，光看「有沒有換頁」看不出換過去的是不是自己的帳戶。
+            for row in rows:
+                page = row["page"]
+                if page is None:
+                    continue
+                try:
+                    await page.goto(ACCOUNT_PAGE, wait_until="domcontentloaded")
+                    await page.wait_for_function(PAGE_READY_JS, timeout=15000)
+                    session = await page.evaluate(SESSION_JS)
+                except (AsyncPlaywrightError, AsyncPlaywrightTimeoutError):
+                    session = {}
+                bid, cid = (session or {}).get("branch_id"), (session or {}).get("cust_id")
+                row["got_code"] = f"1{bid}-{cid}" if bid and cid else None
+
+            lines.append("")
+            wrong = missing = 0
+            for row in rows:
+                expect_code = expect_by_order.get(row["order"])
+                got_code = row["got_code"]
+                if got_code is None:
+                    missing += 1
+                    lines.append(f"第 {row['order']} 組：沒有登入成功，無法核對身分")
+                elif expect_code and got_code != expect_code:
+                    wrong += 1
+                    lines.append(f"第 {row['order']} 組：錯！最後停在 {got_code}，不是自己的 {expect_code}")
+                else:
+                    lines.append(f"第 {row['order']} 組：對，最後停在自己的 {got_code}")
+
+            lines.append("")
+            if wrong:
+                conclusion = (f"並行登入撞車了：{wrong} 組最後停在別人的身分上——重疊時間真的同時"
+                              "登入不安全，現在依序登入的架構不能拿掉。")
+            elif missing:
+                conclusion = (f"有 {missing} 組沒能確認登入身分（可能逾時或流程被打斷），"
+                              "測不出完整結論，看報告細節、建議重跑一次。")
+            else:
+                conclusion = (f"這 {len(accounts)} 組同時並行登入，最後每個分頁都停在自己正確的身分上，"
+                              "沒有撞車——這是「並行登入」最直接的正面證據，但樣本數還小，"
+                              "建議多跑幾次、帳號數多一點再下定論，且這裡只驗證了單次結果，"
+                              "還沒觀察過對方網站有沒有出現任何異常警示。")
+
+            lines.append(conclusion)
+            return lines, conclusion
+        finally:
+            try:
+                await context.close()
+                if browser is not None:
+                    await browser.close()
+            except AsyncPlaywrightError:
+                pass
+
+
 def _login_all(context, accounts):
     """
     依序登入每一組帳號，過程中刻意不做任何 cookie 互換——這才是在模擬使用者
@@ -426,10 +646,14 @@ def _test_tab(tab):
 
 def _collect(context, accounts):
     """
-    核心流程：登入全部帳號（不換 cookie）、反過來逐一測試。回傳 (報告文字 list, 結構化結果 list)。
+    核心流程：登入全部帳號（不換 cookie）、反過來逐一測試。
+    回傳 (報告文字 list, 結構化結果 list, tabs)。
 
     CLI（main）跟圖形介面（run_headless）共用這一段，差別只在誰負責開/關瀏覽器、
     測完要不要留著給人繼續點。
+
+    多回傳 tabs（見 _login_all）是給呼叫端接下來跑 _test_login_concurrency 用——
+    那支測試需要「第幾組真正是誰」這個已經驗證過的對照表，不必重新猜一次。
     """
     report = []
     results = []
@@ -453,7 +677,7 @@ def _collect(context, accounts):
             "這次每一組登入時，登入表單都是一開始就直接出現，沒有一組觸發「清 cookie 才給表單」"
             "那條備援路——這跟 login.py 原本那個「換人登入一定會被上一組 cookie 卡住」的假設不符，"
             "值得懷疑那個假設是不是不成立（或只在特定情況才會發生），如果真的不會卡，"
-            "「在同一個瀏覽器 profile 裡做到真平行登入」可能比之前想的更有機會，"
+            "「在同一個瀏覽器 profile 裡做到並行登入」可能比之前想的更有機會，"
             "但這裡只驗證了「表單看不看得到」，登入送出後同一份 cookie 還是會被下一組頂掉，"
             "細節仍要另外查。"
         )
@@ -472,7 +696,7 @@ def _collect(context, accounts):
         if result["order"] in concurrent_verdicts:
             result["measure3_ok"] = concurrent_verdicts[result["order"]]
 
-    return report, results
+    return report, results, tabs
 
 
 def run_headless(accounts):
@@ -496,11 +720,12 @@ def run_headless(accounts):
         "",
     ]
     results = []
+    tabs = []
 
     with sync_playwright() as p:
         context, browser = open_context(p)
         try:
-            body, results = _collect(context, accounts)
+            body, results, tabs = _collect(context, accounts)
             report.extend(body)
         except PlaywrightTimeoutError:
             report.append("登入逾時，找不到欄位，網站版面可能已變更。")
@@ -522,9 +747,22 @@ def run_headless(accounts):
     report.append("")
     report.append(concurrent_conclusion)
 
+    # 並行登入測試要另開一個 async 瀏覽器，一定要等上面那個同步瀏覽器已經關掉
+    # （with sync_playwright() 區塊結束）才能開始——同一個 USER_DATA_DIR 不能同時
+    # 被兩個 Chrome 行程用。
+    expect_by_order = {t["order"]: t["expect_code"] for t in tabs}
+    try:
+        login_lines, login_conclusion = asyncio.run(
+            _test_login_concurrency(accounts, expect_by_order))
+    except Exception as exc:
+        login_lines = ["", "=" * 70, "登入本身能不能並行（重疊時間，不是依序）", "=" * 70,
+                       f"測試本身發生例外，跳過（{exc}）"]
+        login_conclusion = "測試本身發生例外，測不出結論。"
+    report.extend(login_lines)
+
     report_path = out_dir / f"{stamp}_session偵察.txt"
     report_path.write_text("\n".join(report), encoding="utf-8")
-    return report_path, f"{conclusion}\n\n{concurrent_conclusion}"
+    return report_path, f"{conclusion}\n\n{concurrent_conclusion}\n\n{login_conclusion}"
 
 
 def main():
@@ -551,11 +789,12 @@ def main():
     ]
 
     results = []
+    tabs = []
     with sync_playwright() as p:
         context, browser = open_context(p)
 
         try:
-            body, results = _collect(context, accounts)
+            body, results, tabs = _collect(context, accounts)
             report.extend(body)
         except PlaywrightTimeoutError:
             report.append("登入逾時，找不到欄位，網站版面可能已變更。")
@@ -589,6 +828,25 @@ def main():
                 browser.close()
         except PlaywrightError:
             pass
+
+    # 並行登入測試要另開一個 async 瀏覽器，一定要等上面那個同步瀏覽器真的關掉
+    # （with sync_playwright() 區塊、wait_until_finished 都結束）才能開始——
+    # 同一個 USER_DATA_DIR 不能同時被兩個 Chrome 行程用。
+    expect_by_order = {t["order"]: t["expect_code"] for t in tabs}
+    try:
+        login_lines, login_conclusion = asyncio.run(
+            _test_login_concurrency(accounts, expect_by_order))
+    except Exception as exc:
+        login_lines = ["", "=" * 70, "登入本身能不能並行（重疊時間，不是依序）", "=" * 70,
+                       f"測試本身發生例外，跳過（{exc}）"]
+        login_conclusion = "測試本身發生例外，測不出結論。"
+
+    report.extend(login_lines)
+    report_path.write_text("\n".join(report), encoding="utf-8")
+    print("\n".join(login_lines))
+    print()
+    print(f"報告已更新（含並行登入測試）: {report_path}")
+    print(f"結論: {login_conclusion}")
 
 
 if __name__ == "__main__":
