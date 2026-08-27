@@ -98,7 +98,6 @@ from login import (
     LOGIN_NAV_TIMEOUT_MS,
     LOGIN_URL,
     SWITCH_USER_TIMEOUT_MS,
-    VERIFY_SETTLE_MS,
     app_dir,
     configure_browsers_path,
     do_login,
@@ -387,12 +386,8 @@ async def _async_do_login(context, tbb_id, tbb_password, page):
             break
         await page.wait_for_timeout(100)
 
-    await page.wait_for_timeout(VERIFY_SETTLE_MS)
-
     if "value" in verify_number:
         await page.locator("#NumberLabel").fill(verify_number["value"])
-
-    await page.wait_for_timeout(VERIFY_SETTLE_MS)
 
     nav_ok = True
     try:

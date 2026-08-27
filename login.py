@@ -32,7 +32,6 @@ from playwright.sync_api import (
 )
 
 from dev_tools import simulate
-from util import env_int
 
 
 def app_dir():
@@ -47,13 +46,6 @@ def app_dir():
 load_dotenv(app_dir() / ".env", encoding="utf-8-sig")
 
 LOGIN_URL = "https://www.tbbstock.com.tw/tbb/index/home.jsp"
-
-# 攔截到驗證碼後多等一下（毫秒），讓頁面可能的第二次 VerifyNumberServlet 請求先回來，
-# 以最後一次的值為準；送出登入前也再等同樣的時間，避免驗證碼還沒套用就按下登入。
-#
-# 網站慢的時候第二次請求可能還沒回來就被填掉，可以在 .env 設 VERIFY_SETTLE_MS 加大。
-# 上限 5000：再多就不是「等它安定」而是每個帳號都白白多等五秒，通常代表數字填錯了。
-VERIFY_SETTLE_MS = max(0, min(5000, env_int("VERIFY_SETTLE_MS", 200)))
 
 # 登入表單最多等多久（毫秒）才判定「這個瀏覽器裡已經有人登入著」。等不到就清 cookie
 # 重來一次（見 do_login），所以這一段不能設太長 —— 換交易人時每次都要先耗掉它。
@@ -352,18 +344,11 @@ def do_login(context, tbb_id, tbb_password, page=None):
             break
         page.wait_for_timeout(100)
 
-    # 頁面載入過程可能會再打一次 VerifyNumberServlet 換新的驗證碼，
-    # 先等一下讓它安定下來，再用「最後一次」攔截到的值填入，避免填到已經失效的舊驗證碼。
-    page.wait_for_timeout(VERIFY_SETTLE_MS)
-
     if "value" not in verify_number:
         print(f"[{tbb_id}] 沒有攔截到 VerifyNumberServlet 的回應，請確認網站是否改版，改回手動輸入驗證碼。")
     else:
         page.locator("#NumberLabel").fill(verify_number["value"])
         print(f"[{tbb_id}] 已自動取得並填入驗證碼: {verify_number['value']}")
-
-    # 送出登入前再等一下，避免驗證碼還沒套用就按下登入。
-    page.wait_for_timeout(VERIFY_SETTLE_MS)
 
     # 等待要在按下登入「之前」就開始，否則換頁太快會來不及攔到。
     # 換頁一完成就往下走，不用固定乾等；沒換頁時（登入被擋在原頁）逾時當作正常情況吞掉。
