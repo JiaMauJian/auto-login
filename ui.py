@@ -158,10 +158,11 @@ from ui_background import UiBackgroundMixin
 from ui_cert import UiCertMixin
 from ui_history import UiHistoryMixin
 from ui_layout import UiLayoutMixin
+from ui_order import UiOrderMixin
 from ui_sync import UiSyncMixin
 
 
-class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHistoryMixin):
+class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHistoryMixin, UiOrderMixin):
     def __init__(self, root):
         self.root = root
         self.path = excel_io.excel_path()
@@ -225,6 +226,8 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         self._migrate_candidates = {}   # 遷移憑證那張表的列 id -> profile_tools.scan_cert_sources() 的一筆
         self.profile_busy = False       # 「建立 Profile」進行中，避免重複點
 
+        self._order_init_state()        # 下單分頁（盤前模式）的狀態，見 ui_order.py
+
         self.ledger = None
         self.ledger_error = None
         # 這份 Excel 的紀錄檔是不是這次才生出來的。是的話，今天的現金起點是憑
@@ -279,15 +282,16 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         self.refresh_history()
 
     def _on_tab_changed(self, _event):
+        # 分頁順序：同步(0) 下單(1) 歷程(2) 憑證(3)，見 ui_layout._build()。
         index = self.tabs.index(self.tabs.select())
-        if index == 1:
+        if index == 2:
             self.refresh_history()
             # 切過來通常就是想看「剛才那位」的歷程，不必再選一次人。
             if self.current_sheet and self.current_sheet in tuple(self.history_who["values"]):
                 self.history_who.set(self.current_sheet)
                 self._refresh_history_choices()
                 self._fill_history()
-        elif index == 2:
+        elif index == 3:
             self._refresh_profile_status()
             # 掃描要讀遍 Chrome／Edge 每個 profile 的 Local Storage，不便宜，
             # 不自動做，一律等使用者自己按「掃描」（2026/08/23 使用者要求：

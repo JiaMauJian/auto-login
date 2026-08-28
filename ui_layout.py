@@ -65,6 +65,7 @@ class UiLayoutMixin:
                         selectforeground=self.colors.selectfg)
         style.configure("TButton", font=(family, FONT_SIZE))
         style.configure("TLabel", font=(family, FONT_SIZE))
+        style.configure("TCheckbutton", font=(family, FONT_SIZE))
         style.configure("TNotebook.Tab", font=(family, FONT_SIZE))
         style.configure("Hint.TLabel", font=(family, HINT_SIZE), foreground="black")
         # 「讀取」用 bootstyle="primary"（見下面 fetch_button），這裡只補粗體 ——
@@ -79,6 +80,14 @@ class UiLayoutMixin:
         style.configure("Choice.TRadiobutton", font=(family, FONT_SIZE, "bold"))
         style.configure("Auto.TLabel", font=(family, HINT_SIZE), foreground=self.colors.success)
         style.configure("Manual.TLabel", font=(family, HINT_SIZE), foreground=self.colors.warning)
+        # 買賣方向的底色，跟網站本身「買紅賣綠」的既有配色一致（見 order/
+        # orderConfirmRWD.html 的 text-red/text-green），下單分頁的股票列跟
+        # 執行預覽都用同一組顏色，一眼認得出方向不必看文字。ttkbootstrap 的
+        # 自訂樣式名稱一定要先 configure() 登記過才會生效，只 map() 會被悄悄
+        # 換回預設樣式（見「Tkinter ui設計原則」第十一節），這裡先 configure
+        # 一次就是在做這件事。
+        style.configure("Buy.TLabel", font=(family, FONT_SIZE), background="#FFDFDF")
+        style.configure("Sell.TLabel", font=(family, FONT_SIZE), background="#DCF1EB")
         # Combobox 展開的那個下拉清單其實是另一個 Tk 元件（listbox），不歸 ttk 的
         # style 管，上面幾行設的字級它一個都吃不到，字級改了它還是 Tk 內建的預設值。
         # 要用 option_add 走選項資料庫這條路才碰得到它，而且要對 root 設，晚建的
@@ -91,6 +100,7 @@ class UiLayoutMixin:
         self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self._build_sync_tab()
+        self._build_order_tab()
         self._build_history_tab()
         self._build_cert_tab()
 
@@ -98,7 +108,8 @@ class UiLayoutMixin:
         # 套用 bootstyle 都會用 Tcl 呼叫直接蓋一次 selectbackground/foreground
         # （見 update_combobox_popdown_style），優先度比 option_add 高，蓋掉了字級
         # 那條路能用的設法。只能照它的路子，在它蓋完之後再蓋一次我們要的顏色。
-        for combo in (self.account_choice, self.history_who, self.history_item, self.history_when):
+        for combo in (self.account_choice, self.history_who, self.history_item, self.history_when,
+                      self.order_stock_pick):
             self._paint_dropdown_selection(combo)
 
         # 狀態列跟進度條放同一條、同一列：狀態列說「在幹嘛」，進度條說「還在動」，
@@ -531,4 +542,153 @@ class UiLayoutMixin:
         box.rowconfigure(1, weight=1)
         box.columnconfigure(0, weight=1)
 
+        box.columnconfigure(0, weight=1)
+
+    def _build_order_tab(self):
+        """
+        下單分頁：目前只有「盤前」——設定股票／比重／價格、勾帳戶，看執行預覽。
+        半自動送單（操作真實下單頁面）還沒做，先讓人看得到「照這些設定，
+        等一下會發生什麼事」，看得順眼再談自動填單（見 ui_order.py）。
+        """
+        frame = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(frame, text="  下單  ")
+
+        top = ttk.Frame(frame, padding=(0, 0, 0, 8))
+        top.grid(row=0, column=0, sticky="ew")
+        ttk.Label(top, text="盤前", style="Method.TLabel").pack(side="left")
+        self.order_refresh_button = ttk.Button(top, text="重新整理（讀持股與報酬率）",
+                                               command=self.refresh_order_data,
+                                               bootstyle="primary-outline")
+        self.order_refresh_button.pack(side="left", padx=(16, 0))
+        self.order_status = ttk.Label(top, text="", style="Hint.TLabel")
+        self.order_status.pack(side="left", padx=(16, 0))
+
+        body = ttk.Panedwindow(frame, orient="horizontal")
+        body.grid(row=1, column=0, sticky="nsew")
+        frame.rowconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        self._build_order_stocks(body)
+        self._build_order_right(body)
+
+    def _build_order_stocks(self, paned):
+        """左邊：指定股票，一檔一列，比重／價格各自設定（見 CLAUDE.md 的討論決定）。"""
+        box = ttk.LabelFrame(paned, text="指定股票（各自設定比重與價格）", padding=8)
+        paned.add(box, weight=1)
+
+        pick = ttk.Frame(box)
+        pick.grid(row=0, column=0, sticky="ew")
+        self.order_stock_pick = ttk.Combobox(pick, width=22, font=(self.family, FONT_SIZE))
+        self.order_stock_pick.pack(side="left")
+        ttk.Button(pick, text="新增", command=self.add_order_stock,
+                  bootstyle="primary-outline").pack(side="left", padx=(8, 0))
+
+        ttk.Label(box, text="按「重新整理」讀到的持股會出現在下拉選單，"
+                            "沒有持股的股票也可以直接輸入代號。",
+                 style="Hint.TLabel", wraplength=wide(260)).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 8))
+
+        # 加進來的股票一樣用 Canvas＋Scrollbar 包起來（跟帳戶勾選區同一個
+        # 理由）：這裡原本用 sticky="new" 的 Frame，加多了會把 LabelFrame
+        # 撐得比視窗還高，超出視窗底下的部分沒有任何辦法捲到——「按新增
+        # 沒反應」很可能就是新那一列其實加進去了，只是被撐到看不見的地方。
+        canvas = tk.Canvas(box, highlightthickness=0)
+        canvas.grid(row=2, column=0, sticky="nsew")
+        stock_bar = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
+        stock_bar.grid(row=2, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=stock_bar.set)
+
+        self.order_stock_frame = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=self.order_stock_frame, anchor="nw")
+        self.order_stock_frame.bind(
+            "<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
+
+        def _on_wheel(event):
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_wheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+
+        box.rowconfigure(2, weight=1)
+        box.columnconfigure(0, weight=1)
+
+    def _build_order_right(self, paned):
+        """右邊：選帳戶（報酬率排序）＋執行預覽。"""
+        box = ttk.Frame(paned)
+        paned.add(box, weight=2)
+
+        accounts = ttk.LabelFrame(box, text="選擇執行的帳戶", padding=8)
+        accounts.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(accounts, text="依今年報酬率由低到高排序",
+                 style="Hint.TLabel", wraplength=wide(480)).grid(
+            row=0, column=0, columnspan=2, sticky="w")
+
+        # 真的 checkbox，不是「選取列＝有勾」那種要猜互動方式的畫法（Listbox
+        # 的多選模式看起來就是個藍底選取，不像勾選框）。帳戶數不固定（最多
+        # 20 組），checkbox 疊起來可能比面板高，所以外面包一層 Canvas＋
+        # Scrollbar 做捲動；每個帳戶的 Checkbutton 本身在 ui_order.py 裡動態建。
+        canvas = tk.Canvas(accounts, height=wide(150), highlightthickness=0)
+        canvas.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+        acc_bar = ttk.Scrollbar(accounts, orient="vertical", command=canvas.yview)
+        acc_bar.grid(row=1, column=1, sticky="ns", pady=(4, 0))
+        canvas.configure(yscrollcommand=acc_bar.set)
+
+        self.order_account_inner = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=self.order_account_inner, anchor="nw")
+        self.order_account_inner.bind(
+            "<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # 內層 Frame 寬度跟著 Canvas 走，checkbox 才會撐滿整個面板寬度，
+        # 不會因為文字比較短就縮成一小塊、右邊留一大片空白看起來像沒放滿。
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
+
+        def _on_wheel(event):
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        # 滑鼠移進這塊才接手滾輪，離開就放掉——不然這裡的滾輪會蓋掉整個
+        # 視窗其他地方原本的滾動。
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_wheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+
+        accounts.columnconfigure(0, weight=1)
+
+        preview = ttk.LabelFrame(box, text="執行預覽（依序）", padding=8)
+        preview.grid(row=1, column=0, sticky="nsew")
+        columns = ("order", "sheet", "side", "stock", "held", "lots", "price", "note")
+        titles = {"order": "順序", "sheet": "帳戶", "side": "買賣", "stock": "股票", "held": "持股",
+                 "lots": "張數", "price": "價格", "note": "備註"}
+        # 窄欄位（順序／買賣／持股／張數／價格）都是短數字，壓小一點，把空間
+        # 讓給「備註」——那句話可能是「沒有這檔，略過；尚未設定價格」兩句併起來，
+        # 比其他欄位長得多，之前吃跟其他欄位一樣的固定寬度會被切掉看不到。
+        # held 加了千分位逗號，可能到「1,234,567」這種長度，壓太窄反而看不到
+        # 完整數字（Treeview 超出欄寬不會換行也不會刪節號，就是直接切掉）。
+        narrow = {"order": 40, "side": 40, "held": 95, "lots": 60, "price": 70}
+        self.order_preview = ttk.Treeview(preview, columns=columns, show="headings", height=10)
+        for key in columns:
+            self.order_preview.heading(key, text=titles[key])
+            centered = key in ("order", "side", "held", "lots", "price")
+            self.order_preview.column(key, width=wide(narrow.get(key, 90 if key != "note" else 160)),
+                                      anchor="center" if centered else "w",
+                                      stretch=(key == "note"))
+        self.order_preview.grid(row=0, column=0, sticky="nsew")
+        prev_bar = ttk.Scrollbar(preview, orient="vertical", command=self.order_preview.yview)
+        self.order_preview.configure(yscrollcommand=prev_bar.set)
+        prev_bar.grid(row=0, column=1, sticky="ns")
+        # 視窗真的太窄、備註還是被切掉的話，至少捲得到——不能讓內容存在
+        # 卻沒有任何辦法看到全部（跟帳戶/股票那兩處要能捲動同一個道理）。
+        prev_hbar = ttk.Scrollbar(preview, orient="horizontal", command=self.order_preview.xview)
+        self.order_preview.configure(xscrollcommand=prev_hbar.set)
+        prev_hbar.grid(row=1, column=0, sticky="ew")
+        # 跳過的列（沒有這檔／比重算出來不到 1 張）淡化顯示，不是默默消失。
+        # 買賣底色是 Treeview 列的 tag，不是 ttk 樣式名稱，不受上面「先
+        # configure() 才生效」那條規則管，直接 tag_configure 就會生效。
+        self.order_preview.tag_configure("skip", foreground=self.colors.secondary)
+        self.order_preview.tag_configure("buy", background="#FFDFDF")
+        self.order_preview.tag_configure("sell", background="#DCF1EB")
+        self.order_preview_hint = ttk.Label(preview, text="", style="Hint.TLabel")
+        self.order_preview_hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        preview.rowconfigure(0, weight=1)
+        preview.columnconfigure(0, weight=1)
+
+        box.rowconfigure(1, weight=1)
         box.columnconfigure(0, weight=1)

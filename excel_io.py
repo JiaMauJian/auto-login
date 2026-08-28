@@ -5,6 +5,7 @@ Excel 讀寫。只認得持股管理表的這幾格，其餘全是公式，一�
     E4:E8  股數            <- 未實現損益的「成交股數」
     F4:F8  成本            <- 未實現損益的「成交均價」
     B8     現金餘額         <- 由紀錄檔的現金流水算出來
+    B17    今年報酬率       只讀，下單功能排執行順序用（見 orders.order_accounts）
     D1     程式維護提醒      每次寫入順便刷新，關閉程式時清掉，見 marker_enabled
 
 位置寫死是刻意的：這支程式只認得這個特定格式的持股管理表，
@@ -29,6 +30,10 @@ ENV_KEY = "EXCEL_PATH"
 HOLDING_ROWS = range(4, 9)
 COL_NAME, COL_QTY, COL_COST = 4, 5, 6
 CELL_BALANCE = (8, 2)
+
+# 今年報酬率，下單功能排執行順序用（報酬率低的先執行）。只讀，不寫——
+# 這一格本來就是 Excel 自己的公式算出來的，程式沒有理由覆蓋它。
+CELL_RETURN_RATE = (17, 2)
 
 # D1 沒被上面三處佔用，理論上可以安全借來提醒「這份檔案有程式在管」。
 # 語意是「這份檔案由程式維護」的持久標記，不是「程式現在正在跑」的即時燈號——
@@ -158,6 +163,17 @@ def read_sheet(sheet):
         "balance": to_num(sheet.Cells(*CELL_BALANCE).Value, None),
         "rows": rows,
     }
+
+
+def read_return_rate(sheet):
+    """
+    B17，今年報酬率，只給下單功能排執行順序用。
+
+    讀不到（空格、公式錯誤值那類）就回 None，不要回 0——0 在這裡看起來像
+    一個真正的答案（今年打平），會被誤判成「報酬率最低，第一個執行」，
+    跟 planner.bank_balance 讀不懂銀行餘額時的態度一樣。
+    """
+    return to_num(sheet.Cells(*CELL_RETURN_RATE).Value, None)
 
 
 def write_cells(sheet, writes):

@@ -23,7 +23,8 @@ from login import app_dir, configure_browsers_path, open_context
 from ui_common import ask_cash_method, ask_confirm
 
 # 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
-STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "logged_out": "登出"}
+STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "logged_out": "登出",
+              "order_data": "下單資料讀取"}
 
 # 瀏覽器起不來時，錯誤視窗最上面那段人話。traceback 講的是 Playwright 的內部狀況，
 # 對使用者沒有意義，真正能動手的只有下面這兩件事。
@@ -470,7 +471,8 @@ class UiBackgroundMixin:
         那一筆報成失敗，讓迴圈活下去。
         """
         handlers = {"logged_in": self._on_logged_in, "fetched": self._on_fetched,
-                    "written": self._on_written, "logged_out": self._on_logged_out}
+                    "written": self._on_written, "logged_out": self._on_logged_out,
+                    "order_data": self._on_order_data}
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
