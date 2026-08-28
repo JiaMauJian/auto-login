@@ -44,6 +44,15 @@ from login import app_dir, configure_browsers_path, do_login, load_accounts, ope
 
 ORDER_ENTRY_PAGE = "https://www.tbbstock.com.tw/tbb/order/layoutRWD.jsp?type=0"
 
+
+class OrderMaybeSubmitted(RuntimeError):
+    """
+    「確認」已經按下去了，但沒辦法確定委託實際上有沒有送出去、送出去的結果
+    是什麼——跟一般 RuntimeError（送出前就確定失敗，重試安全）不一樣，呼叫端
+    看到這個例外類型絕對不能自動當成「按下一筆重試同一筆」的訊號，得先讓人
+    自己去網站查證，見 confirm_order 的說明。
+    """
+
 # 直接呼叫 select2 本來會打的那支 AJAX，繞過視覺互動（見檔案開頭說明）。
 # type=public 是從頁面的 select2() 設定原樣抄過來的。
 LOOKUP_STOCK_JS = """
@@ -176,6 +185,72 @@ def fill_order(page, *, side, qty, price, bs_flag="I"):
         state="visible", timeout=10000)
     print("[fill_order] 委託確認視窗已開啟，停在這裡——請自己到瀏覽器裡看內容，"
           "確認沒問題再按「確認」送出，或按「取消」放棄，程式不會替你按。")
+
+
+# 委託確認視窗裡「確認」按鈕跟送出結果的文字都在 layer.js 開出來的 iframe
+# 裡（orderConfirmRWD.html，見偵察資料\委託確認視窗\），不是主頁面 DOM——
+# 跟上面 fill_order 找標題列要避開 iframe 是同一件事的另一面：這次要按的
+# 按鈕就在 iframe 裡，躲不掉，只能進去找。iframe 的 id/name 是動態編號
+# （layui-layer-iframe1、2...，看這個瀏覽器 session 已經開過幾個 layer），
+# 沒辦法寫死，用 src 裡有 orderConfirmRWD 這個特徵去找。
+CONFIRM_IFRAME_SELECTOR = "iframe[src*='orderConfirmRWD']"
+
+
+def confirm_order(page, timeout_ms=15000):
+    """
+    按下委託確認視窗裡的「確認」，真的把委託送出去——**過這一步沒有回頭路**。
+    只有 GUI 的「自動送出」開關打開時才會呼叫這裡；order_fill.py 本身的
+    半自動流程（main()／fill_order）到開出確認視窗就停手，不會呼叫這支。
+
+    這支函式的選擇器（CONFIRM_IFRAME_SELECTOR、#submit、#result0）是照
+    orderConfirmRWD.html 的原始碼推出來的，還沒有實際跑過驗證——2026/08/28
+    只驗證到「填單、開出確認視窗、人自己按確認」這一步（見記憶
+    order-exec-sequential-wired-up），這支是新加的，第一次用請找一個影響最小
+    的情境測（小單位、不容易成交的價格，或收盤後可以事後刪單的時段）。
+
+    回傳 (ok, message)：message 是 #result0 顯示的原文（成功會是「委託成功,
+    委託書編號: ...」；IOC 沒吃到價會是券商回的錯誤訊息，例如「IOC. FOK
+    委託未能成交，委託失敗」——這是市場真的沒成交，不是這支函式或這一步
+    壞掉，屬於正常結果，不是例外）。ok 只是簡單判斷 message 裡有沒有
+    「委託成功」四個字，給呼叫端畫面用。
+
+    **最關鍵的安全設計**：`#submit` 一旦真的被點下去，委託多半已經送出去了，
+    之後不管是等結果逾時還是收視窗失敗，都不能被呼叫端當成「這一筆還沒送出、
+    按下一筆可以重試」——重試等於把同一筆委託多送一次。所以點擊之後任何
+    失敗都在這裡包成一句話講清楚「已經按下確認，請自己去網站查證，不要再
+    按下一筆重試」，跟「送出前就失敗、按下一筆重試是安全的」是兩種完全
+    不同的失敗，呼叫端分不出來的話，會有真的把同一筆送兩次的風險。
+    """
+    frame = page.frame_locator(CONFIRM_IFRAME_SELECTOR)
+    frame.locator("#submit").click()
+
+    result = frame.locator("#result0")
+    message = ""
+    for _ in range(timeout_ms // 200):
+        try:
+            message = (result.inner_text() or "").strip()
+        except PlaywrightError:
+            message = ""
+        if message:
+            break
+        page.wait_for_timeout(200)
+
+    if not message:
+        raise OrderMaybeSubmitted(
+            "已經按下「確認」，委託應該已經送出去了，但畫面上沒有等到結果文字"
+            "（可能只是反應比較慢）——請自己到「委託查詢」或「預約查詢」頁確認"
+            "這筆到底送出去了沒，不要直接當作失敗按「下一筆」重試，那樣可能會"
+            "把同一筆委託送兩次。")
+
+    try:
+        frame.locator("#cancel").click()   # 送出成功後這顆文字變成「關閉」，見 orderConfirmRWD.html
+    except PlaywrightError:
+        # 結果已經拿到了，這顆按不按得下去不影響委託本身有沒有送出去；但視窗
+        # 沒關掉的話，_order_dialog_closed 那道輪詢會一直看到它還開著，「下
+        # 一筆」不會自動解鎖，使用者要自己去瀏覽器把這個視窗關掉才能繼續。
+        pass
+
+    return "委託成功" in message, message
 
 
 def main():

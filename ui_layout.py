@@ -546,20 +546,48 @@ class UiLayoutMixin:
 
     def _build_order_tab(self):
         """
-        下單分頁：目前只有「盤前」——設定股票／比重／價格、勾帳戶，看執行預覽。
-        半自動送單（操作真實下單頁面）還沒做，先讓人看得到「照這些設定，
-        等一下會發生什麼事」，看得順眼再談自動填單（見 ui_order.py）。
+        下單分頁：「盤前」（股票／比重／價格、勾帳戶）跟「盤中」（股票／比重／
+        追價檔數、勾帳戶——價格不是人填的，是下單前那一刻用成交價往下追 N 檔
+        算出來的，見 orders.chase_price）共用同一套帳戶勾選、執行預覽、依序
+        執行機制，只有左邊股票設定欄位、跟怎麼組出執行清單不一樣（見
+        ui_order.py `_on_order_mode_changed`／`start_order_execution`）。
         """
         frame = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(frame, text="  下單  ")
 
         top = ttk.Frame(frame, padding=(0, 0, 0, 8))
         top.grid(row=0, column=0, sticky="ew")
-        ttk.Label(top, text="盤前", style="Method.TLabel").pack(side="left")
+
+        mode_bar = ttk.Frame(top)
+        mode_bar.pack(side="left")
+        ttk.Radiobutton(mode_bar, text="盤前", variable=self.order_mode, value="pre",
+                       style="Choice.TRadiobutton",
+                       command=self._on_order_mode_changed).pack(side="left")
+        ttk.Radiobutton(mode_bar, text="盤中", variable=self.order_mode, value="intraday",
+                       style="Choice.TRadiobutton",
+                       command=self._on_order_mode_changed).pack(side="left", padx=(8, 0))
+
+        # 「重新整理」排在「追價檔數」前面：操作順序上是先選模式、再讀資料，
+        # 追價檔數是讀完資料之後才會用到的細部設定，排前面反而打斷「選模式
+        # →讀資料」這個主線（2026/08/28 使用者要求調整順序）。
         self.order_refresh_button = ttk.Button(top, text="重新整理（讀持股與報酬率）",
                                                command=self.refresh_order_data,
                                                bootstyle="primary-outline")
         self.order_refresh_button.pack(side="left", padx=(16, 0))
+
+        # 追價檔數：整批共用一個值（不是像比重那樣每檔股票各自設定，使用者
+        # 2026/08/28 確認過），只有盤中模式用得到，盤前模式底下維持看得到但
+        # 打不動——不用整個藏起來，是因為 pack_forget 之後再 pack 回來會跑到
+        # 這一列最後面，不如留著、用 disabled 講清楚「這格現在沒作用」。
+        ticks_bar = ttk.Frame(top)
+        ticks_bar.pack(side="left", padx=(16, 0))
+        self.order_ticks_label = ttk.Label(ticks_bar, text="追價檔數")
+        self.order_ticks_label.pack(side="left")
+        self.order_ticks_entry = ttk.Entry(ticks_bar, textvariable=self.order_ticks, width=4,
+                                           font=(self.family, FONT_SIZE), state="disabled")
+        self.order_ticks_entry.pack(side="left", padx=(4, 0))
+        ttk.Label(ticks_bar, text="檔（成交價往下）", style="Hint.TLabel").pack(side="left")
+
         self.order_status = ttk.Label(top, text="", style="Hint.TLabel")
         self.order_status.pack(side="left", padx=(16, 0))
 
@@ -572,8 +600,12 @@ class UiLayoutMixin:
         self._build_order_right(body)
 
     def _build_order_stocks(self, paned):
-        """左邊：指定股票，一檔一列，比重／價格各自設定（見 CLAUDE.md 的討論決定）。"""
-        box = ttk.LabelFrame(paned, text="指定股票（各自設定比重與價格）", padding=8)
+        """
+        左邊：指定股票，一檔一列。盤前模式比重／價格各自設定（見 CLAUDE.md
+        的討論決定）；盤中模式只有比重，價格改成整批共用的「追價檔數」
+        （上面 top 那一列），標題文字跟著模式換（見 ui_order._on_order_mode_changed）。
+        """
+        box = self.order_stock_box = ttk.LabelFrame(paned, text="指定股票（各自設定比重與價格）", padding=8)
         paned.add(box, weight=1)
 
         pick = ttk.Frame(box)
@@ -687,6 +719,29 @@ class UiLayoutMixin:
         self.order_preview.tag_configure("sell", background="#DCF1EB")
         self.order_preview_hint = ttk.Label(preview, text="", style="Hint.TLabel")
         self.order_preview_hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        # 依序執行：一顆按鈕身兼「開始下單」與「下一筆」（見 ui_order.py
+        # start_order_execution），旁邊「停止」放棄這一輪；下面那行狀態文字
+        # 講現在卡在第幾筆、在等什麼。
+        exec_bar = ttk.Frame(preview)
+        exec_bar.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.order_exec_button = ttk.Button(exec_bar, text="開始下單（依序執行）",
+                                            command=self.start_order_execution,
+                                            bootstyle="danger")
+        self.order_exec_button.pack(side="left")
+        self.order_exec_stop_button = ttk.Button(exec_bar, text="停止", command=self.stop_order_execution,
+                                                 bootstyle="secondary-outline", state="disabled")
+        self.order_exec_stop_button.pack(side="left", padx=(8, 0))
+        # 自動送出：關（預設）＝半自動，停在確認視窗給人看；開＝程式自己按
+        # 「確認」真的送出委託。用 danger 的 checkbutton 樣式，跟旁邊那顆
+        # 一按下去會操作瀏覽器的紅色主按鈕給同一種「這裡要小心」的視覺提示，
+        # 不要跟普通勾選框長一樣不起眼。
+        ttk.Checkbutton(exec_bar, text="自動送出（跳過確認視窗）",
+                       variable=self.order_auto_confirm, command=self._on_order_auto_changed,
+                       bootstyle="danger").pack(side="left", padx=(16, 0))
+        self.order_exec_status = ttk.Label(preview, text="", style="Hint.TLabel", wraplength=wide(480))
+        self.order_exec_status.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         preview.rowconfigure(0, weight=1)
         preview.columnconfigure(0, weight=1)
 

@@ -16,6 +16,7 @@ from playwright.sync_api import sync_playwright
 
 import excel_io
 import ledger as ledger_mod
+import order_fill
 import planner
 import fetch as fetch_mod
 from fetch import collect, login_only
@@ -24,7 +25,8 @@ from ui_common import ask_cash_method, ask_confirm
 
 # 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
 STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "logged_out": "登出",
-              "order_data": "下單資料讀取"}
+              "order_data": "下單資料讀取", "order_filled": "下單填單",
+              "order_dialog_closed": "委託確認視窗關閉偵測"}
 
 # 瀏覽器起不來時，錯誤視窗最上面那段人話。traceback 講的是 Playwright 的內部狀況，
 # 對使用者沒有意義，真正能動手的只有下面這兩件事。
@@ -302,9 +304,14 @@ class UiBackgroundMixin:
         # 「一次只更新一位」全靠它：換人時把那一組登入時收下來的 cookie 換回去，
         # 不必重登（見 fetch.new_store）。跟著瀏覽器一起生、一起死。
         store = fetch_mod.new_store()
+        # 下單分頁「依序執行」用的：填完一筆、開出委託確認視窗之後的那個 page，
+        # 只有這個執行緒能碰它（見下面閒置輪詢那段跟 ui_order._order_dialog_closed）。
+        # 換帳號重開瀏覽器的每條路都要記得清掉它，不然舊帳號那頁早就不知道飛去
+        # 哪裡了，還在照著它問「視窗關了沒」。
+        order_watch_page = None
 
         def ensure_browser():
-            nonlocal playwright, context, browser, store
+            nonlocal playwright, context, browser, store, order_watch_page
             if playwright is None:
                 # 瀏覽器的位置要在 driver 起來之前決定好，它是靠環境變數傳下去的。
                 configure_browsers_path()
@@ -314,6 +321,7 @@ class UiBackgroundMixin:
             if context is None:
                 context, browser = open_context(playwright)
                 store = fetch_mod.new_store()
+                order_watch_page = None       # 舊瀏覽器帶走的那一頁跟著作廢
 
         # 指令 -> (要呼叫誰, 回話時說自己是哪一種)
         jobs = {"login": (login_only, "logged_in"), "fetch": (collect, "fetched")}
@@ -330,6 +338,14 @@ class UiBackgroundMixin:
                     # 事件被處理過才會開始載入。這裡沒有這一段的話，登入完、
                     # 使用者自己在瀏覽器裡點連結，新視窗會一直卡在 about:blank。
                     _pump_browser(context)
+                    # 下單分頁「依序執行」在等這個：上一筆開出的委託確認視窗
+                    # 有沒有真的關了。放在這個閒置分支裡輪詢，不是收到「order」
+                    # 指令才檢查一次——「下一筆」按鈕要等這裡確認過才會解鎖
+                    # （見 ui_order.py 開頭「依序執行」那段對送錯帳戶風險的說明），
+                    # 沒有人在這裡持續盯著的話，視窗關了畫面也不會知道。
+                    if order_watch_page is not None and self._order_dialog_closed(order_watch_page):
+                        order_watch_page = None
+                        self.queue.put(("order_dialog_closed", {}))
                     continue
                 if cmd == "stop":
                     break
@@ -357,7 +373,46 @@ class UiBackgroundMixin:
                         # 登入/讀取自己會重開一個乾淨的瀏覽器，不必特別處理這個狀態。
                         context = browser = None
                         store = fetch_mod.new_store()
+                        order_watch_page = None
                     self.queue.put(("logged_out", payload))
+                    continue
+
+                if cmd == "order":
+                    # 下單分頁的「開始下單／下一筆」，見 ui_order.start_order_execution。
+                    # 跟 login/fetch 那兩種不一樣：一次只做一筆委託、參數是
+                    # (第幾組帳號, 帳號設定, 執行預覽裡的一列, 模式, 追價檔數,
+                    # 是否自動送出)，不是 selected/path 那種形狀，所以不走下面
+                    # jobs[cmd] 那條共用路。模式／追價檔數／自動與否都是這一輪
+                    # 按下「開始下單」那一刻凍結的值（見 start_order_execution），
+                    # 不是每筆下單前重讀畫面。
+                    order_number, account, row, mode, ticks, auto = arg
+                    payload = {}
+                    try:
+                        ensure_browser()
+                        order_watch_page, extra = self._order_fill_job(
+                            context, store, order_number, account, row, mode, ticks, auto)
+                        payload.update(extra)
+                    except order_fill.OrderMaybeSubmitted as exc:
+                        # 「確認」已經真的按下去了，只是沒等到結果——這種不能讓
+                        # 使用者以為跟一般失敗一樣「按下一筆重試就好」，重試會把
+                        # 同一筆委託再送一次。maybe_submitted 這個旗標讓
+                        # ui_order._on_order_filled 用完全不同的文字警告使用者。
+                        payload = {"error": str(exc), "maybe_submitted": True}
+                    except RuntimeError as exc:
+                        # _order_fill_job／fetch.ensure_logged_in／order_fill.select_stock
+                        # 丟出來的其餘 RuntimeError 訊息本來就是寫給人看的（查不到
+                        # 成交價、登入失敗、股票代號比對不符…），發生在真的按下
+                        # 「確認」之前，重試安全，不是意外的臭蟲，不需要連
+                        # traceback 一起丟到「這一筆下單失敗」的視窗上——那只會讓
+                        # 真正的一句話被一大段檔案路徑、行號淹沒。
+                        payload = {"error": str(exc)}
+                    except Exception:
+                        # 這裡才是真的沒預期到的狀況（Playwright 逾時、瀏覽器操作
+                        # 失敗…），traceback 留著才查得出來是哪裡壞的。
+                        payload = {"error": traceback.format_exc()}
+                        if context is None:
+                            payload["hint"] = BROWSER_HINT
+                    self.queue.put(("order_filled", payload))
                     continue
 
                 fetch_records, kind = jobs[cmd]
@@ -472,7 +527,8 @@ class UiBackgroundMixin:
         """
         handlers = {"logged_in": self._on_logged_in, "fetched": self._on_fetched,
                     "written": self._on_written, "logged_out": self._on_logged_out,
-                    "order_data": self._on_order_data}
+                    "order_data": self._on_order_data, "order_filled": self._on_order_filled,
+                    "order_dialog_closed": self._on_order_dialog_closed}
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
@@ -518,8 +574,14 @@ class UiBackgroundMixin:
 
         沒被取走的指令要一起倒掉。留著的話，下次按登入會先跑到那個舊指令
         （舊的檔案路徑、舊的帳號選擇），做了一件使用者這次沒有要求的事。
+
+        下單「依序執行」在等委託確認視窗關閉的那段（order_exec_watching）另外
+        算一種「還在等」：那個階段 order_filled 早就回過話了，browser_waiting
+        已經歸零，只剩「等視窗關閉」這件事還沒有人跟畫面說完——執行緒要是剛好
+        在這個節骨眼死掉，只看 browser_waiting 會判斷成「沒在等什麼」，「下一筆」
+        就會永遠鎖死看不出原因。
         """
-        if not self.browser_waiting:
+        if not self.browser_waiting and not self.order_exec_watching:
             return
         if self.browser_thread is not None and self.browser_thread.is_alive():
             return
@@ -530,6 +592,15 @@ class UiBackgroundMixin:
                 self.browser_cmd_queue.get_nowait()
             except queue.Empty:
                 break
+
+        # 下單「依序執行」正好卡在這裡的話，跟著一起收掉——瀏覽器都不在了，
+        # 剩下的委託沒有任何辦法繼續，留著只會讓「下一筆」按鈕永遠是灰的。
+        if self.order_exec_queue:
+            self.order_exec_queue = []
+            self.order_exec_pos = 0
+            self.order_exec_busy = False
+            self.order_exec_watching = False
+            self._update_order_exec_ui()
 
         self._set_busy(False)
         self._say("背景作業中斷，這次的動作沒有做完")
