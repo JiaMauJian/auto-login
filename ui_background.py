@@ -26,7 +26,10 @@ from ui_common import ask_cash_method, ask_confirm
 # 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
 STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "logged_out": "登出",
               "order_data": "下單資料讀取", "order_filled": "下單填單",
-              "order_dialog_closed": "委託確認視窗關閉偵測"}
+              "order_dialog_closed": "委託確認視窗關閉偵測",
+              "order_price_refresh": "多輪出清重讀持股",
+              "order_stock_price": "新增股票查價",
+              "order_quotes_fetched": "查詢委買賣"}
 
 # 瀏覽器起不來時，錯誤視窗最上面那段人話。traceback 講的是 Playwright 的內部狀況，
 # 對使用者沒有意義，真正能動手的只有下面這兩件事。
@@ -381,16 +384,16 @@ class UiBackgroundMixin:
                     # 下單分頁的「開始下單／下一筆」，見 ui_order.start_order_execution。
                     # 跟 login/fetch 那兩種不一樣：一次只做一筆委託、參數是
                     # (第幾組帳號, 帳號設定, 執行預覽裡的一列, 模式, 追價檔數,
-                    # 是否自動送出)，不是 selected/path 那種形狀，所以不走下面
-                    # jobs[cmd] 那條共用路。模式／追價檔數／自動與否都是這一輪
-                    # 按下「開始下單」那一刻凍結的值（見 start_order_execution），
-                    # 不是每筆下單前重讀畫面。
-                    order_number, account, row, mode, ticks, auto = arg
+                    # 是否自動送出, 買賣方向)，不是 selected/path 那種形狀，
+                    # 所以不走下面 jobs[cmd] 那條共用路。模式／追價檔數／自動
+                    # 與否／買賣方向都是這一輪按下「開始下單」那一刻凍結的值
+                    # （見 start_order_execution），不是每筆下單前重讀畫面。
+                    order_number, account, row, mode, ticks, auto, side = arg
                     payload = {}
                     try:
                         ensure_browser()
                         order_watch_page, extra = self._order_fill_job(
-                            context, store, order_number, account, row, mode, ticks, auto)
+                            context, store, order_number, account, row, mode, ticks, auto, side)
                         payload.update(extra)
                     except order_fill.OrderMaybeSubmitted as exc:
                         # 「確認」已經真的按下去了，只是沒等到結果——這種不能讓
@@ -413,6 +416,27 @@ class UiBackgroundMixin:
                         if context is None:
                             payload["hint"] = BROWSER_HINT
                     self.queue.put(("order_filled", payload))
+                    continue
+
+                if cmd == "order_quotes":
+                    # 下單分頁的「查詢委買賣」按鈕，見 ui_order.fetch_order_quotes。
+                    # 跟「order」一樣不走下面 jobs[cmd] 那條共用路（參數形狀不
+                    # 一樣：這裡是一批股票代號，不是單一筆委託），但比「order」
+                    # 簡單——查完就結束，不會像委託確認視窗那樣需要留一個
+                    # page 讓閒置輪詢繼續盯著。
+                    order_number, account, codes = arg
+                    payload = {}
+                    try:
+                        ensure_browser()
+                        quotes = self._order_quotes_job(context, store, order_number, account, codes)
+                        payload = {"quotes": quotes}
+                    except RuntimeError as exc:
+                        payload = {"error": str(exc)}
+                    except Exception:
+                        payload = {"error": traceback.format_exc()}
+                        if context is None:
+                            payload["hint"] = BROWSER_HINT
+                    self.queue.put(("order_quotes_fetched", payload))
                     continue
 
                 fetch_records, kind = jobs[cmd]
@@ -528,7 +552,10 @@ class UiBackgroundMixin:
         handlers = {"logged_in": self._on_logged_in, "fetched": self._on_fetched,
                     "written": self._on_written, "logged_out": self._on_logged_out,
                     "order_data": self._on_order_data, "order_filled": self._on_order_filled,
-                    "order_dialog_closed": self._on_order_dialog_closed}
+                    "order_dialog_closed": self._on_order_dialog_closed,
+                    "order_price_refresh": self._on_order_price_refresh,
+                    "order_stock_price": self._on_order_stock_price,
+                    "order_quotes_fetched": self._on_order_quotes_fetched}
         try:
             while True:
                 kind, payload = self.queue.get_nowait()

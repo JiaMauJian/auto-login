@@ -4,6 +4,9 @@ Excel 讀寫。只認得持股管理表的這幾格，其餘全是公式，一�
     D4:D8  股票名稱(代號)   只讀，用來對出每一列是哪一檔
     E4:E8  股數            <- 未實現損益的「成交股數」
     F4:F8  成本            <- 未實現損益的「成交均價」
+    I4:I8  股價            只讀，跟 D4:D8 同一列對應同一檔股票；由使用者既有的
+                           「更新股價」巨集（Module1.更新股價）填入，出清股票
+                           多輪模式的「自動更新股價」用（見 orders.py 開頭說明）
     B8     現金餘額         <- 由紀錄檔的現金流水算出來
     B17    今年報酬率       只讀，下單功能排執行順序用（見 orders.order_accounts）
     D1     程式維護提醒      每次寫入順便刷新，關閉程式時清掉，見 marker_enabled
@@ -30,6 +33,18 @@ ENV_KEY = "EXCEL_PATH"
 HOLDING_ROWS = range(4, 9)
 COL_NAME, COL_QTY, COL_COST = 4, 5, 6
 CELL_BALANCE = (8, 2)
+
+# I 欄「股價」，跟 D4:D8 同一列對應同一檔股票——這份表本來就只有這 5 列
+# 持股，跟股數/成本是同一個列配置，不是另外一套對應規則。只讀，程式從來
+# 不寫這一欄（見 read_sheet）。
+COL_PRICE = 9
+
+# 使用者既有的巨集（2026/08/28 使用者確認：Module1 的 Sub 更新股價()），
+# 平常手動點的「更新」按鈕背後就是呼叫這個——多輪出清模式的「自動更新股價」
+# 開關，就是每一輪開始前用 COM 觸發同一個巨集，等它跑完再讀 I4:I8（見
+# run_update_price_macro／orders.py 開頭的模式說明）。程式不知道、也不管
+# 這個巨集實際上怎麼拿到報價，只負責觸發它、等它跑完、讀結果。
+UPDATE_PRICE_MACRO = "Module1.更新股價"
 
 # 今年報酬率，下單功能排執行順序用（報酬率低的先執行）。只讀，不寫——
 # 這一格本來就是 Excel 自己的公式算出來的，程式沒有理由覆蓋它。
@@ -157,6 +172,7 @@ def read_sheet(sheet):
             "code": code,
             "qty": sheet.Cells(row, COL_QTY).Value,
             "cost": sheet.Cells(row, COL_COST).Value,
+            "price": to_num(sheet.Cells(row, COL_PRICE).Value, None),
         })
 
     return {
@@ -174,6 +190,23 @@ def read_return_rate(sheet):
     跟 planner.bank_balance 讀不懂銀行餘額時的態度一樣。
     """
     return to_num(sheet.Cells(*CELL_RETURN_RATE).Value, None)
+
+
+def run_update_price_macro(excel):
+    """
+    觸發使用者既有的「更新股價」巨集（見 UPDATE_PRICE_MACRO 的說明）。
+
+    excel 是 open_workbook() 回傳的第一個值（Application 物件，不是
+    Workbook）——巨集是掛在整個活頁簿上的，用 Application.Run 呼叫。
+
+    Application.Run 對一般沒有非同步動作的 VBA Sub 是同步呼叫，這支函式
+    回來的時候巨集本身應該已經跑完；但巨集內部實際上怎麼拿到報價（文件
+    上寫「可能是外部報價元件」）程式管不到、也沒去查證，如果報價來源本身
+    是非同步更新（例如靠 RTD 之類的機制），巨集跑完不代表 I 欄數字已經是
+    最新的——呼叫端讀回 I4:I8 之後還是要自己判斷讀到的價格看起來合不合理，
+    不能直接假設「巨集跑完＝資料一定是新的」。
+    """
+    excel.Run(UPDATE_PRICE_MACRO)
 
 
 def write_cells(sheet, writes):

@@ -132,6 +132,36 @@ def wide(pixels):
 CELL_PAD = 8
 
 
+# 下單分頁「執行預覽」表格：盤中模式最終委託價還沒算出來時顯示的文字，不是
+# 空白也不是猜一個數字（見 orders.plan_intraday_orders）——成交價基準已經
+# 是 Excel 讀到的值，只差下單前那一刻查對手方第一檔比價（見 orders.chase_price）。
+# 定義在這裡而不是 ui_order.py，是因為 ui_layout.py 算「價格」欄要多寬時也要
+# 量到同一句話，兩邊都認 ui_common 不必互相 import（見檔案開頭的說明）。
+PRICE_PENDING_TEXT = "依 Excel 成交價追價"
+
+
+def col_width(family, texts, minimum=0):
+    """
+    量一批候選字串（Treeview 目前的字型：family + FONT_SIZE）裡最寬的一個，
+    算出這一欄該給多寬，取代原本用固定數字硬猜寬度。
+
+    只適合用在「候選字串是有限、可列舉的」欄位（股票名稱清單、帳戶名單、
+    orders.py 那幾句固定備註）——不能拿使用者正在打字的即時輸入內容當
+    texts，那樣每個按鍵都會讓欄寬跟著跳動一次，反而更難用（2026/08/29
+    使用者討論下單分頁「執行預覽」欄寬時確認過這個界線）。
+
+    量出來的已經是 FONT_SIZE 級字型的實際像素，不必再套 wide()——wide()
+    只用在沒有實際文字可量、純粹用數字猜的寬度（見 wide() 說明）。
+    minimum 是那種猜出來的下限，兩者取大的，量出來的字串再短也不會比
+    原本設計的下限還窄。
+    """
+    pad = CELL_PAD * 2 + 10
+    if not texts:
+        return minimum
+    font = tkfont.Font(family=family, size=FONT_SIZE)
+    return max(max(font.measure(t) for t in texts) + pad, minimum)
+
+
 def work_area(root):
     """
     桌面上真正能用的那一塊：主螢幕扣掉工作列。

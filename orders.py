@@ -7,23 +7,31 @@
 服務兩個模式：
     盤前  一次設定（股票、比重、價格）套用到好幾個帳戶，價格是人手動填的
           固定值，預覽階段就算得出完整的執行清單（見 plan_stock_orders）。
-    盤中  價格不是人填的，是下單前那一刻用成交價往下追 N 檔算出來的
-          （見 chase_price），預覽階段查不到即時成交價，所以
-          plan_intraday_orders 的每一列價格是 None，真正的價格由呼叫端
-          （ui_order.py 的填單那一步）另外查、另外算。
+    盤中  價格不是人填的，成交價來自 Excel I 欄（新增股票／重新整理時就
+          讀進來，見 ui_order.order_prices／order_exec_prices，不再現查
+          網頁），下單前那一刻只再跟對手方第一檔比大小算出最終委託價
+          （見 chase_price）。plan_intraday_orders 是純函式，不自己查 Excel
+          或即時報價，但呼叫端（ui_order.py）如果已經把這兩份資料查回來
+          （成交價、2026/08/29 新增「查詢委買賣」按鈕查到的即時委買賣一），
+          可以當參數傳進來，這裡就直接算出實際會送出的價格；沒傳的話（還
+          沒按過那顆按鈕）"price" 一律是 None，真正的價格留到填單那一步
+          再算。
 """
 
 from decimal import ROUND_HALF_UP, Decimal
 
-from util import to_num
+from util import show, to_num
 
 SHARES_PER_LOT = 1000
 
-# 盤前目前只支援賣出（規劃文件只有「設定賣出比重」，沒有買入這個選項），
-# 買賣別先固定寫死在這裡，跟網站本身 buysell 的 B/S 代碼同一套（見
-# order-api-newOrder-encrypted 記憶）。之後如果盤前也要支援買入，
-# 這裡要改成 stock_settings 每檔各自帶一個方向，不是整批共用。
+# 買賣別跟網站本身 buysell 的 B/S 代碼同一套（見 order-api-newOrder-encrypted
+# 記憶）。2026/08/28 加了買/賣切換，是整批共用一個方向（跟 stock_settings
+# 的「比重」一樣整批共用），不是每檔股票各自一個方向——切換買賣的時候畫面
+# 會把股票清單清空重選（見 ui_order._on_order_side_changed），所以不會有
+# 同一輪裡買賣混雜的情況，這裡的函式簽章才能只加一個 side 參數，不必把
+# side 塞進每一筆 stock_settings。
 SIDE_SELL = "S"
+SIDE_BUY = "B"
 
 # 委託別（bs_flag）兩個模式不一樣，不是同一個值兩邊共用：盤前是預約單，
 # 掛在開盤前排隊等撮合，那個時間點根本還沒有連續交易，交易所不接受「當下
@@ -32,6 +40,20 @@ SIDE_SELL = "S"
 # 更正：早先以為盤前也能用 IOC 是錯的。
 BS_FLAG_PRE = "R"
 BS_FLAG_INTRADAY = "I"
+
+# plan_stock_orders／plan_intraday_orders「note」欄位僅有的幾種固定文字，
+# 不是使用者亂打的自由文字——執行預覽表格算「備註」欄要多寬時（見
+# ui_layout._build_order_right）量的就是這幾句，拉成常數是為了讓兩邊量
+# 的是同一份文字，這裡改了措辭那邊的欄寬會自動跟著變，不必兩處各改一次。
+REASON_NO_HOLDING = "沒有這檔，略過"
+REASON_UNDER_ONE_LOT = "比重算出來不到 1 張，略過"
+REASON_NO_PRICE = "尚未設定價格"
+REASON_CHASE_TEMPLATE = "以 Excel 成交價±{ticks}檔為邊界，下單前查{opposite}比價"
+# 2026/08/29 使用者要求：先用「查詢委買賣」按鈕把即時委買賣一整批查回來
+# （見 ui_order.fetch_order_quotes），這裡就能直接算出實際會送出的價格，
+# 不必再等「開始下單」跑到那一筆才臨時查——note 講清楚「這個數字不會再變」，
+# 跟 REASON_CHASE_TEMPLATE 那句「下單前查」是兩種不同的狀態，不能共用同一句。
+REASON_CHASE_FROZEN_TEMPLATE = "已查{opposite} {value}，下單會直接用這個價格（不再重查）"
 
 
 def lots_from_weight(held_qty, weight_pct):
@@ -68,12 +90,18 @@ def order_accounts(accounts):
     return ordered, skipped
 
 
-def plan_stock_orders(stock_settings, ordered_accounts, holdings):
+def plan_stock_orders(stock_settings, ordered_accounts, holdings, side):
     """
     組出「執行預覽」：排好序的帳戶 × 設定好的股票，一組一列。
 
     stock_settings 是 [{"code", "name", "weight_pct", "price"}, ...]，
     比重、價格照使用者確認過的決定，每檔股票各自設定，不是全部共用一個值。
+
+    side 是 SIDE_SELL 或 SIDE_BUY，這一輪整批共用一個方向（見上面 SIDE_SELL
+    的說明）。買跟賣共用同一條「比重 × 目前持股」公式（2026/08/28 使用者
+    確認）：完全沒持有的股票，「比重」在買方向一樣算不出張數，會被判定
+    「沒有這檔，略過」——這代表買方向目前只能加碼已經持有的部位，不能
+    用這個功能建立全新部位，是刻意的限制，不是漏改。
 
     holdings 是 {(分頁名, 股票代號): 股數}，讀不到或該帳戶沒有這檔股票時
     對應的 key 不必存在，用 .get() 補 0。
@@ -94,18 +122,18 @@ def plan_stock_orders(stock_settings, ordered_accounts, holdings):
             # 東西不能默默當成 0 或忽略，得讓人看得到還缺什麼）。
             reasons = []
             if held_qty == 0:
-                reasons.append("沒有這檔，略過")
+                reasons.append(REASON_NO_HOLDING)
             elif lots <= 0:
-                reasons.append("比重算出來不到 1 張，略過")
+                reasons.append(REASON_UNDER_ONE_LOT)
             if not str(stock["price"]).strip():
-                reasons.append("尚未設定價格")
+                reasons.append(REASON_NO_PRICE)
 
             preview.append({
                 "order": account["order"],
                 "sheet": account["sheet"],
                 "code": stock["code"],
                 "name": stock["name"],
-                "side": SIDE_SELL,
+                "side": side,
                 "held_qty": held_qty,
                 "lots": lots,
                 "price": stock["price"],
@@ -115,19 +143,35 @@ def plan_stock_orders(stock_settings, ordered_accounts, holdings):
     return preview
 
 
-def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down):
+def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down, side,
+                         prices=None, quotes=None):
     """
-    盤中模式的執行預覽，跟 plan_stock_orders 平行的一份。
+    盤中模式的執行預覽，跟 plan_stock_orders 平行的一份。side 的規則（整批
+    共用、買賣共用同一條比重公式）也跟 plan_stock_orders 一樣，見那邊的說明。
 
     stock_settings 是 [{"code", "name", "weight_pct"}, ...]——沒有 "price"，
-    這是跟盤前最大的結構差異：盤中的價格是下單前那一刻用成交價往下追
-    ticks_down 檔算出來的（見 chase_price），預覽階段沒有即時成交價可以算，
-    這裡的 "price" 一律是 None，"note" 改講清楚「價格會在下單前才查」，不是
-    留白、也不是猜一個數字出來充數。
+    這是跟盤前最大的結構差異：盤中的成交價已經在新增股票／重新整理時讀進
+    Excel（見 ui_order.order_prices／order_exec_prices）。
+
+    prices／quotes 都是可選的（預設 None，當空字典用），呼叫端（ui_order.py）
+    才碰得到 Excel 跟即時報價這兩份資料，這支函式本身仍然不碰 Excel、不碰
+    瀏覽器——傳進來的只是現成的字典，不是要這裡自己去查：
+        prices  code -> Excel I 欄讀回來的成交價（pricenow）
+        quotes  code -> {"bid","ask","last"}（fastquote.FastQuoteStream.latest()
+                的形狀），2026/08/29 新增「查詢委買賣」按鈕先整批查回來的
+                即時委買賣一（見 ui_order.fetch_order_quotes）
+
+    兩份都查得到同一檔股票的話，這裡就直接用 chase_price 算出實際會送出的
+    價格填進 "price"，"note" 改講「已經查過、不會再變」；缺一份（通常是還
+    沒按「查詢委買賣」，quotes 是空的）就跟以前一樣 "price" 留 None、"note"
+    講清楚「下單前還會再查一次對手方第一檔比價」，不是留白也不是猜一個
+    數字出來充數。
 
     skip 的判斷（沒有這檔／比重算出來不到 1 張）跟盤前完全一樣，因為這兩件事
     在預覽階段就看得出來，不需要等成交價。
     """
+    prices = prices or {}
+    quotes = quotes or {}
     preview = []
     for account in ordered_accounts:
         for stock in stock_settings:
@@ -135,22 +179,35 @@ def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down)
             lots = lots_from_weight(held_qty, stock["weight_pct"]) if held_qty else 0
 
             reasons = []
+            price = None
             if held_qty == 0:
-                reasons.append("沒有這檔，略過")
+                reasons.append(REASON_NO_HOLDING)
             elif lots <= 0:
-                reasons.append("比重算出來不到 1 張，略過")
+                reasons.append(REASON_UNDER_ONE_LOT)
             else:
-                reasons.append(f"成交價往下 {ticks_down} 檔（下單前才查）")
+                # 對手方第一檔查哪邊跟 side 是反的：買方向查委賣一、賣方向
+                # 查委買一（見 chase_price 的說明），note 這句話跟著 side 換，
+                # 不能整批寫死「委買一」。
+                opposite = "委賣一" if side == SIDE_BUY else "委買一"
+                pricenow = prices.get(stock["code"])
+                quote = quotes.get(stock["code"])
+                if pricenow is not None and quote is not None:
+                    best_opposite = quote["ask"] if side == SIDE_BUY else quote["bid"]
+                    price = chase_price(pricenow, ticks_down, side, best_opposite)
+                    reasons.append(REASON_CHASE_FROZEN_TEMPLATE.format(
+                        opposite=opposite, value=show(best_opposite)))
+                else:
+                    reasons.append(REASON_CHASE_TEMPLATE.format(ticks=ticks_down, opposite=opposite))
 
             preview.append({
                 "order": account["order"],
                 "sheet": account["sheet"],
                 "code": stock["code"],
                 "name": stock["name"],
-                "side": SIDE_SELL,
+                "side": side,
                 "held_qty": held_qty,
                 "lots": lots,
-                "price": None,
+                "price": price,
                 "skip": held_qty == 0 or lots <= 0,
                 "note": "；".join(reasons),
             })
@@ -205,9 +262,22 @@ def tick_size(price):
     return _TICK_ABOVE
 
 
-def chase_price(pricenow, ticks_down):
+def chase_price(pricenow, ticks_down, side, best_opposite=None):
     """
-    從成交價 pricenow 開始往下追 ticks_down 檔，回傳算出來的限價。
+    依 2026/08/28 使用者確認的吃檔演算法算委託價（見 docs/自動下單與半自動
+    下單規劃.pptx.txt「盤中」小節），不是單純「成交價−N檔」硬算：
+
+    1. 先從 pricenow 算出邊界——買方向往上推 ticks_down 檔（最高願付價），
+       賣方向往下推（最低願收價）。
+    2. 邊界跟對手方第一檔的即時價格 best_opposite（買查委賣一、賣查委買一，
+       方向不同查哪邊——呼叫端自己依 side 查好、對好方向再傳進來，這裡不
+       負責查即時報價）比大小：買方向在邊界內（≤ 邊界）就用 best_opposite
+       實際價格，超過邊界就用邊界價本身；賣方向相反（≥ 邊界才用實際價格）。
+
+    best_opposite 傳 None 代表呼叫端還沒有即時委買/委賣一可查，直接回邊界
+    價——邊界本身用檔位表就算得出來，缺的只是「能不能再貼近市價一點」這個
+    優化，不是「有沒有價格可以掛」這件事，用邊界頂著先能動，不是在猜數字
+    （跟 fetch.settle_problem「讀不懂就整格擋住，不猜」是不同情境）。
 
     每一步都用「當下那個價位」重新查 tick_size，不是拿起點價位的檔位算完
     一次乘以 ticks_down——價格每跨過一個級距門檻，最小跳動單位就會變小，
@@ -219,7 +289,15 @@ def chase_price(pricenow, ticks_down):
     0.1 可能變成 104.34999999999999），不然送進網站價格欄位的字串會帶一長串
     小數，網站不一定接受。
     """
-    price = float(pricenow)
+    boundary = float(pricenow)
     for _ in range(ticks_down):
-        price = round(price - tick_size(price), 2)
-    return price
+        if side == SIDE_BUY:
+            boundary = round(boundary + tick_size(boundary), 2)
+        else:
+            boundary = round(boundary - tick_size(boundary), 2)
+
+    if best_opposite is None:
+        return boundary
+    if side == SIDE_BUY:
+        return min(best_opposite, boundary)
+    return max(best_opposite, boundary)

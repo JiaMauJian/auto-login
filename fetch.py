@@ -68,37 +68,6 @@ def bank_problem(rows):
     return None
 
 
-def current_price(page, bid, cid, stock_no, expect_code):
-    """
-    查一次「未實現損益」，回傳這個帳戶目前 stock_no 那檔股票的 pricenow
-    （現在市價／成交價）。查不到、查詢失敗、或核對不出身分一律回 None——
-    盤中模式要拿這個價格去算追價（見 orders.chase_price），跟其他查詢
-    一樣「讀不懂就整格擋住，不猜」（見 settle_problem／bank_problem），
-    不能因為只是查一個價格就放寬 account_codes 這道身分核對——下單場景
-    比讀持股更不能查錯人。
-
-    只要現在市價，range 用 "stksum" 就夠，不必像 collect() 那樣多帶
-    "stkdat" 逐筆明細。stock_no 用 "" 整批查回來、自己在這裡挑，不是
-    交給 stock_no 參數去篩（那個參數是否真的能篩、篩的是什麼欄位沒有
-    驗證過，不要拿沒驗證過的行為去對真實下單負責）。
-    """
-    data, raw = query(page, "queryInstantAccount_new", {
-        "branchId": "1" + bid, "custId": cid,
-        "range": "stksum", "stock_no": "",
-    })
-    if data is None or data.get("retcode") != "000000":
-        return None
-
-    codes = account_codes(data)
-    if codes and codes != {expect_code}:
-        return None
-
-    for row in data.get("arrays") or []:
-        if row.get("stkno") == stock_no:
-            return to_num(row.get("pricenow"), None)
-    return None
-
-
 def new_store():
     """
     瀏覽器活著的期間要記住的東西。由呼叫方保管，跨多次 ensure_logged_in 沿用；
