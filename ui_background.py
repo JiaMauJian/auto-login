@@ -960,7 +960,13 @@ class UiBackgroundMixin:
         self._sync_clear_button()
         if busy:
             self.progress.pack(side="right", padx=(8, 12), pady=6)
-            self.progress.start(12)
+            # 100ms 一格，不是越快越好：ttkbootstrap 的進度條是用圖片畫的，每格
+            # 都是一次重畫。2026/08/29 實測原本的 12ms（一秒 83 格，人眼分不出來）
+            # 會讓動畫期間持續吃掉半顆核心（CPU 52%），而登入 20 組要跑好幾分鐘
+            # —— 整個介面在最忙的時候反而最鈍。改成 100ms 之後降到 7%，看起來
+            # 一樣在動。詳見 docs/Tkinter ui設計原則.md 的「ttkbootstrap 圖片元件的
+            # 重畫成本」一節。
+            self.progress.start(100)
             self._say(message)
         else:
             self.progress.stop()

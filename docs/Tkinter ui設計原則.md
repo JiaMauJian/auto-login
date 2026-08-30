@@ -6,7 +6,11 @@
 >
 > - 小工具／單一視窗小程式：優先參考第一~四章（版面配置、視覺體驗、進階套件、架構建議）即可
 > - 涉及耗時操作、多視窗、需打包發布等情境：再參考對應章節（第五~十章）
->   目標是寫出乾淨可維護的介面，而不是為了套用規則而增加不必要的複雜度。
+> - **用了 ttkbootstrap，或介面覺得鈍：第十一~十三章一定要看。**那三章跟前面性質不同 ——
+>   前面是通則，那三章是本專案實際踩過、量過數字的坑，而且全都是「不會報錯、只是靜靜地
+>   不對或很慢」的那一類，不知道就不會想到要查
+>
+> 目標是寫出乾淨可維護的介面，而不是為了套用規則而增加不必要的複雜度。
 
 ---
 
@@ -54,6 +58,11 @@ widget.grid(row=0, column=0, sticky="nsew")
 | 主題     | 可套用 ttk 的 Style/Theme，或系統主題，避免介面過於「90 年代感」                                                                  |
 | DPI 縮放 | 高解析度螢幕下字型/元件可能顯示過小，需留意 DPI awareness 處理（尤其 Windows 上常見），必要時搭配作業系統設定或程式內縮放係數調整 |
 
+> 「元件選用」那一條有例外，而且本專案已經踩到兩次：ttk／美化套件的元件不一定比較好。
+> 歷程分頁刻意改用原生 `tk.Text` 而不是 `Treeview`（見第十三節），捲軸也刻意把繪製元件
+> 換回 Tk 內建的（見第十二節）。「外觀較現代」是預設值不是鐵律，遇到效能或可控性的
+> 問題時，退回原生元件是正當選項。
+
 ---
 
 ## 三、進階美化套件（原生 tkinter 不夠用時）
@@ -89,6 +98,11 @@ widget.grid(row=0, column=0, sticky="nsew")
   - 用 `threading` 開背景執行緒處理耗時工作，搭配 `queue.Queue` 回傳結果給主執行緒
   - 主執行緒用 `after()` 定時輪詢 queue，取得結果後再更新 UI
   - **不要在 worker thread 直接操作 tkinter 元件**（tkinter 元件非執行緒安全），所有 UI 更新都必須在主執行緒進行
+
+> **畫面鈍不一定是執行緒問題。** 這一節講的是「主執行緒被佔住」，但那只是卡頓的一種
+> 成因。背景執行緒都做對了、畫面還是鈍的話，下一個要查的是**重畫成本** —— 見第十二節。
+> 本專案 2026/08/29 實測到的卡頓（拖視窗一格要 1.6 秒）就完全不是這一節的問題，
+> 執行緒的部分本來就是對的。
 
 ---
 
@@ -194,7 +208,88 @@ pyinstaller --name MyApp --onedir --collect-all ttkbootstrap --icon=app.ico your
 
 ---
 
-## 十二、Treeview 不好用，除非不得已別用
+## 十二、ttkbootstrap 圖片元件的重畫成本（捲軸拉不動、進度條吃 CPU）
+
+**症狀**：拖視窗邊框改變大小時，畫面重繪明顯延遲、整個拖曳過程都在頓。元件愈多
+的分頁愈明顯，但兇手不是元件多，是**畫面上有幾條捲軸**。
+
+**成因**：ttkbootstrap 的捲軸滑塊是一張帶透明邊的 9-slice 圖片（見它的
+`style/builders/scrollbar.py`），Tk 每次重畫都要把那張圖拉伸到滑塊的實際長度、
+逐像素做 alpha 合成。成本跟**滑塊的像素長度**成正比，所以「沒東西可捲」（滑塊
+滿格）反而最貴 —— 而那正是多數面板平常的狀態。
+
+2026/08/29 在這個專案實測（拉動視窗寬度，一次 resize 的中位數）：
+
+| 情境                        | 修正前  | 修正後 |
+| --------------------------- | ------- | ------ |
+| 每多一條捲軸                | +250 ms | +8 ms  |
+| 下單分頁（畫面上 4 條捲軸） | 1268 ms | 206 ms |
+| 同步分頁（2 條）            | 537 ms  | 113 ms |
+| 歷程分頁（1 條）            | 251 ms  | 65 ms  |
+| 憑證分頁（0 條，對照組）    | 73 ms   | 73 ms  |
+
+補充事實（都實測過，可以省掉重走一遍的功夫）：
+
+- 換 ttkbootstrap 的別的主題救不了（cosmo / litera / darkly 一樣慢）；Tk 內建主題
+  （vista / clam / default / alt）本來就沒這個問題，它們的滑塊是直接畫矩形
+- 成本是真的 CPU 在畫，不是等視窗管理員：`update_idletasks()`（算版面）只佔 5ms，
+  其餘都在 `update()` 的重繪，而且 cProfile 看得到 100% 在 Tcl 層，Python callback
+  一毫秒都沒有 —— 所以「把 `<Configure>` 綁定拿掉」這類方向完全無效
+- 跟 `Panedwindow`、`Canvas`、`Treeview`、元件數量都無關，純粹是捲軸條數
+
+**做法**：用 `element_create(..., "from", "clam", ...)` 從內建主題複製一份真正
+「不是圖片」的 trough / thumb 進來，再把捲軸的 layout 指過去（本專案的實作見
+`ui_layout.UiLayoutMixin._use_cheap_scrollbars`，套一次全視窗的捲軸都生效）：
+
+```python
+for src in ("trough", "thumb"):
+    style.element_create(f"Flat.Scrollbar.{src}", "from", "clam", src)
+for axis, sticky in (("Vertical", "ns"), ("Horizontal", "we")):
+    style.layout(f"{axis}.TScrollbar", [
+        ("Flat.Scrollbar.trough", {"sticky": sticky, "children": [
+            ("Flat.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+    style.configure(f"{axis}.TScrollbar", arrowsize=8, gripcount=0, ...)
+```
+
+**三個踩過的坑**：
+
+- **只改 layout、把元件名字寫成 `Scrollbar.thumb` 是不夠的**。Tk 找元件會沿著樣式
+  名往上找，最後還是找回 ttkbootstrap 註冊的那個圖片元件（它註冊的名字是
+  `Vertical.TScrollbar.thumb`）。結果是「快了但畫壞」：圖片不再被拉伸，只剩頭尾
+  兩個端帽、中間空一段。一定要 `element_create` 換成別的元件
+- **這個畫壞特別難抓**，因為 widget 的行為完全正確：`identify()` 量得到的滑塊範圍
+  是對的，錯的只有畫出來的像素。驗證捲軸外觀只能靠截圖，不能靠 `identify()`
+- **`arrowsize` 是唯一給得動粗細的選項，而且一定要給**。換掉 layout 之後捲軸的
+  粗細本來是箭頭撐出來的，沒有箭頭又沒有 `arrowsize` 就會縮成 1 像素 —— 一條看不見
+  也點不到的線，不會報錯（`width`、`thickness` 這兩個名字看起來比較像，實測完全
+  沒作用）。另外 `gripcount=0` 是關掉 clam 畫在滑塊正中間的那三條紋
+
+### 同一個成因的第二處：進度條的動畫間隔
+
+`Progressbar` 的 pbar / trough 也是 ttkbootstrap 的圖片元件，所以**動畫每跑一格
+就是一次重畫**。`start()` 的間隔給太小，就等於叫它整天重畫這張圖。
+
+本專案原本寫 `start(12)`（一秒 83 格，人眼根本分不出來），2026/08/29 實測讓程式
+在「忙碌中」的時候持續吃掉 **74.9%** 的 CPU —— 而登入 20 組帳號要跑好幾分鐘，
+等於整個介面在最忙的時候反而最鈍。改成 `start(100)` 之後降到 **6.8%**，看起來
+一樣在動（見 `ui_background._set_busy`）。
+
+| 做法                      | 動畫期間 CPU | 動畫期間一次 resize |
+| ------------------------- | ------------ | ------------------- |
+| `Progressbar`，每 12ms    | 52%          | 44 ms               |
+| `Progressbar`，每 100ms   | 7%           | 29 ms               |
+| 純文字轉圈四格，每 100ms  | 5%           | 13 ms               |
+| 純文字轉圈四格，每 150ms  | 1%           | 12 ms               |
+
+主題也有影響（同樣 12ms 一格：cosmo 42%、vista 17%、clam 5%），但主因是間隔，
+不是主題。真的要再省，就別用 Progressbar、改成一個 `Label` 輪流換 `-` `\` `|` `/`
+這四個字元 —— 但那樣字元寬度不一會左右抖動，要指定等寬字型。
+
+**一般規則**：動畫間隔不要小於 ~80ms。人眼看不出 12ms 和 100ms 的差別，CPU 看得出來。
+
+---
+
+## 十三、Treeview 不好用，除非不得已別用
 
 畫不出格線（唯一能畫的 image element 做法實測效能太差，捲動明顯變鈍）、欄寬也
 不會照內容自動調（要自己用 `font.measure()` 量，還要避開在 `<Configure>` 裡重複
@@ -203,7 +298,7 @@ pyinstaller --name MyApp --onedir --collect-all ttkbootstrap --icon=app.ico your
 
 ---
 
-## 十三、參考資源
+## 十四、參考資源
 
 | 資源                           | 說明                                                    |
 | ------------------------------ | ------------------------------------------------------- |
@@ -213,7 +308,7 @@ pyinstaller --name MyApp --onedir --collect-all ttkbootstrap --icon=app.ico your
 
 ---
 
-## 十四、給 AI 的實作提醒
+## 十五、給 AI 的實作提醒
 
 當協助使用者撰寫 / 修改 tkinter 介面程式碼時：
 

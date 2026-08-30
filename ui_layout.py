@@ -50,6 +50,7 @@ class UiLayoutMixin:
         # 也能用主題色，不必自己重複一份色碼。
         style = ttk.Style(theme="cosmo")
         self.colors = style.colors
+        self._use_cheap_scrollbars(style)
         style.configure("Treeview", font=(family, FONT_SIZE), rowheight=wide(28))
         style.configure("Treeview.Heading", font=(family, FONT_SIZE, "bold"))
         # 每一格左右各留一點空（2026/08/21 使用者反應「數字貼太緊」）。預設只留
@@ -86,8 +87,8 @@ class UiLayoutMixin:
         # orderConfirmRWD.html 的 text-red/text-green），下單分頁的股票列跟
         # 執行預覽都用同一組顏色，一眼認得出方向不必看文字。ttkbootstrap 的
         # 自訂樣式名稱一定要先 configure() 登記過才會生效，只 map() 會被悄悄
-        # 換回預設樣式（見「Tkinter ui設計原則」第十一節），這裡先 configure
-        # 一次就是在做這件事。
+        # 換回預設樣式（見 docs/Tkinter ui設計原則.md 的「ttkbootstrap 自訂樣式
+        # 名稱的命名規則」一節），這裡先 configure 一次就是在做這件事。
         style.configure("Buy.TLabel", font=(family, FONT_SIZE), background="#FFDFDF")
         style.configure("Sell.TLabel", font=(family, FONT_SIZE), background="#DCF1EB")
         # Combobox 展開的那個下拉清單其實是另一個 Tk 元件（listbox），不歸 ttk 的
@@ -142,6 +143,64 @@ class UiLayoutMixin:
         self._sync_buttons()
 
         self._center(width, height)
+
+    def _use_cheap_scrollbars(self, style):
+        """
+        把捲軸換成不用圖片畫的那一套，只為了效能，不為了外觀。
+
+        ttkbootstrap 的捲軸滑塊是一張帶透明邊的 9-slice 圖片（見它的
+        style/builders/scrollbar.py），Tk 每次重畫都要把那張圖拉伸到滑塊的實際
+        長度、逐像素做 alpha 合成 —— 成本跟滑塊的像素長度成正比，而且**沒東西
+        可捲的時候滑塊是滿格，正好最貴**，那恰好是這個程式多數時候的狀態
+        （股票列、帳戶名單平常都塞得下）。
+
+        2026/08/29 實測（拉動視窗寬度，一次 resize 的中位數）：
+
+            每多一條 ttkbootstrap 捲軸   +250 ms      換掉之後   +8 ms
+            下單分頁（畫面上 4 條）      1268 ms  ->  206 ms
+            同步分頁（2 條）              537 ms  ->  113 ms
+            歷程分頁（1 條）              251 ms  ->   65 ms
+            憑證分頁（0 條，對照組）        73 ms  ->   73 ms
+
+        拖視窗邊框時 Windows 是一路連續送 resize 過來的，所以使用者感覺到的
+        不是「慢一秒」而是整個拖曳過程都在頓。cosmo / litera / darkly 都一樣，
+        換 ttkbootstrap 的別的主題救不了；Tk 內建主題（vista / clam / default）
+        本來就沒這個問題，因為它們的滑塊是直接畫矩形。
+
+        代價是滑塊變成扁平方角，不再是 ttkbootstrap 那顆內縮的圓角膠囊；粗細、
+        顏色都照原本的配（見底下），所以並排看幾乎分不出來，版面也不會位移。
+        """
+        # 一定要用 element_create 從內建主題複製一份真正「不是圖片」的元件過來。
+        # 只改 layout、把元件名字寫成 Scrollbar.thumb 是不夠的：Tk 找元件會沿著
+        # 樣式名往上找，最後還是找回 ttkbootstrap 註冊的那個圖片元件
+        # （它註冊的名字是 Vertical.TScrollbar.thumb），結果是「快了但畫壞」——
+        # 圖片不再被拉伸，只剩頭尾兩個端帽、中間空一段。這個坑很陰險，因為
+        # widget 的行為完全正確：identify() 量得到的滑塊範圍是對的，錯的只有
+        # 畫出來的像素，只能靠截圖才看得出來。
+        for src in ("trough", "thumb"):
+            style.element_create(f"Flat.Scrollbar.{src}", "from", "clam", src)
+        for axis, sticky in (("Vertical", "ns"), ("Horizontal", "we")):
+            style.layout(f"{axis}.TScrollbar", [
+                ("Flat.Scrollbar.trough", {"sticky": sticky, "children": [
+                    ("Flat.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})]})])
+            # arrowsize 是唯一給得動粗細的選項，而且一定要給：換掉 layout 之後
+            # 這條捲軸的粗細本來是箭頭撐出來的，沒有箭頭又沒有 arrowsize 就會
+            # 縮成 1 像素 —— 一條看不見也點不到的線，不會報錯（width、thickness
+            # 這兩個名字看起來比較像，實測完全沒作用）。取 8 是照 ttkbootstrap
+            # 原本的粗細（它的 _SCROLLBAR_THICKNESS 就是 8）。
+            #
+            # gripcount=0 是關掉 clam 畫在滑塊正中間的那三條紋，ttkbootstrap
+            # 原本的滑塊是素面的，留著會多一塊原本沒有的裝飾。
+            #
+            # 滑塊色用 border 壓深 25%：直接用 border 在白色的槽上太淡，看不出
+            # 滑塊在哪（ttkbootstrap 自己也是這樣處理，見它的 _scrollbar_thumb_color）。
+            style.configure(f"{axis}.TScrollbar",
+                            troughcolor=self.colors.bg,
+                            background=self.colors.update_hsv(self.colors.border, vd=-0.25),
+                            bordercolor=self.colors.bg,
+                            darkcolor=self.colors.update_hsv(self.colors.border, vd=-0.25),
+                            lightcolor=self.colors.update_hsv(self.colors.border, vd=-0.25),
+                            borderwidth=0, arrowsize=wide(8), relief="flat", gripcount=0)
 
     def _paint_dropdown_selection(self, combobox):
         """把 combobox 展開的那份清單，選取列蓋成主題藍。
