@@ -307,7 +307,7 @@ class UiBackgroundMixin:
         # 不必重登（見 fetch.new_store）。跟著瀏覽器一起生、一起死。
         store = fetch_mod.new_store()
         # 下單分頁「依序執行」用的：填完一筆、開出委託確認視窗之後的那個 page，
-        # 只有這個執行緒能碰它（見下面閒置輪詢那段跟 ui_order._order_dialog_closed）。
+        # 只有這個執行緒能碰它（見下面閒置輪詢那段跟 ui_order_exec._order_dialog_closed）。
         # 換帳號重開瀏覽器的每條路都要記得清掉它，不然舊帳號那頁早就不知道飛去
         # 哪裡了，還在照著它問「視窗關了沒」。
         order_watch_page = None
@@ -343,7 +343,7 @@ class UiBackgroundMixin:
                     # 下單分頁「依序執行」在等這個：上一筆開出的委託確認視窗
                     # 有沒有真的關了。放在這個閒置分支裡輪詢，不是收到「order」
                     # 指令才檢查一次——「下一筆」按鈕要等這裡確認過才會解鎖
-                    # （見 ui_order.py 開頭「依序執行」那段對送錯帳戶風險的說明），
+                    # （見 ui_order_exec.py「依序執行」那段對送錯帳戶風險的說明），
                     # 沒有人在這裡持續盯著的話，視窗關了畫面也不會知道。
                     if order_watch_page is not None and self._order_dialog_closed(order_watch_page):
                         order_watch_page = None
@@ -380,7 +380,7 @@ class UiBackgroundMixin:
                     continue
 
                 if cmd == "order":
-                    # 下單分頁的「開始下單／下一筆」，見 ui_order.start_order_execution。
+                    # 下單分頁的「開始下單／下一筆」，見 ui_order_exec.start_order_execution。
                     # 跟 login/fetch 那兩種不一樣：一次只做一筆委託、參數是
                     # (第幾組帳號, 帳號設定, 執行預覽裡的一列, 模式, 追價檔數,
                     # 是否自動送出, 買賣方向)，不是 selected/path 那種形狀，
@@ -398,7 +398,7 @@ class UiBackgroundMixin:
                         # 「確認」已經真的按下去了，只是沒等到結果——這種不能讓
                         # 使用者以為跟一般失敗一樣「按下一筆重試就好」，重試會把
                         # 同一筆委託再送一次。maybe_submitted 這個旗標讓
-                        # ui_order._on_order_filled 用完全不同的文字警告使用者。
+                        # ui_order_exec._on_order_filled 用完全不同的文字警告使用者。
                         payload = {"error": str(exc), "maybe_submitted": True}
                     except RuntimeError as exc:
                         # _order_fill_job／fetch.ensure_logged_in／order_fill.select_stock

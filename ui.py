@@ -159,10 +159,12 @@ from ui_cert import UiCertMixin
 from ui_history import UiHistoryMixin
 from ui_layout import UiLayoutMixin
 from ui_order import UiOrderMixin
+from ui_order_exec import UiOrderExecMixin
 from ui_sync import UiSyncMixin
 
 
-class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHistoryMixin, UiOrderMixin):
+class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHistoryMixin,
+              UiOrderMixin, UiOrderExecMixin):
     def __init__(self, root):
         self.root = root
         self.path = excel_io.excel_path()
@@ -226,7 +228,8 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         self._migrate_candidates = {}   # 遷移憑證那張表的列 id -> profile_tools.scan_cert_sources() 的一筆
         self.profile_busy = False       # 「建立 Profile」進行中，避免重複點
 
-        self._order_init_state()        # 下單分頁（盤前模式）的狀態，見 ui_order.py
+        self._order_init_state()        # 下單分頁的狀態，見 ui_order.py（它自己會再叫
+                                        # ui_order_exec 那半邊的 _order_exec_init_state）
 
         self.ledger = None
         self.ledger_error = None

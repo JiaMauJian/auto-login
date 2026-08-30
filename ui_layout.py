@@ -611,7 +611,8 @@ class UiLayoutMixin:
         追價檔數、勾帳戶——價格不是人填的，是以 Excel 成交價為基準、下單前
         再往上或往下追 N 檔算出來的，見 orders.chase_price）共用同一套帳戶
         勾選、執行預覽、依序執行機制，只有左邊股票設定欄位、跟怎麼組出執行
-        清單不一樣（見 ui_order.py `_on_order_mode_changed`／`start_order_execution`）。
+        清單不一樣（見 ui_order.py `_on_order_mode_changed`、ui_order_exec.py
+        `start_order_execution`）。
         """
         frame = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(frame, text="  下單  ")
@@ -837,7 +838,7 @@ class UiLayoutMixin:
         self.order_preview_hint = ttk.Label(preview, text="", style="Hint.TLabel")
         self.order_preview_hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        # 依序執行：一顆按鈕身兼「開始下單」與「下一筆」（見 ui_order.py
+        # 依序執行：一顆按鈕身兼「開始下單」與「下一筆」（見 ui_order_exec.py
         # start_order_execution），旁邊「停止」放棄這一輪；下面那行狀態文字
         # 講現在卡在第幾筆、在等什麼。
         exec_bar = ttk.Frame(preview)
