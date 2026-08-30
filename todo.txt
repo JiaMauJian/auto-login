@@ -146,45 +146,52 @@ C. 之後才排（不急，也不必週一）
         -> 08/30 在 welcome 的 console 驗過 typeof fastQuoteUtil === 'object'，
            所以停在 welcome 一樣開得起來，這個疑慮解除。
 
-        *** 如果要做 C5，這一條就不必單獨做了，C5 已經涵蓋它。***
+        （C5 曾經涵蓋這一條，但 C5 已決定不做，見下面。）
 
-[ ] C5  更大的一條：登入之後就留在 welcome，goto 一次都不做
-        （做了這條，C4 自動包含在裡面，不要兩條都做）
+[-] C5  登入之後就留在 welcome、goto 一次都不做  —— 已評估，決定不做（2026/08/30）
+        留著這一條不是待辦，是為了讓將來想到同一個點子的人不用再推一次。
 
-        08/30 用瀏覽器 console 逐項驗過的事實：
-          - 登入後停留的 welcome/layout.jsp?type=1 有 common.js（B64_XOR_Encode
-            是 function、XOR_KEY 是 string）跟 branch_id / cust_id / account
+        點子是什麼
+        ----------
+        C4 只省登入那一趟；C5 是把同樣的做法套到每一次更新：登入後停在 welcome，
+        之後所有查詢都就地打，換人只換 cookie 也不導頁，_revisit 整個拿掉。
+
+        技術上做得到（08/30 用瀏覽器 console 逐項驗過）
+        ----------------------------------------------
+          - welcome/layout.jsp?type=1 有 common.js（B64_XOR_Encode 是 function、
+            XOR_KEY 是 string）跟 branch_id / cust_id / account
           - 從 welcome 用「程式原樣的參數」打 queryInstantAccount_new
-            （range: 'stksum,stkdat'）→ status 200、retcode 000000、長度 2049
+            （range: 'stksum,stkdat'）-> status 200、retcode 000000、長度 2049
             也就是伺服器不挑哪一頁發的請求（沒有 Referer 之類的限制）
-          - welcome 自己載入時會打 query610 跟 queryInstantAccount_new
-          - account/layoutRWD.jsp?type=4 載入時也會打 queryInstantAccount_new
-            —— 所以現在每次 _revisit 都在重複打一次程式接著要自己打的查詢
+          - 換 cookie 本來就不導頁，而 FETCH_JS 用絕對路徑 /tbb/MainController 加
+            credentials: 'same-origin'，就地重打帶的就是當下那組 cookie
+          - 順帶發現：account/layoutRWD.jsp?type=4 載入時自己就打一次
+            queryInstantAccount_new，等於每次 _revisit 都重複打一次程式接著要自己
+            打的查詢（20 組就是 20 次多餘往返）
 
-        構想：
-          登入 → 落在 welcome → 就地打所有查詢 → 換 cookie 也不導頁，就地再打
-        換 cookie 本來就不會導頁，而 FETCH_JS 用的是絕對路徑 /tbb/MainController
-        加 credentials: 'same-origin'，打出去帶的就是當下那組 cookie，所以「就地
-        重打」本身已經是「用現在的身分問伺服器」了。
+        為什麼還是不做
+        --------------
+        它拿掉的是 _revisit 那三道核對（還在不在 /account/、sessionStorage 有沒有
+        值、身分對不對），身分安全就只剩第 4 道（查詢回應裡每一列的 bhno/cseq）。
 
-        省的是：每一次「更新」、每一組帳號，省掉一次完整頁面載入（含那一頁自己的
-        自動查詢）。C4 只省登入那一趟，這條省的是每一次更新。
+        而那條防線的下游是真錢：
+            更新 -> 寫 E/F/B8 -> 下單分頁讀 Excel 算張數 -> 真的送出委託
+        寫錯人的話會用 B 的持股算出張數、掛在 A 的帳上，而且全程不報錯。
 
-        *** 動之前一定要先解決的四件事 ***
-        1. 拿掉 _revisit 等於身分安全只剩第 4 道（collect 裡每一列的 bhno/cseq）。
-           那是這支程式唯一會「靜靜把 A 的持股寫進 B 的 Excel」的地方，不能只因為
-           省時間就把前三道拆掉。
-        2. 復原路徑要重寫：現在 _revisit 回 None 就乾淨地去重登；改成事後偵測要
-           變成「發現不對 → 重登 → 重打查詢」，那是新的控制流不是刪幾行。
-        3. 要能區分「session 死了」跟「別的查詢錯誤」——retcode 不是 000000 有很多
-           原因，分不出來就不知道該不該重登。
-        4. 交割金額／銀行餘額的回應沒有 bhno/cseq，它們的身分是靠「同一輪最先查的
-           未實現損益」撐著（見 fetch.collect 裡那段註解）。拿掉 _revisit 之後這個
-           依賴更吃重，而查詢順序現在只寫在註解裡、沒有程式強制——要一起補上。
+        省下來的其實很少：一整天最常按的是「更新（某一位）」，那只省一次頁面載入
+        （約 1~2 秒）；省得多的「更新全部帳戶」是開盤前那一次（約 20~40 秒）。
+        拿一天半分鐘換「委託掛錯帳戶而且不報錯」，不划算。
 
-        還要重新量時間：fetch._open_account_page 的註解說帳戶頁整趟 2.18 秒，但
-        記錄裡每組讀取約 2.1 秒，兩個數字對不上（多半量的不是同一件事，或其中一個
-        過時了）。不要拿現有註解的數字直接算省下多少。
+        如果哪天又想省那些重複查詢，走這條零風險的路
+        --------------------------------------------
+        那 20 次重複的 queryInstantAccount_new 不是防線造成的，是因為 type=4 這一頁
+        自己會查。只要找一頁「有 common.js 但載入時不自動查」的 /account/ 頁，把
+        fetch._open_account_page 指過去就好：
+          - 導頁還在 -> 三道核對完全不動
+          - 那一頁不自動查 -> 重複的往返消失
+        同樣的節省、零風險。找法：把 account/layoutRWD.jsp?type= 的數字換幾個開起來，
+        看 console 有沒有冒出 {CMD: ...}，挑一個沒有的。
+
 
 
 做完之後
