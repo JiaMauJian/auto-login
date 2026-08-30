@@ -120,10 +120,10 @@ class UiOrderMixin:
         請求，5 檔 × N 個分頁全部逐一發出去，這是慢不是當掉。
 
         帳戶名單只能從 self.trader_of 來——那是「登入過才知道名字」的既有
-        規則（見 ui.py），還沒登入過的帳戶這裡也看不到，跟同步分頁的範圍
+        規則（見 ui.py），還沒登入過的帳戶這裡也看不到，跟更新分頁的範圍
         選單是同一個限制，不是這裡另外加的。
         """
-        # 看 _excel_in_use() 而不是只看 order_busy：同步分頁的寫入、「新增」股票
+        # 看 _excel_in_use() 而不是只看 order_busy：更新分頁的寫入、「新增」股票
         # 附帶的股價重讀、多輪之間的重讀，動的都是同一份活頁簿（見那個述詞）。
         if self._excel_in_use() or not self._require_excel():
             return
@@ -131,7 +131,7 @@ class UiOrderMixin:
         if not names:
             messagebox.showinfo(
                 "還沒有帳戶名字",
-                "還沒有任何帳戶登入過，名字都還不知道。\n請先到「同步」分頁按「登入」。",
+                "還沒有任何帳戶登入過，名字都還不知道。\n請先到「更新」分頁按「登入」。",
                 parent=self.root)
             return
 
@@ -688,7 +688,7 @@ class UiOrderMixin:
     def _recompute_order_preview(self):
         """
         比重／價格（或追價檔數）／勾選的帳戶，任何一個變了就整份重算重畫——
-        跟同步分頁 fill_sync_tree() 同一個做法，整份重建比自己追蹤哪一列該
+        跟更新分頁 fill_sync_tree() 同一個做法，整份重建比自己追蹤哪一列該
         更新可靠。
         """
         if not self._order_job_ready():
@@ -906,7 +906,7 @@ class UiOrderMixin:
     # 下單」依序跑到那一筆才臨時查（2026/08/29 使用者要求：出清股票時想在
     # 按下去之前就看到會發生什麼事）。跟 start_order_execution 借同一組
     # self.busy／瀏覽器背景執行緒，理由一樣：這一步也要登入／換 cookie，
-    # 不能跟同步分頁或下單依序執行同時搶同一顆瀏覽器。
+    # 不能跟更新分頁或下單依序執行同時搶同一顆瀏覽器。
 
     def fetch_order_quotes(self):
         """

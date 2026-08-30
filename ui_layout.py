@@ -40,7 +40,7 @@ class UiLayoutMixin:
         y = top_edge + max((room_h - height) // 2, 0)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
         # 最窄 900：右半邊改成常駐狀態列＋訊息框之後（2026/08/22，見
-        # docs/同步分頁訊息框改版.md），不再有兩張並排表格的欄位下限撐著，
+        # docs/更新分頁訊息框改版.md），不再有兩張並排表格的欄位下限撐著，
         # 底線改成「左邊名單＋右上角狀態列（現金算法／今日初始現金餘額／修改
         # 按鈕）擠在一起還看得清楚」的寬度，訊息框本身會自動換行，不怕窄。
         self.root.minsize(min(wide(900), width), min(wide(560), height))
@@ -72,7 +72,7 @@ class UiLayoutMixin:
         style.configure("TCheckbutton", font=(family, FONT_SIZE))
         style.configure("TNotebook.Tab", font=(family, FONT_SIZE))
         style.configure("Hint.TLabel", font=(family, HINT_SIZE), foreground="black")
-        # 「讀取」用 bootstyle="primary"（見下面 fetch_button），這裡只補粗體 ——
+        # 「更新」用 bootstyle="primary"（見下面 fetch_button），這裡只補粗體 ——
         # ttkbootstrap 產生的實際樣式名就是 primary.TButton，全程式只有這顆按鈕用它。
         style.configure("primary.TButton", font=(family, FONT_SIZE, "bold"))
         # 現金算法只顯示、不給選（每天讀取前那個視窗才是入口），所以要夠醒目
@@ -123,6 +123,8 @@ class UiLayoutMixin:
         # 讀取完再彈回去，畫面跳一下；現在跟狀態列共用這一列，寬度是分出來的，
         # 讀取中不讀取只差右邊那一小塊有沒有東西，不會動到分頁的位置。
         #
+        self._build_session_bar()
+
         # 用 before=self.tabs 把這一列插到分頁「上面」的位置（其實是 side="bottom"
         # 釘住畫面最下面）：pack 是先來的先分空間，分頁是 expand=True 又排在前面，
         # 視窗一縮小、剩下的空間不夠兩邊分，這一列排在後面就先被擠到 0——
@@ -172,7 +174,7 @@ class UiLayoutMixin:
 
             每多一條 ttkbootstrap 捲軸   +250 ms      換掉之後   +8 ms
             下單分頁（畫面上 4 條）      1268 ms  ->  206 ms
-            同步分頁（2 條）              537 ms  ->  113 ms
+            更新分頁（2 條）              537 ms  ->  113 ms
             歷程分頁（1 條）              251 ms  ->   65 ms
             憑證分頁（0 條，對照組）        73 ms  ->   73 ms
 
@@ -254,7 +256,7 @@ class UiLayoutMixin:
         永遠一頁看得完，不必捲、不必展開群組。
         """
         frame = ttk.Frame(self.tabs, padding=8)
-        self.tabs.add(frame, text="  同步  ")
+        self.tabs.add(frame, text="  更新  ")
 
         self._build_toolbar(frame)
 
@@ -268,62 +270,96 @@ class UiLayoutMixin:
         frame.rowconfigure(1, weight=1)
         frame.columnconfigure(0, weight=1)
 
+    def _build_session_bar(self):
+        """
+        分頁列**上面**那一條跨分頁常駐的列：開啟EXCEL ／ 登入 ／ 全部登出。
+
+        這三顆管的是「這段工作階段的資源」——Excel 接上了沒、瀏覽器登入了沒
+        ——而那是整支程式的前置，不是某一個分頁自己的操作：更新要 Excel，
+        下單兩者都要，掛單只要登入（見 ui_pending.py，它一格 Excel 都不碰）。
+        跟底部那條「停止全部操作」對稱，理由也一模一樣：人要用它的時候可能
+        正停在任何一個分頁上，藏在別的分頁裡就按不到。
+
+        2026/08/30 從更新分頁搬回來。原本擺在視窗最上面、後來移進更新分頁，
+        當時的理由是「這幾顆做的事只跟這一頁有關，歷程、憑證兩頁都用不到」
+        ——那句話在只有三個分頁的時候是對的，下單與掛單長出來之後就不是了。
+        位置變成由「歷史上誰先存在」決定，不是由「誰需要它」決定。
+
+        留在更新分頁的是「範圍」跟「更新」（見 _build_toolbar）：那兩個真的
+        只跟更新有關。
+        """
+        bar = ttk.Frame(self.root)
+        bar.pack(side="top", fill="x", before=self.tabs)
+
+        self.excel_button = ttk.Button(bar, text="開啟EXCEL", command=self.open_excel,
+                                       bootstyle="primary")
+        self.excel_button.pack(side="left", padx=(12, 12), pady=6)
+
+        self.path_label = ttk.Label(bar, text=self._path_text(), style="Hint.TLabel")
+        self.path_label.pack(side="left")
+
+        # 先 pack 的靠最右邊，所以順序是先登出後登入，畫面上才是「登入 登出」。
+        # 這兩顆是一對（同一組瀏覽器 session 的開與關），亮暗規矩也一樣，
+        # 都只看 self.busy，不看 Excel（見 ui_sync._sync_buttons）。
+        self.logout_button = ttk.Button(bar, text="全部登出", bootstyle="secondary",
+                                        command=self.start_logout_all)
+        self.logout_button.pack(side="right", padx=(0, 12), pady=6)
+
+        self.login_button = ttk.Button(bar, text="登入", command=self.start_login,
+                                       bootstyle="primary")
+        self.login_button.pack(side="right", padx=(0, 8), pady=6)
+
     def _build_toolbar(self, parent):
         """
-        開啟EXCEL／登入／讀取——原本擺在視窗最上面、三個分頁共用，
-        但這幾顆按鈕做的事只跟「同步」有關（讀網頁、寫 Excel），歷程、憑證
-        兩頁都用不到，擺在分頁外面等於替另外兩頁背了不相干的操作列。移進來。
+        更新分頁自己的操作列：範圍 ＋ 讀取。
+
+        開啟EXCEL／登入／全部登出 2026/08/30 搬到分頁列上面那一條跨分頁常駐的
+        列去了（見 _build_session_bar），這裡只剩「這一輪要讀誰、按下去讀」。
         """
         top = ttk.Frame(parent, padding=(0, 0, 0, 8))
         top.grid(row=0, column=0, sticky="ew")
 
-        # 三顆按鈕疊成左邊那一直行，由上而下就是做事的順序：
-        # 開啟EXCEL -> 登入 -> 讀取。
+        # 「範圍」跟左邊那份名單是同一個選擇的兩個入口：名單上點一位，這裡就換成
+        # 那一位；這裡換一位，名單也跟著跳。一次只更新一位是常態（一整天下來按最
+        # 多次的就是它），一次讀全部反而是開盤前那一次，所以入口做成「預設全部、
+        # 點了誰就只做誰」。
         #
-        # 原本「讀取」擺在最右邊，動線就變成左上、左下、再橫跨整個視窗
-        # ——而它是這裡最常按的一顆（登入一天一次，讀取一天很多次）。垂直對齊
-        # 還多帶一個好處：後兩顆在前一步沒完成時是灰的，排成一行才看得出那是
-        # 「還沒輪到」而不是「壞了」。sticky="ew" 讓三顆一樣寬，看起來才是一疊
-        # 步驟而不是三顆大小不一的按鈕。
-        self.excel_button = ttk.Button(top, text="開啟EXCEL", command=self.open_excel,
-                                       bootstyle="primary")
-        self.excel_button.grid(row=0, column=0, sticky="ew")
-
-        self.path_label = ttk.Label(top, text=self._path_text(), style="Hint.TLabel")
-        self.path_label.grid(row=0, column=1, columnspan=3, sticky="w", padx=(16, 0))
-
-        self.login_button = ttk.Button(top, text="登入", command=self.start_login,
-                                       bootstyle="primary")
-        self.login_button.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-
-        # 「範圍」不只是登入哪幾組 —— 讀取也照它走，而且它跟左邊那份名單是同一個
-        # 選擇的兩個入口：名單上點一位，這裡就換成那一位；這裡換一位，名單也跟著跳。
-        # 一次只更新一位是常態（一整天下來按最多次的就是它），一次讀全部反而是
-        # 開盤前那一次，所以入口做成「預設全部、點了誰就只做誰」。
-        ttk.Label(top, text="範圍").grid(row=1, column=1, sticky="w", padx=(16, 0), pady=(6, 0))
+        # 2026/08/30 起這個範圍只管「更新」：「登入」搬到分頁列上面那條常駐列，
+        # 而且一律登入全部（使用者確認過不會單獨只登入一組，見
+        # ui_background.start_login）。
+        ttk.Label(top, text="範圍").grid(row=0, column=0, sticky="w")
         choice_width = 22 if self.fake_sheets else 16
         self.account_choice = ttk.Combobox(top, values=self._account_choices(), state="readonly",
                                            width=choice_width, font=(self.family, FONT_SIZE))
         self.account_choice.current(0)
-        self.account_choice.grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(6, 0))
+        self.account_choice.grid(row=0, column=1, sticky="w", padx=(8, 0))
         self.account_choice.bind("<<ComboboxSelected>>", self._on_scope_changed)
 
-        # 按鈕上的字跟著範圍走：全部是「讀取全部帳戶」，選了一位就是「讀取（王小明）帳戶」
+        # 按鈕上的字跟著範圍走：全部是「更新全部帳戶」，選了一位就是「更新（王小明）帳戶」
         # —— 按下去會動到誰，寫在按鈕上，不必回頭去看那個下拉選單（見 _refresh_fetch_button）。
-        self.fetch_button = ttk.Button(top, text="讀取全部帳戶", bootstyle="primary", command=self.start_fetch)
-        self.fetch_button.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        # columnspan=2 讓它跟上面「範圍＋選單」那一列一樣寬：兩列是同一件事的兩半
+        # （挑誰、按下去），對齊了才看得出是一組。
+        self.fetch_button = ttk.Button(top, text="更新全部帳戶", bootstyle="primary",
+                                       command=self.start_fetch)
+        self.fetch_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
-        # 「全部登出」擺在讀取下面，跟上面三顆同一直行、同樣寬——但它不是流程的
-        # 第四步，是反過來結束這一段瀏覽器 session 的動作（清 cookie 再關瀏覽器，
-        # 見 ui_background.start_logout_all），使用者離開座位或要換一批帳號跑之前
-        # 按一次。不跟 excel_open 掛勾（見 UiSyncMixin._sync_buttons）：跟有沒有選
-        # Excel 檔無關，只要瀏覽器開著就能按。
-        self.logout_button = ttk.Button(top, text="全部登出", bootstyle="secondary",
-                                        command=self.start_logout_all)
-        self.logout_button.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        # 「這一按會發生什麼」講在旁邊，不塞進按鈕：按鈕上的字跟著範圍與登入狀態換
+        # （見 _refresh_fetch_button），這句話三個狀態都一樣——恆定的資訊寫進會變的
+        # 標籤，等於同一句講三次。
+        #
+        # 用「查詢」不用「抓」是刻意的：持股（股數／成本）是從未實現損益原封抄回來
+        # 的，現金不是——網頁上根本沒有現金餘額這個數字，程式查的是交割金額
+        # （query610，方法二再多查一次銀行餘額），再照算法算出 B8。「抓現金」是假的。
+        # 但「現金」兩個字不能省：B8 是無條件覆蓋，漏講比講得不夠精準危險。
+        #
+        # 算法是哪一種不寫在這裡——那會變，這句不會（把會變的東西寫進固定字串，下一個
+        # bug 就是切了算法而它還停在舊的那一種）。算法有自己的位置：右上角常駐狀態列。
+        ttk.Label(top, text="查詢台企銀，更新 Excel 的持股與現金餘額",
+                  style="Hint.TLabel").grid(row=1, column=2, sticky="w",
+                                            padx=(16, 0), pady=(6, 0))
 
-        # 右邊留白那一欄負責吃掉多餘寬度，左邊那一直行才不會被拉開。
-        top.columnconfigure(3, weight=1)
+        # 右邊留白那一欄負責吃掉多餘寬度，左邊那一組才不會被拉開。
+        top.columnconfigure(2, weight=1)
 
     def _build_people(self, split):
         """左欄：所有交易人一次看完，誰要處理一眼就知道。"""
@@ -372,7 +408,7 @@ class UiLayoutMixin:
         """
         右欄：常駐狀態列（現金算法／今日初始現金餘額／修改按鈕）＋訊息框。
 
-        2026/08/22 改版（見 docs/同步分頁訊息框改版.md）：原本現金／股票兩張
+        2026/08/22 改版（見 docs/更新分頁訊息框改版.md）：原本現金／股票兩張
         Treeview 整個拿掉。現金算法、今日初始現金餘額是「今天的固定基準／設定」，
         跟這一輪有沒有異動無關，所以搬到這裡常駐顯示；其餘（現金餘額本身、
         股數／成本這一輪的異動）併進訊息框，直接讀歷程檔篩「今天＋這位交易人」
@@ -414,7 +450,7 @@ class UiLayoutMixin:
         self.balance_label.grid(row=0, column=2, sticky="w", padx=(16, 0))
 
         # 「這一輪讀到的跟網頁一致，不用更新」的常駐確認（2026/08/22 再訂正，
-        # 見 docs/同步分頁訊息框改版.md）：原本這句話進訊息框逐行疊、按幾次讀取
+        # 見 docs/更新分頁訊息框改版.md）：原本這句話進訊息框逐行疊、按幾次讀取
         # 就疊幾行，使用者反映多數時候都是這個結果，訊息框反而被洗版，真正的
         # 異動被淹沒。改成不進訊息框，搬來這裡當一個小確認、原地更新不往下疊，
         # 跟 balance_label 同一組「現在是什麼狀態」（見 ui_sync._fill_status）。
@@ -490,7 +526,7 @@ class UiLayoutMixin:
         （9.7 第 3 步），先畫出來讓版面完整，跟下單分頁那幾個還沒接上的控制項
         同一種做法。
 
-        「範圍」跟同步分頁的範圍選單同一個概念，但這裡預設「全部」——看掛單本來
+        「範圍」跟更新分頁的範圍選單同一個概念，但這裡預設「全部」——看掛單本來
         就是要一次看完所有帳戶。
         """
         frame = ttk.Frame(self.tabs, padding=8)
@@ -584,7 +620,7 @@ class UiLayoutMixin:
         self.history_when.pack(side="left", padx=(6, 0))
         self.history_when.bind("<<ComboboxSelected>>", lambda _event: self._fill_history())
 
-        # 改用 Text 而不是 Treeview（2026/08/23，見 docs/同步分頁訊息框改版.md
+        # 改用 Text 而不是 Treeview（2026/08/23，見 docs/更新分頁訊息框改版.md
         # 同一個理由）：欄寬固定會切字，切到的字只能靠滑鼠停留的提示框看，
         # 換成一行一筆事件、文字自動換行，就不會有「這格被切掉看不到」這件事，
         # 也不用再維護欄寬／滑鼠提示那一整套。字級跟其他文字統一用 FONT_SIZE。
@@ -598,7 +634,7 @@ class UiLayoutMixin:
         self.history_box.configure(yscrollcommand=bar.set)
         bar.grid(row=1, column=1, sticky="ns")
 
-        # 現金餘額變負的那一行標紅，跟同步頁訊息框（warn_box 的 "neg"）、
+        # 現金餘額變負的那一行標紅，跟更新頁訊息框（warn_box 的 "neg"）、
         # 左邊名單負現金同一套顏色語意（2026/08/23 使用者要求）。
         self.history_box.tag_configure("neg", foreground=self.colors.danger)
 

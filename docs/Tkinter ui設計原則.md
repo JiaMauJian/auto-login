@@ -224,7 +224,7 @@ pyinstaller --name MyApp --onedir --collect-all ttkbootstrap --icon=app.ico your
 | --------------------------- | ------- | ------ |
 | 每多一條捲軸                | +250 ms | +8 ms  |
 | 下單分頁（畫面上 4 條捲軸） | 1268 ms | 206 ms |
-| 同步分頁（2 條）            | 537 ms  | 113 ms |
+| 更新分頁（2 條）            | 537 ms  | 113 ms |
 | 歷程分頁（1 條）            | 251 ms  | 65 ms  |
 | 憑證分頁（0 條，對照組）    | 73 ms   | 73 ms  |
 

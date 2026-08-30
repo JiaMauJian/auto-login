@@ -21,7 +21,7 @@ from ui_common import col_width, wide
 from util import show
 
 # 範圍選單的「全部」。掛單這一頁預設就是全部——看掛單本來就是要一次看完所有
-# 帳戶（10.1），跟同步分頁那個「通常只更新一位」的預設剛好相反。
+# 帳戶（10.1），跟更新分頁那個「通常只更新一位」的預設剛好相反。
 PENDING_ALL = "全部帳戶"
 
 
@@ -40,7 +40,7 @@ class UiPendingMixin:
         這次要查哪幾組帳號。
 
         名單只能從 self.trader_of 來——那是「登入過才知道名字」的既有限制（見
-        ui.py），跟同步分頁的範圍選單、下單分頁的帳戶清單同一個限制，不是這裡
+        ui.py），跟更新分頁的範圍選單、下單分頁的帳戶清單同一個限制，不是這裡
         另外加的。
         """
         who = self.pending_scope.get() if self.pending_scope is not None else PENDING_ALL
@@ -66,7 +66,7 @@ class UiPendingMixin:
         「查詢掛單」：丟一個指令給瀏覽器背景執行緒，結果回來見 _on_pending_fetched。
 
         跟下單分頁的「查詢委買賣」「開始下單」共用同一顆 self.busy／同一條背景
-        執行緒，理由一樣：這一步也要登入／換 cookie，不能跟同步分頁或下單依序
+        執行緒，理由一樣：這一步也要登入／換 cookie，不能跟更新分頁或下單依序
         執行同時搶同一顆瀏覽器。
         """
         if self.busy or self.pending_busy:
@@ -76,7 +76,7 @@ class UiPendingMixin:
         if not targets:
             messagebox.showinfo(
                 "還沒有帳戶名字",
-                "還沒有任何帳戶登入過，名字都還不知道。\n請先到「同步」分頁按「登入」。",
+                "還沒有任何帳戶登入過，名字都還不知道。\n請先到「更新」分頁按「登入」。",
                 parent=self.root)
             return
 
@@ -142,7 +142,7 @@ class UiPendingMixin:
                                    parent=self.root)
 
     def _fill_pending(self):
-        """整份重建，跟同步分頁 fill_sync_tree()／下單分頁執行預覽同一個做法。"""
+        """整份重建，跟更新分頁 fill_sync_tree()／下單分頁執行預覽同一個做法。"""
         for item in self.pending_tree.get_children():
             self.pending_tree.delete(item)
 

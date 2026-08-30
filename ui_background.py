@@ -132,10 +132,10 @@ class UiBackgroundMixin:
     def _scope_ready(self):
         """範圍下拉能不能讓人手動切到某一組。
 
-        名字不到齊之前不給選：「登入」跟「讀取全部帳戶」選在「全部」時
+        名字不到齊之前不給選：「登入」跟「更新全部帳戶」選在「全部」時
         本來就會把每一組都登入一輪、順便知道名字（見 _on_logged_in），
         這裡等的正是那一輪做完 —— 不然使用者可能在誰都還沒登入過的時候，
-        手動切到一個從沒動過的組別，按鈕只能落到「讀取（第 N 組）帳戶」
+        手動切到一個從沒動過的組別，按鈕只能落到「更新（第 N 組）帳戶」
         那種叫不出名字的備援文字。模擬帳號一開機名字就有了，天生就緒。
         """
         return self.excel_open and not self.busy and all(
@@ -149,7 +149,7 @@ class UiBackgroundMixin:
 
         不管只有一組還是有很多組，選單停在「全部」就是全部 —— 第一次
         一定是全部讀取，之後要各別讀取得自己把選單切到那一組，按鈕文字
-        才會跟著換成「讀取（某某）帳戶」或「讀取（第 N 組）帳戶」。
+        才會跟著換成「更新（某某）帳戶」或「更新（第 N 組）帳戶」。
         """
         choice = self.account_choice.current()
         return choice if choice > 0 else None
@@ -161,19 +161,32 @@ class UiBackgroundMixin:
 
     def _refresh_fetch_button(self):
         """
-        按鈕上的字就是「按下去會動到誰」，一律用「讀取」這個動詞。
+        按鈕上的字就是「按下去會動到誰」，一律用「更新」這個動詞。更新的是什麼
+        （Excel 上的持股與現金餘額）兩個狀態都一樣，不寫在按鈕上，寫在旁邊那句
+        Hint（見 ui_layout._build_toolbar）。
+
+        2026/08/30 從「讀取」改成「更新」。「讀取」只講了這一按的前半段——它讀
+        網頁**而且**會把 E/F/B8 覆蓋掉，一顆會改你試算表的按鈕不該叫「讀取」，
+        那是三個候選字裡最不準的一個。動詞也就跟著分頁名（更新）對上了。
 
         名字還不知道（那一組沒登入過）時寫「第 3 組」而不是硬掰一個名字：
         這種時候按下去確實只做那一組，只是程式還說不出他是誰。正常流程會先
         按「登入」，那一步就會把名字補上，所以這條路很少真的走到。
+
+        原本還有第三個狀態「登入+讀取全部帳戶」（還有帳號沒登入過時），用來標
+        「這一按會順便補做登入、因此慢一個數量級」。2026/08/30 拿掉：「登入」
+        搬到分頁列上面那條跨分頁常駐的列，從哪一頁都看得到、也不可能再被漏按
+        （見 ui_layout._build_session_bar）；而真的漏按了，按下去的狀態列本來
+        就會說「還沒登入的話瀏覽器會自己開起來」（見 start_fetch），資訊沒有
+        因此消失，只是從按鈕挪到按下去的那一刻。少一個狀態，這顆按鈕就只剩
+        「做誰」一個變數。
         """
         order = self._scope_order()
         if order is None:
-            done_once = all(i in self.trader_of for i in range(1, len(self.accounts) + 1))
-            text = "讀取全部帳戶" if done_once else "登入+讀取"
+            text = "更新全部帳戶"
         else:
             name = self.trader_of.get(order)
-            text = f"讀取（{name}）帳戶" if name else f"讀取（第 {order} 組）帳戶"
+            text = f"更新（{name}）帳戶" if name else f"更新（第 {order} 組）帳戶"
         self.fetch_button.configure(text=text)
 
     def _on_scope_changed(self, _event=None):
@@ -205,7 +218,21 @@ class UiBackgroundMixin:
             self.browser_thread.start()
 
     def start_login(self):
-        if self.busy or not self._require_excel():
+        """
+        登入**一律全部**，不看更新分頁那個「範圍」。
+
+        2026/08/30 使用者確認：不會單獨只登入一組。實際動線是開盤前按一次登入
+        （順便把交易人姓名收齊，見 _on_logged_in），之後整天都在「讀取（某人）
+        帳戶」——而那一顆本來就會順便把還沒登入的那組登進去（見 fetch.collect），
+        所以「只登入某一組」這件事沒有任何入口消失。範圍留在更新分頁只管讀取
+        （見 ui_layout._build_toolbar），這一顆搬到分頁列上面那條跨分頁常駐列
+        （見 ui_layout._build_session_bar），兩邊不再共用同一個選擇。
+
+        不叫 _require_excel()：登入根本不碰 Excel（見 ui_sync._sync_buttons 那顆
+        按鈕的說明），帳號清單來自 .env，連 path 都只是順手帶著給「讀取」那條
+        共用路解包用的，登入這一支不會拿它做任何事（見 _browser_worker）。
+        """
+        if self.busy:
             return
         if not self.accounts:
             messagebox.showerror("沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
@@ -217,7 +244,7 @@ class UiBackgroundMixin:
         self._ensure_browser_thread()
         self._set_busy(True, "登入中，瀏覽器會自己開起來，請不要關掉它…")
         self.browser_waiting += 1
-        self.browser_cmd_queue.put(("login", (self._selected_accounts(), self.path)))
+        self.browser_cmd_queue.put(("login", (list(enumerate(self.accounts, start=1)), self.path)))
 
     def start_fetch(self):
         # 看 _excel_in_use() 而不是只看 self.busy：下單分頁那幾條路也在用 COM 動
@@ -671,7 +698,7 @@ class UiBackgroundMixin:
             self._say("登入失敗")
             return
 
-        self._say(f"已登入：{'、'.join(names)}。要更新資料時再按「讀取」。")
+        self._say(f"已登入：{'、'.join(names)}。要更新資料時再按「更新」。")
 
     def _initialize(self, records):
         """
@@ -831,7 +858,7 @@ class UiBackgroundMixin:
             # 順序不能反：refresh_history() 才會把剛落帳的這一筆讀回
             # self.history_rows，replan() 的 fill_sync_tree() 會用它畫訊息框
             # ——先 replan 再 refresh 的話，訊息框會晚一輪才看到這一筆
-            # （2026/08/22 發現：模擬帳號改現金、按「讀取全部帳戶」，餘額立刻
+            # （2026/08/22 發現：模擬帳號改現金、按「更新全部帳戶」，餘額立刻
             # 更新但訊息框要按第二次才補上那一行）。
             self.refresh_history()
             self.replan()
@@ -929,7 +956,7 @@ class UiBackgroundMixin:
             messagebox.showerror("登出失敗", _error_text(payload))
             return
 
-        self._say("已全部登出並關閉瀏覽器。下次按「登入」或「讀取」會重新開一個瀏覽器。")
+        self._say("已全部登出並關閉瀏覽器。下次按「登入」或「更新」會重新開一個瀏覽器。")
 
     def _refresh_problems(self):
         """
@@ -995,7 +1022,7 @@ class UiBackgroundMixin:
         """
         現在有沒有任何一條路正在用 COM 動那份活頁簿。
 
-        四個旗標各自誕生於不同的功能，本來各管各的：self.busy 是同步分頁的
+        四個旗標各自誕生於不同的功能，本來各管各的：self.busy 是更新分頁的
         登入／讀取／寫入，order_busy 是下單分頁的「持股與報酬率」，
         order_stock_price_busy 是盤中「新增」股票附帶的那次股價重讀，
         order_exec_price_busy 是多輪之間的重讀。問題是它們動的是**同一個
@@ -1009,7 +1036,7 @@ class UiBackgroundMixin:
         舊價當基準。不報錯、不缺欄位，只是靜靜地錯。
 
         所以四個旗標從這裡開始當成一個看。CLAUDE.md 那條「自動計算執行期間
-        同步分頁的讀取／寫入要鎖住，反之亦然」就是靠這個述詞（畫面層）加上
+        更新分頁的讀取／寫入要鎖住，反之亦然」就是靠這個述詞（畫面層）加上
         excel_io._EXCEL_LOCK（執行緒層）兩層一起實作的。
         """
         return bool(self.busy or self.order_busy or self.order_stock_price_busy
@@ -1065,7 +1092,8 @@ class UiBackgroundMixin:
         但 Office 沒啟用的機器上，那個背景 Excel 會在啟用檢查失敗後把自己收掉，
         同步是跑到一半才炸的 —— 那時搞不好已經寫了幾格。所以這裡改成
         由使用者親手把檔開起來，程式接上他那個視窗：看得見、讀到的是畫面上的
-        即時內容、寫完他也馬上看得到。沒開起來就不給登入，把問題擋在最前面。
+        即時內容、寫完他也馬上看得到。沒開起來就不給「更新」，把問題擋在最前面
+        （2026/08/30 起「登入」不在這道關卡裡了，見 ui_sync._sync_buttons）。
 
         紀錄檔（現金基準）是跟著檔名走的，所以換一份檔等於換掉整個狀態來源
         —— 手上這批網頁資料與提案全是上一份檔算出來的，一律清掉重來，
@@ -1322,7 +1350,7 @@ class UiBackgroundMixin:
 
     def _maybe_ask_cash_method(self):
         """
-        這次程式開起來、第一次按「讀取全部帳戶」（含第一次按的「登入+讀取」）時，
+        這次程式開起來、第一次按「更新全部帳戶」時，
         先問今天要用哪一種算法。回傳 True 才可以繼續讀取，False 表示使用者取消，
         呼叫端（start_fetch）要整個收手，不能當作已經問過。
 
@@ -1335,11 +1363,13 @@ class UiBackgroundMixin:
         使用者可能在中間發現今天有全額交割、想換答案。
 
         2026/08/26 之前這個視窗沒有取消：X 跟 Escape 都關不掉。改回可以取消是因為
-        使用者只是想按「登入」，卻按到第一次讀取前才會出現、標籤是「登入+讀取」的
-        同一顆鈕（見 ui_layout 那顆鈕的 labeling），這個視窗跳出來又走不掉，只能
-        把整支程式關掉重開。取消不會套用任何算法（answer 是 None），也不記進
-        cash_method_asked——下次不管是按「登入+讀取」還是「讀取全部帳戶」都會
-        重新問一次，不會卡在「問過但沒答案」的中間狀態。
+        使用者只是想按「登入」，卻按到旁邊那一顆——當時「登入」跟這一顆疊在同一直行，
+        而且第一次讀取前它的標籤是「登入+讀取全部帳戶」，兩顆都有「登入」兩個字。
+        視窗跳出來又走不掉，只能把整支程式關掉重開。那個版面 2026/08/30 拆開了
+        （「登入」搬到分頁列上面的常駐列，這一顆只叫「更新全部帳戶」），誤按的機會
+        小很多，但「跳出來的時機不是使用者要的」還是需要退路，所以取消留著。取消
+        不會套用任何算法（answer 是 None），也不記進 cash_method_asked——下次再按
+        「更新全部帳戶」都會重新問一次，不會卡在「問過但沒答案」的中間狀態。
         """
         if self.ledger is None or self.path in self.cash_method_asked:
             return True

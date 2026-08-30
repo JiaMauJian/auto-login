@@ -1,4 +1,4 @@
-"""同步分頁的顯示與操作：左邊名單、右邊常駐狀態列與訊息框。"""
+"""更新分頁的顯示與操作：左邊名單、右邊常駐狀態列與訊息框。"""
 
 import datetime
 
@@ -97,7 +97,7 @@ def _warning_line(time_text, text):
     """
     股票提醒那一行（見 UiSyncMixin._fill_notes）。2026/08/22 使用者要求：
     跟其他行統一格式——不再堆在訊息框最後面（會被今天累積的歷程往下擠、
-    要捲很多才看得到，見 docs/同步分頁訊息框改版.md），改成掛時間戳、混進
+    要捲很多才看得到，見 docs/更新分頁訊息框改版.md），改成掛時間戳、混進
     同一個時間序，跟 `_cash_line`／`_stock_lines` 同一種「時間 [標籤] 內容」
     形狀。字用深黃色（`warn` tag，`self.colors.warning`）——份量比一般歷程
     重，2026/08/22 使用者再次要求跟其他行顏色分開。現金被擋住的那幾句
@@ -217,7 +217,7 @@ def _format_today_events(rows):
 
 
 class UiSyncMixin:
-    # ---------- 同步分頁 ----------
+    # ---------- 更新分頁 ----------
 
     def replan(self):
         """重新計算提案並重畫。plan 是純函式，可以隨便重跑。"""
@@ -358,7 +358,7 @@ class UiSyncMixin:
         """
         右上角常駐狀態列：現金算法、今日初始現金餘額、現在的現金餘額、
         「✓ 與網頁一致」小提示、修改按鈕——不管這一輪有沒有異動都在，跟
-        訊息框（今天發生了什麼）分開（見 docs/同步分頁訊息框改版.md）。
+        訊息框（今天發生了什麼）分開（見 docs/更新分頁訊息框改版.md）。
 
         「現金餘額」這一項固定顯示目前算出來的數字，2026/08/22 使用者要求：
         訊息框那幾行 [餘額更新] 之後會去重（同樣的結果不再重複印，見
@@ -392,7 +392,7 @@ class UiSyncMixin:
         # 「✓ 與網頁一致」小提示：這一位讀過（或修改過今日初始現金餘額）就有
         # self.round_at，時間戳掛在這裡；被擋住（現金還沒設基準）或有提醒
         # （例如「網頁庫存已無此檔」）在跑的時候不顯示——那時候不算「一致」，
-        # 提醒本身已經在講了，這裡不能講反話（見 docs/同步分頁訊息框改版.md）。
+        # 提醒本身已經在講了，這裡不能講反話（見 docs/更新分頁訊息框改版.md）。
         at = self.round_at.get(name)
         quiet_ok = bool(at) and not self.warnings.get(name) and (item is None or not item["blocked"])
         if quiet_ok:
@@ -521,7 +521,7 @@ class UiSyncMixin:
         討論中，暫時維持原樣排在最後面，不進這個時間序。
 
         「這一輪跟網頁一致、不用更新」這件事也不在這裡講（見
-        docs/同步分頁訊息框改版.md）：搬到右上角常駐狀態列的「✓ 與網頁一致」
+        docs/更新分頁訊息框改版.md）：搬到右上角常駐狀態列的「✓ 與網頁一致」
         小提示（見 _fill_status），原地更新不往下疊，跟這裡「今天發生了
         什麼事」的定位分開。
 
@@ -586,14 +586,29 @@ class UiSyncMixin:
 
     def _sync_buttons(self):
         """上面那幾顆能不能按。畫面上會變灰的按鈕就剩它們。"""
-        # Excel 沒開著就不給登入，也不給讀取 —— 讀取自己會順便登入，只擋登入的話
-        # 這道關卡按另一顆按鈕就繞過去了。擋在最前面的理由是後面每一步都要 Excel：
-        # 讀完要拿它的現值算提案，寫入更是直接改它。
+        # 「更新」要 Excel 開著：讀完要拿它的現值算提案，寫入更是直接改它。
         # not self._excel_in_use() 而不是 not self.busy：下單分頁那幾條路也在用
         # COM 動同一份活頁簿（見 ui_background._excel_in_use）。
-        ready = self.excel_open and not self._excel_in_use()
-        self.login_button.configure(state="normal" if ready else "disabled")
-        self.fetch_button.configure(state="normal" if ready else "disabled")
+        self.fetch_button.configure(
+            state="normal" if self.excel_open and not self._excel_in_use() else "disabled")
+
+        # 「登入」不看 Excel —— 跟「全部登出」同一個規矩（那一顆本來就是這樣，
+        # 見 ui_layout._build_toolbar）。這兩顆是一對，管的都是瀏覽器 session：
+        # 登入的對象來自 .env（login.load_accounts 一路數 TBB_ID_1、TBB_ID_2…），
+        # 不是 Excel 分頁；背景那條路也明講「登入按鈕只做登入，不碰 Excel」
+        # （見 ui_background._browser_worker 的 cmd == "login"）。
+        #
+        # 2026/08/30 之前這一顆跟「讀取」共用同一道 excel_open 關卡，理由寫的是
+        # 「後面每一步都要 Excel」。那句話在只有更新分頁的時候是對的，掛單分頁
+        # 長出來之後就不是了 —— ui_pending.py 一格 Excel 都不碰，卻因為交易人
+        # 姓名只能靠登入拿到、而登入被 Excel 擋著，變成非先開 Excel 不可。拆掉
+        # 這道關卡不會開洞：真正要 Excel 的兩條路各自有守門員（start_fetch、
+        # ui_order.refresh_order_data 都自己叫 _require_excel()）。
+        #
+        # 留下來的 not self.busy 擋的不是 Excel 是 cookie：整個瀏覽器只有一組
+        # cookie，下單那一輪借的就是這顆鎖（見 ui_order_exec.py 開頭那段「送錯
+        # 帳戶」的說明），這時候按登入會把手上這組 cookie 換掉。
+        self.login_button.configure(state="normal" if not self.busy else "disabled")
         # 「全部登出」不跟 excel_open 掛勾 —— 它管的是瀏覽器 session，
         # 跟有沒有選 Excel 檔無關；沒有瀏覽器可登出時按下去只會被 start_logout_all
         # 自己擋下來、在狀態列講一句，這裡不必先幫它擋。

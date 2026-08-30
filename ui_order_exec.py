@@ -50,9 +50,9 @@ class UiOrderExecMixin:
     # 視窗真的關了（_order_dialog_closed）之後才解鎖，就是為了擋住這條路。
     #
     # 這一輪按下「開始下單」凍結的 self.order_exec_queue 用的是 self.busy
-    # （見 ui_background._set_busy）——跟同步分頁共用同一個總開關，是因為
+    # （見 ui_background._set_busy）——跟更新分頁共用同一個總開關，是因為
     # 兩邊操作的是同一個瀏覽器 context、同一組 cookie：這一輪還沒跑完時，
-    # 「登入」「讀取」「全部登出」都會換手上這組 cookie，一樣會製造上面
+    # 「登入」「更新」「全部登出」都會換手上這組 cookie，一樣會製造上面
     # 那種送錯帳戶的風險，所以整輪期間直接借用同一顆busy鎖把那幾顆按鈕鎖住。
 
     def _order_exec_init_state(self):
