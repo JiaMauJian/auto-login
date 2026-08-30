@@ -91,6 +91,36 @@ C. 之後才排（不急，也不必週一）
         股價其實全帳戶共用，只要跑「涵蓋得到所有代號」的那幾頁就夠。
         暫時擱著（08/30 討論過），等作業選單那幾件做完再回頭。
 
+[ ] C3  recon.SESSION_JS 的 systemid 拼錯了
+        它讀 sessionStorage.getItem('systemid')，但真正的鍵是 'systemId'（大寫 I），
+        所以那一欄一直是 None。08/30 在 welcome 頁用 console 印 Object.keys 確認的。
+        全程式除了那一行沒有任何地方用到 systemid ——建議直接刪掉那一行，
+        不要只修大小寫：留一個沒人用的欄位比拼錯更容易誤導。
+        零風險，什麼時候順手做都行。
+
+[ ] C4  登入那一趟可以省掉 _open_account_page（約 44 秒／天）
+        08/30 用 console 在 welcome 頁（登入完停留的那一頁）確認過：
+          - B64_XOR_Encode 是 function、XOR_KEY 是 string（common.js 有載）
+          - branch_id / cust_id / account 都在
+          - 那一頁自己就在打 query610 跟 queryInstantAccount_new
+        所以 do_login() 返回時人已經站在一個「什麼都有」的頁面上，_ensure_one
+        緊接著那次 goto 帳戶頁只是為了拿 sessionStorage，是多的。
+        帳戶頁整趟實測 2.18 秒（見 fetch._open_account_page 註解），20 組省 ~44 秒。
+
+        *** 只能省「剛 do_login() 完」那一條路。***
+        _revisit（換 cookie 回來）那一條的 goto 不能碰——那個 goto 就是檢測本身：
+        sessionStorage 在分頁被頂掉之後還留著舊值，探起來一樣像活著，只有「還在不在
+        /account/ 底下」分得出來（見 fetch.py _revisit 的三道核對）。
+
+        要做的話還要補一個等待條件：現在是靠 PAGE_READY_JS 順便等到 sessionStorage
+        填好的，省掉 goto 就得在 welcome 上等一個等價的東西（PAGE_READY_JS 拿掉
+        /account/ 那一段就是）。
+
+        「登入成功了沒」有更好的判斷方式（08/30 實測）：沒有 session 的話開
+        welcome/layout.jsp?type=1 會被導到 /tbb/index/home.jsp。所以 do_login()
+        返回後只要看網址在 /welcome/ 還是 /index/ 就知道成敗——那是伺服器給的
+        答案，比現在靠 sessionStorage（分頁自己的快取）判斷更直接。
+
 
 做完之後
 --------------------------------------------------

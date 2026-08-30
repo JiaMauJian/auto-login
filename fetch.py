@@ -94,9 +94,17 @@ def account_code(session):
 # 後半是這個分頁接下來要用的兩樣：呼叫 AJAX 用的 common.js 全域函式（見
 # recon.FETCH_JS），以及認得出登入身分的 sessionStorage（見 recon.SESSION_JS）。
 #
-# 前半的「已經不在 /account/ 了」是給失敗那條路的：session 過期時網站會把人踢回
-# 登入／首頁，那一頁永遠等不到後半那兩樣東西。沒有這一條，最該快點放棄的情況
-# （踢回去了，要重登）反而要白等滿逾時；有了它就立刻回來，讓 _revisit 從網址看出來。
+# 前半的「已經不在 /account/ 了」是給失敗那條路的：session 死掉時網站會把人踢回
+# 登入表單頁 /tbb/index/home.jsp（2026/08/30 實測：無痕視窗直接開
+# welcome/layout.jsp?type=1 會被導到 index/home.jsp），那一頁永遠等不到後半那兩樣
+# 東西。沒有這一條，最該快點放棄的情況（踢回去了，要重登）反而要白等滿逾時；
+# 有了它就立刻回來，讓 _revisit 從網址看出來。
+#
+# 順帶一提，踢回去的目的地是 index/ 不是 welcome/ —— 也就是說登入後停留的
+# welcome/layout.jsp 一樣是個有效的「活著」檢查點（還在 /welcome/ 就是還活著）。
+# _revisit 仍然用 /account/，理由是成本不是正確性：welcome 一載入就自己打
+# query610 與 queryInstantAccount_new，拿它當檢查點等於每次換人多兩趟往返，
+# 而 /account/ 那一頁是接下來本來就要去查資料的地方，順路。
 PAGE_READY_JS = """
 () => !location.pathname.includes('/account/')
    || (typeof B64_XOR_Encode === 'function' && typeof XOR_KEY !== 'undefined'
