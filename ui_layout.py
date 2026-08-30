@@ -1,4 +1,4 @@
-"""建版面：三個分頁的元件全部在這裡蓋出來，不含任何按下去之後要做的事。"""
+"""建版面：每個分頁的元件全部在這裡蓋出來，不含任何按下去之後要做的事。"""
 
 import tkinter as tk
 
@@ -6,6 +6,7 @@ import ttkbootstrap as ttk
 
 import orders
 import profile_tools
+from ui_pending import PENDING_ALL
 from ui_common import (
     ALL_CHOICE, APP_VERSION, CELL_PAD, FONT_SIZE, HINT_SIZE, PRICE_PENDING_TEXT, WHEN_TODAY,
     WHEN_WEEK, WINDOW_H, WINDOW_W, cash_method_toggle_enabled, col_width, pick_font, wide,
@@ -104,6 +105,7 @@ class UiLayoutMixin:
 
         self._build_sync_tab()
         self._build_order_tab()
+        self._build_pending_tab()
         self._build_history_tab()
         self._build_cert_tab()
 
@@ -112,7 +114,7 @@ class UiLayoutMixin:
         # （見 update_combobox_popdown_style），優先度比 option_add 高，蓋掉了字級
         # 那條路能用的設法。只能照它的路子，在它蓋完之後再蓋一次我們要的顏色。
         for combo in (self.account_choice, self.history_who, self.history_item, self.history_when,
-                      self.order_stock_pick):
+                      self.order_stock_pick, self.pending_choice):
             self._paint_dropdown_selection(combo)
 
         # 狀態列跟進度條放同一條、同一列：狀態列說「在幹嘛」，進度條說「還在動」，
@@ -130,6 +132,18 @@ class UiLayoutMixin:
 
         self.status = ttk.Label(bottom, text="", style="Hint.TLabel", anchor="w", padding=(12, 6))
         self.status.pack(side="left", fill="both", expand=True)
+
+        # 「停止」放在這條跨分頁常駐的列上（見 docs/介面規劃.md 10.2）：人按它的
+        # 時候很可能正在掛單分頁看委託，而下單分頁裡那顆在別的分頁上按不到。
+        # 下單分頁那顆留著當第二個入口（跟「範圍選單／左邊名單是同一個選擇的
+        # 兩個入口」同一種做法）。
+        # 有東西在跑才亮、沒跑就灰，不搶注意力——狀態由 _sync_stop_all_button
+        # 在取件迴圈裡維持（見 ui_background._drain）。
+        self.stop_all_button = ttk.Button(bottom, text="■ 停止全部操作",
+                                          command=self.stop_all_operations,
+                                          bootstyle="danger-outline", state="disabled")
+        self.stop_all_button.pack(side="right", padx=(0, 12), pady=6)
+        self._stop_all_state = "disabled"
 
         self.progress = ttk.Progressbar(bottom, mode="indeterminate", length=wide(140))
 
@@ -465,6 +479,78 @@ class UiLayoutMixin:
         box.rowconfigure(0, weight=0)
         box.rowconfigure(1, weight=1)
         box.columnconfigure(0, weight=1)
+
+    def _build_pending_tab(self):
+        """
+        掛單分頁（見 docs/介面規劃.md 10.1）：上面一列查詢、中間一張表、下面
+        三顆取消按鈕。
+
+        「列出掛單」跟「取消掛單」放同一頁不是硬湊在一起——取消之前本來就要先
+        看到會取消掉什麼。三顆取消按鈕現在一律 disabled：那支 API 還沒偵察過
+        （9.7 第 3 步），先畫出來讓版面完整，跟下單分頁那幾個還沒接上的控制項
+        同一種做法。
+
+        「範圍」跟同步分頁的範圍選單同一個概念，但這裡預設「全部」——看掛單本來
+        就是要一次看完所有帳戶。
+        """
+        frame = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(frame, text="  掛單  ")
+
+        top = ttk.Frame(frame, padding=(0, 0, 0, 8))
+        top.grid(row=0, column=0, sticky="ew")
+
+        ttk.Label(top, text="範圍").pack(side="left")
+        self.pending_scope = tk.StringVar(value=PENDING_ALL)
+        self.pending_choice = ttk.Combobox(top, textvariable=self.pending_scope, width=18,
+                                           state="readonly", values=[PENDING_ALL],
+                                           font=(self.family, FONT_SIZE))
+        self.pending_choice.pack(side="left", padx=(8, 0))
+        self.pending_button = ttk.Button(top, text="查詢掛單", command=self.refresh_pending,
+                                         bootstyle="primary-outline")
+        self.pending_button.pack(side="left", padx=(16, 0))
+        # 時間戳靠右：這一頁的資料是「按下去那一刻的快照」，不會自己更新，
+        # 什麼時候查的跟查到什麼一樣重要。
+        self.pending_stamp = ttk.Label(top, text="還沒查過", style="Hint.TLabel")
+        self.pending_stamp.pack(side="right")
+
+        columns = ("sheet", "stock", "side", "price", "qty", "matched", "left", "status", "ordno")
+        titles = {"sheet": "帳戶", "stock": "股票", "side": "買賣", "price": "委託價",
+                  "qty": "委託量", "matched": "成交", "left": "未成交",
+                  "status": "狀態", "ordno": "委託書號"}
+        # 數量欄都是短數字，壓小沒關係；「狀態」可能是網站回的失敗原因（errmsg
+        # 是自由文字，量不出上限），給它 stretch 吃掉剩下的寬度。
+        narrow = {"side": 50, "price": 80, "qty": 80, "matched": 70, "left": 80, "ordno": 100}
+        self.pending_tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
+        for key in columns:
+            self.pending_tree.heading(key, text=titles[key])
+            self.pending_tree.column(key, width=wide(narrow.get(key, 110)),
+                                     anchor="center" if key in ("side", "price", "qty", "matched", "left") else "w",
+                                     stretch=(key == "status"))
+        self.pending_tree.grid(row=1, column=0, sticky="nsew")
+        bar = ttk.Scrollbar(frame, orient="vertical", command=self.pending_tree.yview)
+        self.pending_tree.configure(yscrollcommand=bar.set)
+        bar.grid(row=1, column=1, sticky="ns")
+        hbar = ttk.Scrollbar(frame, orient="horizontal", command=self.pending_tree.xview)
+        self.pending_tree.configure(xscrollcommand=hbar.set)
+        hbar.grid(row=2, column=0, sticky="ew")
+        # 還掛在外面的用買賣底色（跟下單分頁執行預覽同一組，也跟網站本身買紅賣綠
+        # 一致）；已經結束的（成交、取消、失敗）淡化，不該跟還能取消的一樣醒目。
+        self.pending_tree.tag_configure("buy", background="#FFDFDF")
+        self.pending_tree.tag_configure("sell", background="#DCF1EB")
+        self.pending_tree.tag_configure("done", foreground=self.colors.secondary)
+
+        cancel_bar = ttk.Frame(frame)
+        cancel_bar.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.pending_cancel_buttons = []
+        for text in ("取消全部買單", "取消全部賣單", "取消全部掛單"):
+            button = ttk.Button(cancel_bar, text=text, state="disabled", bootstyle="danger-outline")
+            button.pack(side="left", padx=(0, 8))
+            self.pending_cancel_buttons.append(button)
+        ttk.Label(cancel_bar, text="取消掛單還沒接上（那支 API 還沒偵察過，見 9.7 第 3 步）",
+                  style="Hint.TLabel").pack(side="left", padx=(8, 0))
+
+        frame.rowconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
 
     def _build_history_tab(self):
         frame = ttk.Frame(self.tabs, padding=8)

@@ -28,12 +28,14 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
 | `login.py` | 登入、開瀏覽器 |
 | `fetch.py` | 抓網頁資料（`collect()`）、cookie store（換人＝換 cookie，不是重登），登入完立刻抓完那一組才換下一組 |
 | `recon.py` | AJAX 重放，只讀不寫，偵察新查詢用（`python recon.py 1`） |
+| `order_query.py` | 掛單查詢正式版（`queryOrder`），對 `order_recon.py` 就像 `fetch.py` 對 `recon.py` |
 | `planner.py` | 網頁資料 × Excel 現值 × 紀錄檔 → 一張「變更提案」清單，純計算 |
 | `ledger.py` | 紀錄檔讀寫、現金基準、歷程追加 |
 | `excel_io.py` | COM 開檔、讀寫 B8/E/F，只認得這三處（2026/08/24 起不再自動備份） |
 | `util.py` | 數字與寬度對齊等小工具 |
 | `ui.py` / `ui_layout.py` / `ui_sync.py` / `ui_background.py` / `ui_common.py` / `ui_history.py` / `ui_cert.py` | Tkinter GUI，唯一有畫面的一批檔案；背景執行緒跑 Playwright／COM，主執行緒才碰 widget |
 | `ui_order.py` / `ui_order_exec.py` | 下單分頁：前者收設定、讀 Excel、算執行預覽，後者是按下「開始下單」之後的依序執行引擎（吃凍結好的 queue，不管那份 queue 是哪個作業產生的） |
+| `ui_pending.py` | 掛單分頁：把今天送出去的委託整批查回來攤成一張表，是自動送出的驗證面 |
 | `dev_tools/simulate.py` | 假帳號、假網頁（`window.__SIM__`），讓 `fetch.py` 走假資料但形狀跟真 API 一樣 |
 | `dev_tools/sim_excel.py` | 在 Excel 裡加/移除模擬分頁 |
 | `dev_tools/check_two_accounts.py` | 多帳號「各拿各的資料」回歸測試 |

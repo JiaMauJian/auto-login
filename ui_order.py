@@ -796,7 +796,9 @@ class UiOrderMixin:
                     quotes[code] = quote
         finally:
             stream.close()
-        return quotes
+        # 回傳的就是要送回主執行緒的那份 payload（見 ui_background 的 simple_jobs：
+        # 那張表直接把 job 的回傳值當 payload 送出去）。
+        return {"quotes": quotes}
 
     def _on_order_quotes_fetched(self, payload):
         """

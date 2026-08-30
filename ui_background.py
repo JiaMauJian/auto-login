@@ -29,7 +29,7 @@ STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "
               "order_dialog_closed": "委託確認視窗關閉偵測",
               "order_price_refresh": "多輪出清重讀持股",
               "order_stock_price": "新增股票查價",
-              "order_quotes_fetched": "查詢委買賣"}
+              "order_quotes_fetched": "查詢委買賣", "pending_fetched": "查詢掛單"}
 
 # 瀏覽器起不來時，錯誤視窗最上面那段人話。traceback 講的是 Playwright 的內部狀況，
 # 對使用者沒有意義，真正能動手的只有下面這兩件事。
@@ -327,6 +327,15 @@ class UiBackgroundMixin:
 
         # 指令 -> (要呼叫誰, 回話時說自己是哪一種)
         jobs = {"login": (login_only, "logged_in"), "fetch": (collect, "fetched")}
+        # 「借瀏覽器查一次、查完就結束」那一類，形狀跟 login/fetch 不一樣（參數
+        # 不是 selected/path），但彼此之間一模一樣：ensure_browser() -> 呼叫 ->
+        # 把回傳的 payload 送回主執行緒。「order」不在這裡——它要留一個 page 讓
+        # 下面的閒置輪詢繼續盯著委託確認視窗，還有自己的 OrderMaybeSubmitted
+        # 要分開處理，硬收進來只會讓這張表變成一堆例外。
+        simple_jobs = {
+            "order_quotes": (self._order_quotes_job, "order_quotes_fetched"),
+            "pending": (self._pending_job, "pending_fetched"),
+        }
 
         try:
             while True:
@@ -417,25 +426,26 @@ class UiBackgroundMixin:
                     self.queue.put(("order_filled", payload))
                     continue
 
-                if cmd == "order_quotes":
-                    # 下單分頁的「查詢委買賣」按鈕，見 ui_order.fetch_order_quotes。
-                    # 跟「order」一樣不走下面 jobs[cmd] 那條共用路（參數形狀不
-                    # 一樣：這裡是一批股票代號，不是單一筆委託），但比「order」
-                    # 簡單——查完就結束，不會像委託確認視窗那樣需要留一個
-                    # page 讓閒置輪詢繼續盯著。
-                    order_number, account, codes = arg
+                if cmd in simple_jobs:
+                    # 「查完就結束」那一類：參數形狀各自不同（一批股票代號、一批
+                    # 帳戶…），但錯誤處理與回話方式完全一樣，所以收成一張表，
+                    # 之後再多一種查詢不必再複製一段 try/except。job 自己回傳
+                    # 要送出去的 payload。
+                    job, kind = simple_jobs[cmd]
                     payload = {}
                     try:
                         ensure_browser()
-                        quotes = self._order_quotes_job(context, store, order_number, account, codes)
-                        payload = {"quotes": quotes}
+                        payload = job(context, store, *arg)
                     except RuntimeError as exc:
+                        # 這幾支丟出來的 RuntimeError 訊息本來就是寫給人看的
+                        # （登入失敗、查不到、身分對不上…），不需要連 traceback
+                        # 一起丟到畫面上。
                         payload = {"error": str(exc)}
                     except Exception:
                         payload = {"error": traceback.format_exc()}
                         if context is None:
                             payload["hint"] = BROWSER_HINT
-                    self.queue.put(("order_quotes_fetched", payload))
+                    self.queue.put((kind, payload))
                     continue
 
                 fetch_records, kind = jobs[cmd]
@@ -551,7 +561,8 @@ class UiBackgroundMixin:
                     "order_dialog_closed": self._on_order_dialog_closed,
                     "order_price_refresh": self._on_order_price_refresh,
                     "order_stock_price": self._on_order_stock_price,
-                    "order_quotes_fetched": self._on_order_quotes_fetched}
+                    "order_quotes_fetched": self._on_order_quotes_fetched,
+                    "pending_fetched": self._on_pending_fetched}
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
@@ -563,6 +574,7 @@ class UiBackgroundMixin:
             pass
         finally:
             self._check_browser_thread()
+            self._sync_stop_all_button()
             self.root.after(120, self._drain)
 
     def _on_handler_error(self, kind):
@@ -948,6 +960,35 @@ class UiBackgroundMixin:
         if not self.problems:
             return ""
         return f"⚠ 有 {len(self.problems)} 個帳戶沒完成，看下面的提醒。"
+
+    def stop_all_operations(self):
+        """
+        底部狀態列那顆「停止」（見 docs/介面規劃.md 10.2）：跨分頁常駐，人按它的
+        時候很可能正在掛單分頁看委託，而下單分頁裡那顆在別的分頁上按不到。
+
+        目前唯一停得掉的是下單分頁的依序執行。登入／讀取／寫入／查詢那幾條沒有
+        「停」這個動作可做——見 _browser_worker：每一個指令都一定要回一則結果，
+        半路抽掉只會讓畫面永遠等不到回話。所以這顆按鈕只在真的有東西停得掉的
+        時候才亮（見 _stop_all_available）。
+        """
+        if self._stop_all_available():
+            self.stop_order_execution()
+
+    def _stop_all_available(self):
+        """現在有沒有「停得掉」的東西。跟 order_exec_active 分開看的理由見那裡。"""
+        return bool(self.order_exec_active or self.order_exec_queue)
+
+    def _sync_stop_all_button(self):
+        """
+        由取件迴圈每 120ms 叫一次（見 _drain）——不是在每個狀態變動的地方各叫
+        一次：那顆按鈕該亮不亮的條件散在依序執行那台狀態機的好幾個分支裡，
+        漏掉一個就是「東西在跑但停不掉」。狀態沒變就不碰 widget，重畫成本是 0
+        （見 docs/Tkinter ui設計原則.md 第十二節那份量測）。
+        """
+        want = "normal" if self._stop_all_available() else "disabled"
+        if want != self._stop_all_state:
+            self._stop_all_state = want
+            self.stop_all_button.configure(state=want)
 
     def _excel_in_use(self):
         """

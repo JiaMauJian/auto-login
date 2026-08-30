@@ -160,11 +160,12 @@ from ui_history import UiHistoryMixin
 from ui_layout import UiLayoutMixin
 from ui_order import UiOrderMixin
 from ui_order_exec import UiOrderExecMixin
+from ui_pending import UiPendingMixin
 from ui_sync import UiSyncMixin
 
 
 class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHistoryMixin,
-              UiOrderMixin, UiOrderExecMixin):
+              UiOrderMixin, UiOrderExecMixin, UiPendingMixin):
     def __init__(self, root):
         self.root = root
         self.path = excel_io.excel_path()
@@ -228,6 +229,7 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         self._migrate_candidates = {}   # 遷移憑證那張表的列 id -> profile_tools.scan_cert_sources() 的一筆
         self.profile_busy = False       # 「建立 Profile」進行中，避免重複點
 
+        self._pending_init_state()      # 掛單分頁的狀態，見 ui_pending.py
         self._order_init_state()        # 下單分頁的狀態，見 ui_order.py（它自己會再叫
                                         # ui_order_exec 那半邊的 _order_exec_init_state）
 
@@ -285,16 +287,25 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         self.refresh_history()
 
     def _on_tab_changed(self, _event):
-        # 分頁順序：同步(0) 下單(1) 歷程(2) 憑證(3)，見 ui_layout._build()。
-        index = self.tabs.index(self.tabs.select())
-        if index == 2:
+        """
+        切到某個分頁時要先做的事。
+
+        用分頁**名字**判斷，不用索引：索引會因為中間插一個新分頁就整排位移，而
+        那種錯不會報錯，只會變成「切到憑證分頁卻跑去重讀歷程」——2026/08/30 加
+        掛單分頁時這裡本來就會位移一格。
+        """
+        name = self.tabs.tab(self.tabs.select(), "text").strip()
+        if name == "掛單":
+            # 範圍選單的選項跟著「已經登入過、知道名字」的帳戶走，切過來刷一次。
+            self._refresh_pending_scope()
+        elif name == "歷程":
             self.refresh_history()
             # 切過來通常就是想看「剛才那位」的歷程，不必再選一次人。
             if self.current_sheet and self.current_sheet in tuple(self.history_who["values"]):
                 self.history_who.set(self.current_sheet)
                 self._refresh_history_choices()
                 self._fill_history()
-        elif index == 3:
+        elif name == "憑證":
             self._refresh_profile_status()
             # 掃描要讀遍 Chrome／Edge 每個 profile 的 Local Storage，不便宜，
             # 不自動做，一律等使用者自己按「掃描」（2026/08/23 使用者要求：
