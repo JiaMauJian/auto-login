@@ -708,8 +708,12 @@ class UiLayoutMixin:
         pick.grid(row=0, column=0, sticky="ew")
         self.order_stock_pick = ttk.Combobox(pick, width=15, font=(self.family, FONT_SIZE))
         self.order_stock_pick.pack(side="left")
-        ttk.Button(pick, text="新增", command=self.add_order_stock,
-                  bootstyle="primary-outline").pack(side="left", padx=(8, 0))
+        # 存成屬性是因為它會跟「持股與報酬率」一起變灰：盤中模式按「新增」會
+        # 附帶跑一次「更新股價」巨集（見 ui_order._refresh_added_stock_price），
+        # 那是一條會動 COM 的路，不能在別人正在動同一份活頁簿的時候按下去。
+        self.order_add_button = ttk.Button(pick, text="新增", command=self.add_order_stock,
+                                           bootstyle="primary-outline")
+        self.order_add_button.pack(side="left", padx=(8, 0))
 
         # 加進來的股票一樣用 Canvas＋Scrollbar 包起來（跟帳戶勾選區同一個
         # 理由）：這裡原本用 sticky="new" 的 Frame，加多了會把 LabelFrame

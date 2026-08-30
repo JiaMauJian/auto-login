@@ -22,6 +22,7 @@ import codecs
 import contextlib
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -288,26 +289,25 @@ def clear_all_markers(path):
     Best-effort：任何一步失敗都默默放棄，不能卡住關閉流程。真正的風險是相反的
     不對稱——非正常結束不會走到這裡，D1 會留著過期的提醒，那個風險是可以接受的，
     但絕不能因為清除失敗就讓程式關不掉。
+
+    活頁簿的鎖只等 3 秒就放棄（opened 的 wait），不跟其他呼叫端一樣無限等：這裡
+    跑在關閉流程的主執行緒上，背景真的卡住的話（例如巨集跳了 MsgBox 停在那裡，
+    見 docs/介面規劃.md 9.6）無限等就等於關不掉，而 D1 留著過期提醒是可以接受的。
     """
     if not marker_enabled() or path is None or not path.is_file():
         return
     try:
-        excel, workbook, attached = open_workbook(path, True)
+        with opened(path, True, wait=3) as (_excel, workbook, _attached):
+            changed = False
+            for sheet in workbook.Worksheets:
+                cell = sheet.Cells(*CELL_MARKER)
+                if str(cell.Value or "").strip() == MARKER_TEXT:
+                    cell.Value = None
+                    changed = True
+            if changed:
+                workbook.Save()
     except Exception:
         return
-    try:
-        changed = False
-        for sheet in workbook.Worksheets:
-            cell = sheet.Cells(*CELL_MARKER)
-            if str(cell.Value or "").strip() == MARKER_TEXT:
-                cell.Value = None
-                changed = True
-        if changed:
-            workbook.Save()
-    except Exception:
-        pass
-    finally:
-        close_workbook(excel, workbook, attached)
 
 
 def find_sheet(book, name):
@@ -332,6 +332,60 @@ def is_open_in_excel(path):
             return False
     except OSError:
         return True
+
+
+# 同一份活頁簿一次只讓一條執行緒操作。
+#
+# 為什麼需要：程式接上的是使用者眼前那個 Excel 實例（見 _open_once 的 GetObject
+# 分支），不是各開各的一份。而「同步分頁寫入」「下單分頁的持股與報酬率／新增
+# 股票／多輪之間重讀」各有各的忙碌旗標、各跑各的執行緒，彼此不知道對方存在。
+#
+# 程式自己的讀寫都是 sheet.Cells(...) 這種限定寫法，不受別人 Activate 影響；
+# 但巨集用的是無限定的 Range()，只認 ActiveSheet（見 run_update_price_macro）。
+# 兩條執行緒交錯 Activate 的話，巨集會跑在別人剛切過去的那一頁上——那一頁被更新
+# 兩次、自己這一頁從來沒更新過，而接著讀回來的是舊的 I4:I8。不報錯、不缺欄位，
+# 只是靜靜地拿舊價格當盤中追價的基準，跟 2026/08/29 修掉的那個 ActiveSheet
+# bug 是同一種失敗，只是成因換成並行。
+#
+# 畫面那一層（ui_background._excel_in_use）已經把按鈕擋掉了，這把鎖是替「以後
+# 新加一個 COM 入口、忘了問那個述詞」兜底。兩層都要。
+_EXCEL_LOCK = threading.Lock()
+
+
+class ExcelBusy(RuntimeError):
+    """另一條執行緒正在用這份活頁簿，而呼叫端不願意等（見 opened() 的 wait）。"""
+
+
+@contextlib.contextmanager
+def opened(path, write, wait=None):
+    """
+    open_workbook ＋ close_workbook 的成對版本，順便鎖住「一次只有一條執行緒
+    在動這份活頁簿」：
+
+        with excel_io.opened(path, True) as (excel, book, attached):
+            ...
+
+    wait=None 是一直等——背景工作都該用這個，它們本來就在背景，等一下沒關係。
+    給數字就是最多等幾秒、等不到丟 ExcelBusy，只有「不做也沒關係、但絕對不能
+    卡住」的呼叫端才用（見 clear_all_markers）。
+
+    新的 COM 入口一律走這裡，不要再自己配對 open_workbook／close_workbook——
+    漏掉鎖不會報錯，只會在很久以後變成一個算錯的數字。
+    """
+    if not _EXCEL_LOCK.acquire(timeout=-1 if wait is None else wait):
+        raise ExcelBusy(f"另一項作業正在使用這份 Excel：{path}")
+    try:
+        excel, book, attached = open_workbook(path, write)
+    except Exception:
+        _EXCEL_LOCK.release()
+        raise
+    try:
+        yield excel, book, attached
+    finally:
+        try:
+            close_workbook(excel, book, attached)
+        finally:
+            _EXCEL_LOCK.release()
 
 
 def open_workbook(path, write, attempts=3):

@@ -153,7 +153,9 @@ class UiOrderMixin:
         規則（見 ui.py），還沒登入過的帳戶這裡也看不到，跟同步分頁的範圍
         選單是同一個限制，不是這裡另外加的。
         """
-        if self.order_busy or not self._require_excel():
+        # 看 _excel_in_use() 而不是只看 order_busy：同步分頁的寫入、「新增」股票
+        # 附帶的股價重讀、多輪之間的重讀，動的都是同一份活頁簿（見那個述詞）。
+        if self._excel_in_use() or not self._require_excel():
             return
         names = sorted(set(self.trader_of.values()))
         if not names:
@@ -165,7 +167,7 @@ class UiOrderMixin:
 
         run_macro = self.order_mode.get() == "intraday"
         self.order_busy = True
-        self.order_refresh_button.configure(state="disabled")
+        self._apply_busy_state()
         self.order_status.configure(text="更新股價、讀取中…" if run_macro else "讀取中…")
         threading.Thread(target=self._order_read_worker, args=(self.path, names, run_macro), daemon=True).start()
 
@@ -183,8 +185,7 @@ class UiOrderMixin:
         excel = workbook = sheet = None
         payload = {}
         try:
-            excel, workbook, attached = excel_io.open_workbook(path, run_macro)
-            try:
+            with excel_io.opened(path, run_macro) as (excel, workbook, _attached):
                 sheets, errors = {}, {}
                 with excel_io.keep_active_sheet(workbook):
                     for name in names:
@@ -195,14 +196,14 @@ class UiOrderMixin:
                         # 巨集只認 ActiveSheet，所以每一頁都要各 Activate 一次、
                         # 各跑一次，不能整批只呼叫一次（見
                         # excel_io.run_update_price_macro 說明的那個 bug）。
+                        # 同一個理由，這一整段也不能跟別條執行緒同時跑——
+                        # excel_io.opened 那把鎖擋的就是這件事。
                         if run_macro:
                             excel_io.run_update_price_macro(excel, sheet)
                         data = excel_io.read_sheet(sheet)
                         data["return_rate"] = excel_io.read_return_rate(sheet)
                         sheets[name] = data
                 payload = {"sheets": sheets, "errors": errors}
-            finally:
-                excel_io.close_workbook(excel, workbook, attached)
         except Exception as exc:
             payload = {"error": str(exc)}
         finally:
@@ -212,7 +213,7 @@ class UiOrderMixin:
 
     def _on_order_data(self, payload):
         self.order_busy = False
-        self.order_refresh_button.configure(state="normal")
+        self._apply_busy_state()
 
         if "error" in payload:
             self.order_status.configure(text="讀取失敗")
@@ -307,6 +308,8 @@ class UiOrderMixin:
         self.order_rows = []
         self._resize_order_stock_column()
         self._recompute_order_preview()
+        # 「新增」能不能按跟模式有關（見 _order_excel_buttons），切模式要重算一次。
+        self._apply_busy_state()
 
     def _on_order_side_changed(self):
         """
@@ -366,6 +369,27 @@ class UiOrderMixin:
             self.order_auto_confirm.set(False)
 
         self._order_auto_last = self.order_auto_confirm.get()
+
+    def _order_excel_buttons(self):
+        """
+        下單分頁裡「按下去會用 COM 動 Excel」的按鈕：只要有任何一條路正在動那份
+        活頁簿就一起變灰（見 ui_background._apply_busy_state，它負責在四個旗標
+        變動時呼叫這裡）。
+
+        原本這兩顆各自只看自己那一個旗標——「持股與報酬率」跑著的時候「新增」
+        還是亮的，而兩條路都會一頁一頁 Activate 再跑巨集，交錯之後巨集會跑在
+        別人剛切過去的那一頁上（見 excel_io._EXCEL_LOCK 的說明）。
+
+        擋住而不是排隊：跟 _refresh_added_stock_price 對自己重複點擊的態度一致
+        （那裡的註解有寫理由——下一次「新增」或「重新整理」還會再有機會補上）。
+        """
+        busy = self._excel_in_use()
+        self.order_refresh_button.configure(state="disabled" if busy else "normal")
+        # 「新增」只有盤中那條路會附帶跑巨集（見 add_order_stock 的說明），盤前
+        # 完全不碰 COM，沒有理由跟著變灰——讀取 20 組帳戶要跑好幾分鐘，那段時間
+        # 還是該能把股票加進清單。所以這一顆多看一個模式。
+        add_busy = busy and self.order_mode.get() == "intraday"
+        self.order_add_button.configure(state="disabled" if add_busy else "normal")
 
     def _order_ticks_setting(self):
         """
@@ -432,12 +456,16 @@ class UiOrderMixin:
         整理）分開——短時間連續按好幾次「新增」，這裡選擇跳過而不是排隊，
         反正下一次「新增」或「重新整理」還會再有機會補上。
         """
-        if self.order_stock_price_busy or not self.excel_open:
+        # 這裡改看 _excel_in_use()：原本只看自己那一個旗標，所以「持股與報酬率」
+        # 正在跑（5 檔 × N 個分頁的 HTTP，很慢）的時候按「新增」就會起第二條
+        # 執行緒，兩邊都在 Activate → 跑巨集 → Activate → 跑巨集。
+        if self._excel_in_use() or not self.excel_open:
             return
         names = sorted(set(self.trader_of.values()))
         if not names:
             return
         self.order_stock_price_busy = True
+        self._apply_busy_state()
         threading.Thread(target=self._order_stock_price_worker, args=(self.path, names), daemon=True).start()
 
     def _order_stock_price_worker(self, path, names):
@@ -452,8 +480,7 @@ class UiOrderMixin:
         excel = workbook = sheet = None
         payload = {}
         try:
-            excel, workbook, attached = excel_io.open_workbook(path, True)
-            try:
+            with excel_io.opened(path, True) as (excel, workbook, _attached):
                 sheets = {}
                 with excel_io.keep_active_sheet(workbook):
                     for name in names:
@@ -463,8 +490,6 @@ class UiOrderMixin:
                             excel_io.run_update_price_macro(excel, sheet)
                             sheets[name] = excel_io.read_sheet(sheet)
                 payload = {"sheets": sheets}
-            finally:
-                excel_io.close_workbook(excel, workbook, attached)
         except Exception as exc:
             payload = {"error": str(exc)}
         finally:
@@ -479,6 +504,7 @@ class UiOrderMixin:
         主要操作，不值得為了它彈錯誤視窗（真的要查，「重新整理」還在）。
         """
         self.order_stock_price_busy = False
+        self._apply_busy_state()
         if "error" in payload:
             return
         for data in payload["sheets"].values():
@@ -827,7 +853,10 @@ class UiOrderMixin:
             self._dispatch_next_order()
             return
 
-        if self.busy:
+        # 看 _excel_in_use()：勾了「自動更新股價」的話，按下去第一件事就是
+        # _prepare_next_round → 用 COM 跑巨集、重讀 Excel（見那條路），不能在
+        # 別人正在動同一份活頁簿的時候開始。
+        if self._excel_in_use():
             return
 
         mode = self.order_mode.get()
@@ -1119,6 +1148,7 @@ class UiOrderMixin:
         算好了就跳過這一步，兩者共用同一條路，不是各自維護一份類似的邏輯。
         """
         self.order_exec_price_busy = True
+        self._apply_busy_state()
         self._update_order_exec_ui()
         sheets = sorted({account["sheet"] for account in self.order_exec_accounts})
         threading.Thread(
@@ -1148,8 +1178,7 @@ class UiOrderMixin:
             # 沒有影響，只有在真的還沒開過檔、要另外生一個隱形 Excel 實例
             # 那個少見的情況才有差——但既然要觸發會寫入的巨集，這裡就不要
             # 省這個 True，錯的方向（該可寫卻開成唯讀）比多寫一個參數危險。
-            excel, workbook, attached = excel_io.open_workbook(path, run_macro)
-            try:
+            with excel_io.opened(path, run_macro) as (excel, workbook, _attached):
                 data, errors = {}, {}
                 with excel_io.keep_active_sheet(workbook):
                     for name in sheets:
@@ -1162,8 +1191,6 @@ class UiOrderMixin:
                             excel_io.run_update_price_macro(excel, sheet)
                         data[name] = excel_io.read_sheet(sheet)
                 payload = {"sheets": data, "errors": errors}
-            finally:
-                excel_io.close_workbook(excel, workbook, attached)
         except Exception as exc:
             payload = {"error": str(exc)}
         finally:
@@ -1177,6 +1204,7 @@ class UiOrderMixin:
         還沒出清，凍結成下一輪的 queue 繼續跑；空了就是這一批全部出清了。
         """
         self.order_exec_price_busy = False
+        self._apply_busy_state()
 
         if not self.order_exec_active:
             # 讀到一半使用者按了「停止」——這個結果已經跟不上了，不要

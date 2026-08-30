@@ -589,7 +589,9 @@ class UiSyncMixin:
         # Excel 沒開著就不給登入，也不給讀取 —— 讀取自己會順便登入，只擋登入的話
         # 這道關卡按另一顆按鈕就繞過去了。擋在最前面的理由是後面每一步都要 Excel：
         # 讀完要拿它的現值算提案，寫入更是直接改它。
-        ready = self.excel_open and not self.busy
+        # not self._excel_in_use() 而不是 not self.busy：下單分頁那幾條路也在用
+        # COM 動同一份活頁簿（見 ui_background._excel_in_use）。
+        ready = self.excel_open and not self._excel_in_use()
         self.login_button.configure(state="normal" if ready else "disabled")
         self.fetch_button.configure(state="normal" if ready else "disabled")
         # 「全部登出」不跟 excel_open 掛勾 —— 它管的是瀏覽器 session，

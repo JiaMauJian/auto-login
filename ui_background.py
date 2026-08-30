@@ -75,8 +75,7 @@ def _read_excel_after_fetch(records, path):
     excel = workbook = None
     pythoncom.CoInitialize()
     try:
-        excel, workbook, attached = excel_io.open_workbook(path, False)
-        try:
+        with excel_io.opened(path, False) as (excel, workbook, attached):
             sheets, sheet_errors = {}, {}
             for record in records:
                 name = record.get("sheet_name")
@@ -87,8 +86,6 @@ def _read_excel_after_fetch(records, path):
                     sheet_errors[name] = error
                 else:
                     sheets[name] = excel_io.read_sheet(sheet)
-        finally:
-            excel_io.close_workbook(excel, workbook, attached)
     finally:
         # COM 參考要在 CoUninitialize 之前放掉。反過來的話，物件會在
         # 「已經沒有 COM 的執行緒」上被回收，那是未定義行為。
@@ -223,7 +220,9 @@ class UiBackgroundMixin:
         self.browser_cmd_queue.put(("login", (self._selected_accounts(), self.path)))
 
     def start_fetch(self):
-        if self.busy or not self._require_excel():
+        # 看 _excel_in_use() 而不是只看 self.busy：下單分頁那幾條路也在用 COM 動
+        # 同一份活頁簿（見那個述詞的說明）。
+        if self._excel_in_use() or not self._require_excel():
             return
         if not self.accounts:
             messagebox.showerror("沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
@@ -509,8 +508,7 @@ class UiBackgroundMixin:
         excel = workbook = sheet = None
         pythoncom.CoInitialize()
         try:
-            excel, workbook, attached = excel_io.open_workbook(path, True)
-            try:
+            with excel_io.opened(path, True) as (excel, workbook, attached):
                 for name, cells in writes.items():
                     sheet, error = excel_io.find_sheet(workbook, name)
                     if sheet is None:
@@ -525,8 +523,6 @@ class UiBackgroundMixin:
                 # 人只要沒按 Ctrl+S（或關檔時選「不要儲存」），帳本就跟檔案分家，
                 # 而且畫面上不會有任何徵兆。
                 workbook.Save()
-            finally:
-                excel_io.close_workbook(excel, workbook, attached)
             payload = {"attached": attached}
         except Exception as exc:
             payload = {"error": traceback.format_exc()}
@@ -953,10 +949,43 @@ class UiBackgroundMixin:
             return ""
         return f"⚠ 有 {len(self.problems)} 個帳戶沒完成，看下面的提醒。"
 
+    def _excel_in_use(self):
+        """
+        現在有沒有任何一條路正在用 COM 動那份活頁簿。
+
+        四個旗標各自誕生於不同的功能，本來各管各的：self.busy 是同步分頁的
+        登入／讀取／寫入，order_busy 是下單分頁的「持股與報酬率」，
+        order_stock_price_busy 是盤中「新增」股票附帶的那次股價重讀，
+        order_exec_price_busy 是多輪之間的重讀。問題是它們動的是**同一個
+        Excel 實例**——程式接上的是使用者眼前開著的那個（見
+        excel_io._open_once 的 GetObject 分支），不是各開各的一份。
+
+        程式自己的讀寫都是限定寫法（sheet.Cells(...)），不受別人 Activate
+        影響；但巨集用的是無限定的 Range()，只認 ActiveSheet。兩條執行緒交錯
+        Activate 的話，巨集會跑在別人剛切過去的那一頁上——那一頁被更新兩次、
+        自己這一頁從來沒更新過，而讀回來的是舊的 I4:I8，然後盤中追價就拿這個
+        舊價當基準。不報錯、不缺欄位，只是靜靜地錯。
+
+        所以四個旗標從這裡開始當成一個看。CLAUDE.md 那條「自動計算執行期間
+        同步分頁的讀取／寫入要鎖住，反之亦然」就是靠這個述詞（畫面層）加上
+        excel_io._EXCEL_LOCK（執行緒層）兩層一起實作的。
+        """
+        return bool(self.busy or self.order_busy or self.order_stock_price_busy
+                    or self.order_exec_price_busy)
+
+    def _apply_busy_state(self):
+        """
+        把「現在能不能碰 Excel」套到所有相關按鈕上。**四個旗標任何一個變動都要
+        叫一次**，不然畫面會停在上一個狀態：按鈕亮著、按下去卻被 guard 擋掉，
+        看起來就是「按了沒反應」。
+        """
+        # 寫到一半換檔沒有意義，這一輪要動哪個檔早就決定了。
+        self.excel_button.configure(state="disabled" if self._excel_in_use() else "normal")
+        self._sync_buttons()
+        self._order_excel_buttons()
+
     def _set_busy(self, busy, message=""):
         self.busy = busy
-        # 寫到一半換檔沒有意義，這一輪要動哪個檔早就決定了。
-        self.excel_button.configure(state="disabled" if busy else "normal")
         self._sync_clear_button()
         if busy:
             self.progress.pack(side="right", padx=(8, 12), pady=6)
@@ -971,7 +1000,7 @@ class UiBackgroundMixin:
         else:
             self.progress.stop()
             self.progress.pack_forget()
-        self._sync_buttons()
+        self._apply_busy_state()
 
     def _say(self, message):
         self.status.configure(text=message)
