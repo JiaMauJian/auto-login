@@ -65,15 +65,27 @@ class UiOrderMixin:
         self.order_ticks = tk.StringVar(value="2")
         self.order_ticks.trace_add("write", lambda *_a: self._recompute_order_preview())
 
-        # 買／賣：整批共用一個方向（見 orders.SIDE_SELL 的說明），跟「盤前」
-        # ／「盤中」同一顆開關並排。切換的時候比照切模式，把股票清單清空
-        # 重選（2026/08/28 使用者確認），不是想辦法把舊的列轉成新方向——
-        # 「比重」在買賣兩個方向意義不完全一樣（買方向一樣是「比重×目前
-        # 持股」，只是完全沒持有的股票還是會被判定沒有這檔），沿用舊的比重
-        # 數字換方向繼續用不會出錯，但清空重選比較不會讓人誤會兩邊比重是
-        # 同一件事。
+        # 作業（見 docs/介面規劃.md 9.2／9.3）：買賣股票／出清股票／全持股交易
+        # 三選一，是這個分頁最上層的選擇。第二列跟著整列換成「那個作業自己的
+        # 設定」，右半邊三個作業共用同一份 widget。
+        self.order_job = tk.StringVar(value=orders.JOB_CLEAR)
+        self._order_job_last = orders.JOB_CLEAR
+
+        # 單位：整張／零股。買賣股票與出清股票兩張第二列各畫一組 Radiobutton，
+        # 但綁的是這同一個變數（Tk 會自己讓兩組保持一致，不必手動同步）。
+        self.order_unit = tk.StringVar(value=orders.UNIT_LOT)
+
+        # 全持股交易的兩個追價檔數（整張、零股各一個，見 9.3 的表）。行為還沒
+        # 接上，先存著讓第二列畫得出來、看得到版面。
+        self.order_full_lot_ticks = tk.StringVar(value="2")
+        self.order_full_odd_ticks = tk.StringVar(value="3")
+
+        # 買／賣方向：9.3 第 3 點定案把「賣／買」那組單選鈕整個拿掉——三個作業
+        # 沒有一個需要人選方向（出清永遠是賣；買賣股票由 M14:M18 的正負逐檔
+        # 決定；全持股交易也是算出來的）。方向只該出現在執行預覽的「買賣」欄
+        # 跟紅綠底色。這個變數留著是因為 orders.py 那幾支 plan_* 還是收一個
+        # side 參數——差別在它現在由作業決定，不是由人選。
         self.order_side = tk.StringVar(value=orders.SIDE_SELL)
-        self._order_side_last = orders.SIDE_SELL
 
         # 自動送出開關：關（預設）＝半自動，跟原本一樣停在委託確認視窗給人看、
         # 給人按；開＝程式自己按下確認視窗裡的「確認」，委託真的送出去，不會
@@ -261,28 +273,76 @@ class UiOrderMixin:
         self.order_rows = []
         self._resize_order_stock_column()
         self._recompute_order_preview()
+        # 執行按鈕上寫著「盤前」還是「盤中」（見 _order_exec_label），要跟著換。
+        self._update_order_exec_ui()
         # 「新增」能不能按跟模式有關（見 _order_excel_buttons），切模式要重算一次。
         self._apply_busy_state()
 
-    def _on_order_side_changed(self):
+    def _on_order_job_changed(self):
         """
-        切「買」／「賣」。跟 _on_order_mode_changed 同一個做法：整批清掉股票
-        清單重選，不是想辦法沿用舊的比重（2026/08/28 使用者確認，見
-        _order_init_state 開頭 order_side 的說明）。
+        切作業。跟切模式同一條規矩：**股票清單整批清掉重選**（9.3 第 1 點）
+        ——「比重」在出清股票是人填的設定，在買賣股票根本不存在（張數與價格
+        來自 Excel 的下單試算 M14:N18），沿用舊的列會讓人以為兩邊是同一個
+        數字。
         """
         if self.busy:
-            self.order_side.set(self._order_side_last)
-            messagebox.showinfo("忙碌中", "現在有背景工作在跑，先等它結束才能切換買賣。",
+            self.order_job.set(self._order_job_last)
+            messagebox.showinfo("忙碌中", "現在有背景工作在跑，先等它結束才能切換作業。",
                                 parent=self.root)
             return
 
-        self._order_side_last = self.order_side.get()
+        job = self.order_job.get()
+        self._order_job_last = job
+
+        # 第二列整列換掉。用 grid_remove()／grid() 而不是 pack_forget()：
+        # grid_remove 記得住格子位置，再 grid() 回來會回到原位，pack_forget
+        # 放回來會跑到這一列最後面（9.3 第 2 點，也是 order_ticks_entry 當初
+        # 選擇「留著 disabled」而不是藏起來的原因）。
+        for key, box in self.order_job_frames.items():
+            if key == job:
+                box.grid()
+            else:
+                box.grid_remove()
+
+        # 查到的即時報價跟著作廢，理由同切模式：清單都清空了，那份報價沒有
+        # 任何一列在用。
+        self.order_quotes = {}
+        self._update_order_quotes_ui()
 
         for row in list(self.order_rows):
             row["frame"].destroy()
         self.order_rows = []
         self._resize_order_stock_column()
         self._recompute_order_preview()
+        self._update_order_exec_ui()
+        self._apply_busy_state()
+
+    def _on_order_unit_changed(self):
+        """切整張／零股。目前只影響執行按鈕上的字（零股還沒實作，選不到）。"""
+        self._update_order_exec_ui()
+
+    def _order_job_ready(self):
+        """
+        這個作業的行為接上了沒。買賣股票與全持股交易要到 9.7 第 4 步才接——
+        在那之前選得到、第二列也看得到，但執行按鈕是灰的、預覽區會講一句
+        為什麼（見 _recompute_order_preview）。刻意不是整個 disabled：這一步
+        的重點就是把版面做出來給人看、把互換機制驗起來。
+        """
+        return self.order_job.get() in orders.JOBS_READY
+
+    def _order_exec_label(self):
+        """
+        執行按鈕上的字跟著作業走——「按下去會動到什麼」要寫在按鈕上，不是一句
+        通用的「開始下單」（9.3 最後一段，跟第四節那條原則同一個道理）。
+        """
+        job = self.order_job.get()
+        unit = orders.UNIT_NAMES[self.order_unit.get()]
+        if job == orders.JOB_CLEAR:
+            when = "盤中" if self.order_mode.get() == "intraday" else "盤前"
+            return f"開始出清（{unit}・{when}）"
+        if job == orders.JOB_TRADE:
+            return f"開始買賣（{unit}）"
+        return "開始全持股交易"
 
     def _on_order_multi_round_changed(self):
         """
@@ -479,9 +539,10 @@ class UiOrderMixin:
         會把價格輸入框擠到剩沒幾個像素、打不進去字——用 pack 而不是 grid
         編號，移除中間一列時不會留下空位，不必自己重新排列剩下的列。
 
-        買賣別跟著畫面上目前的「買」／「賣」設定走（見 order_side），一整批
+        買賣別跟著這一輪的方向走（見 _order_init_state 的 order_side：9.3 之後
+        方向是作業算出來的，不是人選的），一整批
         股票共用同一個方向，加進來那一刻就定案——切買賣的時候整批清單會被
-        清空重選（見 _on_order_side_changed），不會出現舊列還留著舊方向的
+        清空重選（見 _on_order_job_changed），不會出現舊列還留著舊方向的
         情況。底色跟網站本身買紅賣綠的配色一致（Sell.TLabel／Buy.TLabel 在
         ui_layout._build() 裡註冊），不必看文字就認得出方向。
 
@@ -572,6 +633,13 @@ class UiOrderMixin:
         跟同步分頁 fill_sync_tree() 同一個做法，整份重建比自己追蹤哪一列該
         更新可靠。
         """
+        if not self._order_job_ready():
+            self._render_order_preview([], [
+                f"「{orders.JOB_NAMES[self.order_job.get()]}」還沒接上，"
+                f"目前只有「{orders.JOB_NAMES[orders.JOB_CLEAR]}」可以執行"
+                f"（落地順序見 docs/介面規劃.md 9.7）。"])
+            return
+
         ordered, skipped = orders.order_accounts(self._selected_order_accounts())
         stock_settings = self._order_stock_settings()
         side = self.order_side.get()
@@ -675,7 +743,7 @@ class UiOrderMixin:
         """
         if self.busy or self.order_quotes_busy:
             return
-        if self.order_mode.get() != "intraday":
+        if not self._order_quotes_available():
             return
 
         codes = sorted({row["code"] for row in self.order_rows})
@@ -759,13 +827,21 @@ class UiOrderMixin:
         else:
             self._say(f"查詢委買賣：{len(quotes)} 檔都查到了，執行預覽已經是下單會用的價格。")
 
+    def _order_quotes_available(self):
+        """
+        「查詢委買賣」現在有沒有意義：只有「出清股票」有盤前／盤中這個設定，
+        而追價比價是盤中限定的（9.3 把盤前／盤中降級成出清作業自己的設定）。
+        """
+        return (self.order_job.get() == orders.JOB_CLEAR
+                and self.order_mode.get() == "intraday")
+
     def _update_order_quotes_ui(self):
         if self.order_quotes_busy:
             self.order_quotes_button.configure(text="查詢中…", state="disabled")
             return
-        intraday = self.order_mode.get() == "intraday"
+        available = self._order_quotes_available()
         self.order_quotes_button.configure(
-            text="查詢委買賣", state="normal" if intraday and not self.busy else "disabled")
+            text="查詢委買賣", state="normal" if available and not self.busy else "disabled")
 
     def _order_number_for_sheet(self, name):
         """分頁名 -> 第幾組帳號。找不到（理論上不會，執行預覽的名字都從 trader_of 長出來）就回 None。"""

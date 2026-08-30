@@ -607,81 +607,159 @@ class UiLayoutMixin:
 
     def _build_order_tab(self):
         """
-        下單分頁：「盤前」（股票／比重／價格、勾帳戶）跟「盤中」（股票／比重／
-        追價檔數、勾帳戶——價格不是人填的，是以 Excel 成交價為基準、下單前
-        再往上或往下追 N 檔算出來的，見 orders.chase_price）共用同一套帳戶
-        勾選、執行預覽、依序執行機制，只有左邊股票設定欄位、跟怎麼組出執行
-        清單不一樣（見 ui_order.py `_on_order_mode_changed`、ui_order_exec.py
-        `start_order_execution`）。
+        版面分四列（見 docs/介面規劃.md 9.2）：
+
+            1. 持股與報酬率　│　作業 ○買賣股票 ●出清股票 ○全持股交易
+            ────────────────────────────────────────────────
+            2. 那個作業自己的設定 —— 整列隨作業換掉（三個預建 Frame 互換）
+            3. 左邊指定股票 │ 右邊 勾帳戶＋執行預覽＋執行按鈕列
+
+        重點是**右半邊三個作業共用同一份 widget，不複製**：三個作業的差別只有
+        「左邊那格要填什麼」跟「張數與價格從哪來」，帳戶勾選、執行預覽、依序
+        執行、多輪、自動送出逐字相同，拆成三個分頁等於把這一整套複製三份，
+        而且「現在在跑什麼」會變成三個地方要看。
+
+        目前只有「出清股票」的行為真的接上了（見 ui_order._order_job_ready）。
         """
         frame = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(frame, text="  下單  ")
 
-        top = ttk.Frame(frame, padding=(0, 0, 0, 8))
+        top = ttk.Frame(frame, padding=(0, 0, 0, 6))
         top.grid(row=0, column=0, sticky="ew")
 
         # 「持股與報酬率」排在最前面：讀資料是整個分頁的起點，先讀完才知道
         # 有哪些持股可選、B17 報酬率排序長什麼樣（2026/08/28 使用者要求調整
-        # 順序，跟「盤前」「盤中」比起來，讀不讀資料才是決定接下來能不能動
-        # 作的第一步）。
+        # 順序——跟選哪個作業比起來，讀不讀資料才是決定接下來能不能動作的
+        # 第一步）。
         self.order_refresh_button = ttk.Button(top, text="持股與報酬率",
                                                command=self.refresh_order_data,
                                                bootstyle="primary-outline")
         self.order_refresh_button.pack(side="left")
 
-        mode_bar = ttk.Frame(top)
-        mode_bar.pack(side="left", padx=(16, 0))
-        ttk.Radiobutton(mode_bar, text="盤前", variable=self.order_mode, value="pre",
-                       style="Choice.TRadiobutton",
-                       command=self._on_order_mode_changed).pack(side="left")
-        ttk.Radiobutton(mode_bar, text="盤中", variable=self.order_mode, value="intraday",
-                       style="Choice.TRadiobutton",
-                       command=self._on_order_mode_changed).pack(side="left", padx=(8, 0))
-
-        # 用一條直線分隔「盤前／盤中」跟「賣／買」兩組單選鈕——沒有分隔線的話
-        # 四顆排在一起看起來像同一組四選一，容易誤會（2026/08/29 使用者反映）。
+        # 「作業」三選一：買賣股票／出清股票／全持股交易（見 docs/介面規劃.md
+        # 9.2）。這一列是「要做哪一種事」，下面那一列是「這種事自己的設定」，
+        # 兩列的層級不一樣——中間用一條橫線斷開，不要讓兩列看起來像同一組
+        # 選項（跟原本盤前/盤中與賣/買之間那條直線同一個理由）。
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=(16, 0), pady=2)
-
-        # 買／賣：整批共用一個方向，切換會把股票清單清空重選（見
-        # ui_order._on_order_side_changed）。跟前面「盤前」「盤中」中間隔一條
-        # 分隔線，是為了跟「這一輪的批次設定」分成兩組，避免看起來像四選一。
-        #
-        # 「買」先 disabled：2026/08/28 使用者要求先專心做「出清股票(整張)」
-        # （只會賣不會買），買方向的東西留著看得到、選不到，等真的要做支援
-        # 買入的功能再打開——跟 order_ticks_entry 在盤前模式底下維持看得到
-        # 但 disabled 是同一個理由，不整個藏起來。
-        side_bar = ttk.Frame(top)
-        side_bar.pack(side="left", padx=(16, 0))
-        ttk.Radiobutton(side_bar, text="賣", variable=self.order_side, value=orders.SIDE_SELL,
-                       style="Choice.TRadiobutton",
-                       command=self._on_order_side_changed).pack(side="left")
-        ttk.Radiobutton(side_bar, text="買", variable=self.order_side, value=orders.SIDE_BUY,
-                       style="Choice.TRadiobutton", state="disabled",
-                       command=self._on_order_side_changed).pack(side="left", padx=(8, 0))
-
-        # 追價檔數：整批共用一個值（不是像比重那樣每檔股票各自設定，使用者
-        # 2026/08/28 確認過），只有盤中模式用得到，盤前模式底下維持看得到但
-        # 打不動——不用整個藏起來，是因為 pack_forget 之後再 pack 回來會跑到
-        # 這一列最後面，不如留著、用 disabled 講清楚「這格現在沒作用」。
-        ticks_bar = ttk.Frame(top)
-        ticks_bar.pack(side="left", padx=(16, 0))
-        self.order_ticks_label = ttk.Label(ticks_bar, text="追價檔數")
-        self.order_ticks_label.pack(side="left")
-        self.order_ticks_entry = ttk.Entry(ticks_bar, textvariable=self.order_ticks, width=4,
-                                           font=(self.family, FONT_SIZE), state="disabled")
-        self.order_ticks_entry.pack(side="left", padx=(4, 0))
-        ttk.Label(ticks_bar, text="檔", style="Hint.TLabel").pack(side="left")
+        ttk.Label(top, text="作業").pack(side="left", padx=(16, 0))
+        for value in (orders.JOB_TRADE, orders.JOB_CLEAR, orders.JOB_FULL):
+            ttk.Radiobutton(top, text=orders.JOB_NAMES[value], variable=self.order_job,
+                            value=value, style="Choice.TRadiobutton",
+                            command=self._on_order_job_changed).pack(side="left", padx=(8, 0))
 
         self.order_status = ttk.Label(top, text="", style="Hint.TLabel")
         self.order_status.pack(side="left", padx=(16, 0))
 
+        ttk.Separator(frame, orient="horizontal").grid(row=1, column=0, sticky="ew")
+
+        # 第二列：三個作業各自的設定，整列互換（見 ui_order._on_order_job_changed）。
+        # 三個 Frame 都先建好、疊在同一格，切作業時 grid_remove() 舊的、grid()
+        # 新的，不是每次重建——grid_remove 記得住格子位置，放回來會回到原位。
+        job_bar = ttk.Frame(frame, padding=(0, 6, 0, 8))
+        job_bar.grid(row=2, column=0, sticky="ew")
+        self.order_job_frames = {
+            orders.JOB_TRADE: self._build_order_job_trade(job_bar),
+            orders.JOB_CLEAR: self._build_order_job_clear(job_bar),
+            orders.JOB_FULL: self._build_order_job_full(job_bar),
+        }
+        for key, box in self.order_job_frames.items():
+            box.grid(row=0, column=0, sticky="w")
+            if key != self.order_job.get():
+                box.grid_remove()
+
         body = ttk.Panedwindow(frame, orient="horizontal")
-        body.grid(row=1, column=0, sticky="nsew")
-        frame.rowconfigure(1, weight=1)
+        body.grid(row=3, column=0, sticky="nsew")
+        frame.rowconfigure(3, weight=1)
         frame.columnconfigure(0, weight=1)
 
         self._build_order_stocks(body)
         self._build_order_right(body)
+        # 執行按鈕上的字是算出來的（作業／單位／時機，見 ui_order._order_exec_label），
+        # 不能只靠使用者切了什麼才更新——開機那一次也要算一次，不然按鈕會停在
+        # 下面寫死的那個預設字串上。
+        self._update_order_exec_ui()
+
+    def _build_order_unit(self, parent):
+        """
+        「單位」整張／零股，買賣股票與出清股票兩張第二列各畫一組。兩組綁的是
+        同一個變數（self.order_unit），Tk 會自己讓它們保持一致，不必手動同步。
+
+        零股還沒實作（9.7 第 4 步），先 disabled——看得到、選不到，跟原本
+        「買」那顆單選鈕同一種做法：留著讓人知道有這個東西，不整個藏起來。
+        """
+        ttk.Label(parent, text="單位").pack(side="left")
+        for value in (orders.UNIT_LOT, orders.UNIT_ODD):
+            ttk.Radiobutton(parent, text=orders.UNIT_NAMES[value], variable=self.order_unit,
+                            value=value, style="Choice.TRadiobutton",
+                            state="normal" if value in orders.UNITS_READY else "disabled",
+                            command=self._on_order_unit_changed).pack(side="left", padx=(8, 0))
+
+    def _build_order_job_trade(self, parent):
+        """
+        買賣股票的第二列：張數與價格都來自 Excel 的下單試算 M14:N18，人不必填
+        任何數字，所以這一列只有「單位」跟一顆觸發 `初始化下單` 巨集的按鈕
+        （M14:M18 ← O4:O8、N14:N18 ← I4:I8，見 9.1 那張表）。
+
+        按鈕先 disabled：這個作業的行為要到 9.7 第 4 步才接上。
+        """
+        box = ttk.Frame(parent)
+        self._build_order_unit(box)
+        self.order_init_button = ttk.Button(box, text="初始化下單", state="disabled",
+                                            bootstyle="secondary-outline")
+        self.order_init_button.pack(side="left", padx=(16, 0))
+        return box
+
+    def _build_order_job_clear(self, parent):
+        """
+        出清股票的第二列＝2026/08 已經在用的那一排，只是從最上面那一列降下來
+        （9.3 第 4 點：「盤前／盤中」對另外兩個作業沒有意義，不該是整個分頁的
+        頂層開關，是這個作業自己的設定）。
+        """
+        box = ttk.Frame(parent)
+        self._build_order_unit(box)
+
+        ttk.Separator(box, orient="vertical").pack(side="left", fill="y", padx=(16, 0), pady=2)
+        ttk.Label(box, text="時機").pack(side="left", padx=(16, 0))
+        ttk.Radiobutton(box, text="盤前", variable=self.order_mode, value="pre",
+                        style="Choice.TRadiobutton",
+                        command=self._on_order_mode_changed).pack(side="left", padx=(8, 0))
+        ttk.Radiobutton(box, text="盤中", variable=self.order_mode, value="intraday",
+                        style="Choice.TRadiobutton",
+                        command=self._on_order_mode_changed).pack(side="left", padx=(8, 0))
+
+        # 追價檔數：整批共用一個值（不是像比重那樣每檔股票各自設定，使用者
+        # 2026/08/28 確認過），只有盤中用得到，盤前維持看得到但打不動——理由
+        # 見 _build_order_unit 那段（留著、用 disabled 講清楚「這格現在沒作用」）。
+        ttk.Separator(box, orient="vertical").pack(side="left", fill="y", padx=(16, 0), pady=2)
+        self.order_ticks_label = ttk.Label(box, text="追價檔數")
+        self.order_ticks_label.pack(side="left", padx=(16, 0))
+        self.order_ticks_entry = ttk.Entry(box, textvariable=self.order_ticks, width=4,
+                                           font=(self.family, FONT_SIZE), state="disabled")
+        self.order_ticks_entry.pack(side="left", padx=(4, 0))
+        ttk.Label(box, text="檔", style="Hint.TLabel").pack(side="left")
+        return box
+
+    def _build_order_job_full(self, parent):
+        """
+        全持股交易的第二列：不必指定股票，整張與零股各自一個追價檔數，加上一顆
+        觸發 `自動計算` 巨集的按鈕——那支巨集算出來的 M14:N18 就是「這一輪打算
+        做什麼」的完整計畫，人看過執行預覽才按下去（9.5：兩步，不是一顆按鈕
+        直通下單）。
+
+        全部先 disabled：這個作業的行為要到 9.7 第 4 步才接上，而且 `自動計算`
+        還會暫時改寫 E/F/B8（9.6 第 3 點），不是可以隨手按著玩的東西。
+        """
+        box = ttk.Frame(parent)
+        for index, (text, var) in enumerate(
+                (("整張追價", self.order_full_lot_ticks), ("零股追價", self.order_full_odd_ticks))):
+            ttk.Label(box, text=text).pack(side="left", padx=(16, 0) if index else (0, 0))
+            ttk.Entry(box, textvariable=var, width=4, font=(self.family, FONT_SIZE),
+                      state="disabled").pack(side="left", padx=(4, 0))
+            ttk.Label(box, text="檔", style="Hint.TLabel").pack(side="left")
+        self.order_calc_button = ttk.Button(box, text="跑自動計算", state="disabled",
+                                            bootstyle="secondary-outline")
+        self.order_calc_button.pack(side="left", padx=(16, 0))
+        return box
 
     def _build_order_stocks(self, paned):
         """

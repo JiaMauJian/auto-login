@@ -27,11 +27,35 @@ SHARES_PER_LOT = 1000
 # 買賣別跟網站本身 buysell 的 B/S 代碼同一套（見 order-api-newOrder-encrypted
 # 記憶）。2026/08/28 加了買/賣切換，是整批共用一個方向（跟 stock_settings
 # 的「比重」一樣整批共用），不是每檔股票各自一個方向——切換買賣的時候畫面
-# 會把股票清單清空重選（見 ui_order._on_order_side_changed），所以不會有
+# 會把股票清單清空重選（見 ui_order._on_order_job_changed），所以不會有
 # 同一輪裡買賣混雜的情況，這裡的函式簽章才能只加一個 side 參數，不必把
 # side 塞進每一筆 stock_settings。
 SIDE_SELL = "S"
 SIDE_BUY = "B"
+
+# 「作業」：買賣股票／出清股票／全持股交易（見 docs/介面規劃.md 9.2、9.3）。
+# 這三個不是三個分頁——它們的差別只有「左邊那格要填什麼」跟「張數與價格從哪
+# 來」，右半邊（帳戶勾選、執行預覽、依序執行、多輪、自動送出）逐字相同，所以
+# 往上長一層作業，不是往旁邊複製三份。
+#
+# 放在 orders.py 而不是某個 ui_ 檔：ui_layout（畫那三列）、ui_order（切換）、
+# ui_order_exec（按鈕上的字）三個檔案都要用同一組值，而它們本來就都 import
+# orders；之後 9.7 第 4 步每個作業各自的 plan_* 也會照這組值分流。
+JOB_TRADE = "trade"
+JOB_CLEAR = "clear"
+JOB_FULL = "full"
+JOB_NAMES = {JOB_TRADE: "買賣股票", JOB_CLEAR: "出清股票", JOB_FULL: "全持股交易"}
+
+# 行為真的接上了的作業。另外兩個選得到、第二列也畫得出來（看得到版面長什麼
+# 樣），但執行按鈕是灰的——見 ui_order._order_job_ready，9.7 第 4 步才會接。
+JOBS_READY = (JOB_CLEAR,)
+
+# 單位：整張／零股。M14:M18 是股數不是張數，整張與零股是同一個數字拆兩段
+# （見 9.4），「單位」決定這一輪送哪一段。零股還沒實作，先只有整張。
+UNIT_LOT = "lot"
+UNIT_ODD = "odd"
+UNIT_NAMES = {UNIT_LOT: "整張", UNIT_ODD: "零股"}
+UNITS_READY = (UNIT_LOT,)
 
 # 委託別（bs_flag）兩個模式不一樣，不是同一個值兩邊共用：盤前是預約單，
 # 掛在開盤前排隊等撮合，那個時間點根本還沒有連續交易，交易所不接受「當下

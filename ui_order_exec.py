@@ -603,8 +603,13 @@ class UiOrderExecMixin:
 
         total = len(self.order_exec_queue)
         if total == 0:
-            self.order_exec_button.configure(text="開始下單（依序執行）",
-                                             state="disabled" if self.busy else "normal")
+            # 按鈕上的字跟著作業／單位／時機走（見 ui_order._order_exec_label）；
+            # 還沒接上的作業一律灰掉，為什麼灰的由正上方那行預覽說明講（見
+            # ui_order._recompute_order_preview），這裡不重複講第二次。
+            ready = self._order_job_ready()
+            self.order_exec_button.configure(
+                text=self._order_exec_label(),
+                state="disabled" if self.busy or not ready else "normal")
             self.order_exec_stop_button.configure(state="disabled")
             self.order_exec_status.configure(text="")
             return
