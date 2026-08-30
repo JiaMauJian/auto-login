@@ -90,13 +90,20 @@ async ({ cmd, paramInfo }) => {
 
 # 只讀身分相關的欄位。sessionStorage 裡的 login_info 含有密碼與身分證字號，
 # 絕對不要 dump 出來寫進檔案，這裡只記錄有哪些 key 存在。
+#
+# 2026/08/30 拿掉 systemid 與 ratest，兩個都是「定義了但全程式沒有任何地方讀」。
+# systemid 還多一個問題：它讀的是 'systemid'，網站實際用的鍵是 'systemId'（大寫 I，
+# 當天在瀏覽器 console 印 Object.keys(sessionStorage) 確認的），所以那一欄從來都是
+# null。是整行刪掉而不是修大小寫 —— 留一個沒人用的欄位，比拼錯更容易讓下一個人
+# 以為它有意義。
+#
+# keys 留著：它同樣沒被讀，但那是刻意的配套 —— 要偵察 sessionStorage 有什麼的時候
+# 用它，而不是去 dump 值（login_info 在裡面）。
 SESSION_JS = """
 () => ({
     branch_id: sessionStorage.getItem('branch_id'),
     cust_id: sessionStorage.getItem('cust_id'),
     account: sessionStorage.getItem('account'),
-    systemid: sessionStorage.getItem('systemid'),
-    ratest: sessionStorage.getItem('ratest'),
     keys: Object.keys(sessionStorage),
 })
 """
