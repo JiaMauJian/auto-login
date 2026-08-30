@@ -28,7 +28,7 @@ STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "
               "order_data": "下單資料讀取", "order_filled": "下單填單",
               "order_dialog_closed": "委託確認視窗關閉偵測",
               "order_price_refresh": "多輪出清重讀持股",
-              "order_stock_price": "新增股票查價",
+              "order_stock_price": "新增股票查價", "order_plan_init": "初始化下單",
               "order_quotes_fetched": "查詢委買賣", "pending_fetched": "查詢掛單"}
 
 # 瀏覽器起不來時，錯誤視窗最上面那段人話。traceback 講的是 Playwright 的內部狀況，
@@ -561,6 +561,7 @@ class UiBackgroundMixin:
                     "order_dialog_closed": self._on_order_dialog_closed,
                     "order_price_refresh": self._on_order_price_refresh,
                     "order_stock_price": self._on_order_stock_price,
+                    "order_plan_init": self._on_order_plan_init,
                     "order_quotes_fetched": self._on_order_quotes_fetched,
                     "pending_fetched": self._on_pending_fetched}
         try:

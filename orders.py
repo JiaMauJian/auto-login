@@ -46,9 +46,10 @@ JOB_CLEAR = "clear"
 JOB_FULL = "full"
 JOB_NAMES = {JOB_TRADE: "買賣股票", JOB_CLEAR: "出清股票", JOB_FULL: "全持股交易"}
 
-# 行為真的接上了的作業。另外兩個選得到、第二列也畫得出來（看得到版面長什麼
-# 樣），但執行按鈕是灰的——見 ui_order._order_job_ready，9.7 第 4 步才會接。
-JOBS_READY = (JOB_CLEAR,)
+# 行為真的接上了的作業。還沒接的那個選得到、第二列也畫得出來（看得到版面長什麼
+# 樣），但執行按鈕是灰的——見 ui_order._order_job_ready。
+# 2026/08/30：買賣股票接上了（整張；零股還卡在下單表單的交易盤別要選哪個值）。
+JOBS_READY = (JOB_CLEAR, JOB_TRADE)
 
 # 單位：整張／零股。M14:M18 是股數不是張數，整張與零股是同一個數字拆兩段
 # （見 9.4），「單位」決定這一輪送哪一段。零股還沒實作，先只有整張。
@@ -78,6 +79,31 @@ REASON_CHASE_TEMPLATE = "以 Excel 成交價±{ticks}檔為邊界，下單前查
 # 不必再等「開始下單」跑到那一筆才臨時查——note 講清楚「這個數字不會再變」，
 # 跟 REASON_CHASE_TEMPLATE 那句「下單前查」是兩種不同的狀態，不能共用同一句。
 REASON_CHASE_FROZEN_TEMPLATE = "已查{opposite} {value}，下單會直接用這個價格（不再重查）"
+
+# 買賣股票（張數與價格來自 Excel 的下單試算 M14:N18）用得到的幾句。
+REASON_NO_PLAN = "下單試算是空的，略過"
+REASON_ONLY_ODD_TEMPLATE = "試算只有零股 {odd} 股，整張是 0，略過"
+REASON_WITH_ODD_TEMPLATE = "另有零股 {odd} 股，這一輪不送"
+
+
+def split_lots(shares):
+    """
+    把股數拆成「整張幾張」與「零股幾股」兩段，各自帶回原本的正負號（見
+    docs/介面規劃.md 9.4）。M14:M18 是**股數**不是張數，整張與零股不是兩份
+    資料，是同一個數字拆兩段：
+
+        2350 股  ->  (2, 350)     整張 2 張 ＋ 零股 350 股
+        -800 股  ->  (0, -800)    整張 0 張 ＋ 零股 賣 800 股
+        -2350 股 ->  (-2, -350)
+
+    **往零的方向取整**——不是四捨五入，也不是 Python `//`：`-2350 // 1000`
+    是 -3，那會變成「賣 3 張」，比 Excel 算出來的多賣一張。負數在這裡不是
+    邊緣情況，是一半的情況（負數就是賣），所以這條不能靠「應該不會發生」。
+    """
+    sign = -1 if shares < 0 else 1
+    qty = abs(int(shares))
+    lots = qty // SHARES_PER_LOT
+    return sign * lots, sign * (qty - lots * SHARES_PER_LOT)
 
 
 def lots_from_weight(held_qty, weight_pct):
@@ -236,6 +262,80 @@ def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down,
                 "note": "；".join(reasons),
             })
     return preview
+
+
+def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit):
+    """
+    買賣股票的執行預覽（規劃文件「一、買賣股票」）：**張數與價格都來自各帳戶
+    自己那一頁的下單試算 M14:N18**，人不必填任何數字；方向由試算股數的正負
+    逐檔決定（正數買、負數賣），不是整批共用一個方向。
+
+    所以這裡沒有 side 參數，也沒有 holdings／weight——跟 plan_stock_orders
+    的差別不是「多幾個欄位」，是資料來源整個不一樣，硬要共用同一支只會變成
+    兩條互不相干的路擠在一個函式裡。
+
+    stocks 是使用者指定的股票（規劃文件：「指定股票（可多選）」），形狀跟
+    plan_stock_orders 的 stock_settings 一樣是 [{"code", "name"}, ...]，只是不含
+    比重與價格——名稱從這裡來而不是從 plans 來，是因為 plans 的名稱是 D 欄原文
+    （含代號，像「台積電(2330)」），畫面上會變成「2330 台積電(2330)」。
+
+    plans 是 {(分頁名, 股票代號): {"qty": 股數, "price": 價格}}，
+    holdings 是 {(分頁名, 股票代號): 股數}（只為了在預覽裡顯示目前持股，這個
+    作業不拿它算任何東西），
+    unit 是 UNIT_LOT／UNIT_ODD 決定這一輪送哪一段（見 split_lots）。
+
+    委託別固定 ROD（規劃文件明講「用ROD下單」）：這個作業沒有盤前／盤中之分，
+    不吃 BS_FLAG_INTRADAY 那條路。
+    """
+    preview = []
+    for account in ordered_accounts:
+        for stock in stocks:
+            code = stock["code"]
+            plan = plans.get((account["sheet"], code)) or {}
+            shares = int(plan.get("qty") or 0)
+            price = plan.get("price")
+            lots, odd = split_lots(shares)
+            send = lots if unit == UNIT_LOT else odd
+
+            reasons = []
+            if shares == 0:
+                reasons.append(REASON_NO_PLAN)
+            elif unit == UNIT_LOT and lots == 0:
+                reasons.append(REASON_ONLY_ODD_TEMPLATE.format(odd=abs(odd)))
+            elif unit == UNIT_LOT and odd:
+                # 不是略過的理由，是一句提醒：選整張的時候送出去的量會比 Excel
+                # 上那個數字少，人要看得出來為什麼（9.4）。
+                reasons.append(REASON_WITH_ODD_TEMPLATE.format(odd=abs(odd)))
+            if to_num(price, None) is None or to_num(price, 0) <= 0:
+                reasons.append(REASON_NO_PRICE)
+
+            preview.append({
+                "order": account["order"],
+                "sheet": account["sheet"],
+                "code": code,
+                "name": stock.get("name", ""),
+                "side": SIDE_BUY if shares > 0 else SIDE_SELL,
+                "bs_flag": BS_FLAG_PRE,
+                # 「持股」欄就是持股，不塞試算股數——試算已經在「張數」欄用
+                # 「2 張（餘 350 股）」的形式講清楚了（見 _lots_text），這一欄
+                # 拿來對照「要動的量跟手上有多少」反而有用。
+                "held_qty": holdings.get((account["sheet"], code), 0) or 0,
+                "lots": abs(send),
+                # 送出去的量是絕對值（方向靠 side，不是靠負號），但畫面上要把
+                # 拆法寫出來，人才看得懂為什麼選整張時送的比 Excel 上少（9.4）。
+                "lots_text": _lots_text(lots, odd, unit),
+                "price": price,
+                "skip": send == 0,
+                "note": "；".join(reasons),
+            })
+    return preview
+
+
+def _lots_text(lots, odd, unit):
+    """執行預覽「張數」欄要顯示的字：把整張／零股的拆法寫出來（9.4）。"""
+    if unit == UNIT_LOT:
+        return f"{abs(lots)} 張" + (f"（餘 {abs(odd)} 股）" if odd else "")
+    return f"{abs(odd)} 股" + (f"（另有 {abs(lots)} 張）" if lots else "")
 
 
 def executable_orders(preview):

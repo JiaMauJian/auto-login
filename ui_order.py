@@ -44,6 +44,11 @@ class UiOrderMixin:
                                            # chase_price 的 pricenow 來源（見 start_order_execution），
                                            # 不只是畫面顯示用（跟 order_names 平行）
         self.order_return_rates = {}      # 分頁名 -> B17 報酬率或 None（讀不到）
+        # (分頁名, 股票代號) -> {"name", "qty"(股數，正買負賣), "price"}：買賣股票作業
+        # 用的下單試算 M14:N18（見 excel_io.read_order_plan）。**每個帳戶各有一份**
+        # ——它是那一頁自己的試算結果，不像股價那樣全帳戶共用一個值，所以 key 要
+        # 帶分頁名，跟 order_holdings 同一種形狀，不是 order_prices 那種。
+        self.order_plans = {}
         self.order_account_vars = {}      # 分頁名 -> 勾選狀態的 BooleanVar（見 _fill_order_accounts）
         self.order_busy = False
         # 股票代號 -> {"bid","ask","last"}，「查詢委買賣」按鈕整批查回來的即時
@@ -130,13 +135,17 @@ class UiOrderMixin:
                 parent=self.root)
             return
 
-        run_macro = self.order_mode.get() == "intraday"
+        run_macro = self._order_intraday()
+        # 買賣股票的張數與價格來自下單試算 M14:N18，那是另外幾格，只有這個作業
+        # 要讀——其他作業讀它只是多 10 格 COM 往返。
+        read_plan = self.order_job.get() == orders.JOB_TRADE
         self.order_busy = True
         self._apply_busy_state()
         self.order_status.configure(text="更新股價、讀取中…" if run_macro else "讀取中…")
-        threading.Thread(target=self._order_read_worker, args=(self.path, names, run_macro), daemon=True).start()
+        threading.Thread(target=self._order_read_worker,
+                         args=(self.path, names, run_macro, read_plan), daemon=True).start()
 
-    def _order_read_worker(self, path, names, run_macro):
+    def _order_read_worker(self, path, names, run_macro, read_plan=False):
         """
         背景執行緒：用 COM 讀 E/F 欄、B17、I 欄。run_macro 為真的話，每個
         分頁在讀它之前先各觸發一次使用者既有的「更新股價」巨集——是「每個
@@ -167,6 +176,8 @@ class UiOrderMixin:
                             excel_io.run_update_price_macro(excel, sheet)
                         data = excel_io.read_sheet(sheet)
                         data["return_rate"] = excel_io.read_return_rate(sheet)
+                        if read_plan:
+                            data["plan"] = excel_io.read_order_plan(sheet)
                         sheets[name] = data
                 payload = {"sheets": sheets, "errors": errors}
         except Exception as exc:
@@ -186,8 +197,11 @@ class UiOrderMixin:
             return
 
         self.order_holdings, self.order_return_rates, self.order_names, self.order_prices = {}, {}, {}, {}
+        self.order_plans = {}
         for name, data in payload["sheets"].items():
             self.order_return_rates[name] = data["return_rate"]
+            for code, plan in (data.get("plan") or {}).items():
+                self.order_plans[(name, code)] = plan
             for row in data["rows"]:
                 self.order_holdings[(name, row["code"])] = row["qty"]
                 self.order_names.setdefault(row["code"], row["label"].split("(")[0].split("（")[0].strip())
@@ -309,6 +323,17 @@ class UiOrderMixin:
         self.order_quotes = {}
         self._update_order_quotes_ui()
 
+        # 「多輪直到出清」「自動更新股價」是出清・盤中限定的（見
+        # _on_order_mode_changed）。切到別的作業要強制關掉並鎖住，不然從
+        # 出清・盤中切過來時它們還留著勾選狀態，看起來像買賣股票也會跑多輪。
+        if job != orders.JOB_CLEAR:
+            self.order_multi_round.set(False)
+            self.order_auto_price.set(False)
+            self.order_multi_round_check.configure(state="disabled")
+            self.order_auto_price_check.configure(state="disabled")
+        else:
+            self._on_order_mode_changed()
+
         for row in list(self.order_rows):
             row["frame"].destroy()
         self.order_rows = []
@@ -320,6 +345,18 @@ class UiOrderMixin:
     def _on_order_unit_changed(self):
         """切整張／零股。目前只影響執行按鈕上的字（零股還沒實作，選不到）。"""
         self._update_order_exec_ui()
+
+    def _order_intraday(self):
+        """
+        現在是不是「出清股票・盤中」。
+
+        盤前／盤中是**出清作業自己的設定**（9.3 第 4 點），所以問「是不是盤中」
+        一定要連作業一起問：從出清・盤中切到買賣股票的時候 order_mode 還留著
+        "intraday"，只看它的話，買賣股票會莫名其妙跑去追價、跑去觸發更新股價
+        巨集。這種錯不會報錯，只會做了一堆不該做的事。
+        """
+        return (self.order_job.get() == orders.JOB_CLEAR
+                and self.order_mode.get() == "intraday")
 
     def _order_job_ready(self):
         """
@@ -401,7 +438,7 @@ class UiOrderMixin:
         # 「新增」只有盤中那條路會附帶跑巨集（見 add_order_stock 的說明），盤前
         # 完全不碰 COM，沒有理由跟著變灰——讀取 20 組帳戶要跑好幾分鐘，那段時間
         # 還是該能把股票加進清單。所以這一顆多看一個模式。
-        add_busy = busy and self.order_mode.get() == "intraday"
+        add_busy = busy and self._order_intraday()
         self.order_add_button.configure(state="disabled" if add_busy else "normal")
 
     def _order_ticks_setting(self):
@@ -442,7 +479,11 @@ class UiOrderMixin:
 
         row = {"code": code, "name": name, "weight": tk.StringVar()}
         row["weight"].trace_add("write", lambda *_a: self._recompute_order_preview())
-        if self.order_mode.get() == "pre":
+        if self.order_job.get() == orders.JOB_TRADE:
+            # 買賣股票不填任何數字：張數與價格都來自各帳戶自己的下單試算
+            # （規劃文件「一、買賣股票」只有「指定股票」跟「選帳戶」兩項設定）。
+            row.pop("weight", None)
+        elif self.order_mode.get() == "pre":
             row["price"] = tk.StringVar()
             row["price"].trace_add("write", lambda *_a: self._recompute_order_preview())
         self._build_order_stock_row(row)
@@ -450,7 +491,7 @@ class UiOrderMixin:
         self.order_stock_pick.set("")
         self._resize_order_stock_column()
         self._recompute_order_preview()
-        if self.order_mode.get() == "intraday":
+        if self._order_intraday():
             self._refresh_added_stock_price()
 
     def _refresh_added_stock_price(self):
@@ -562,21 +603,38 @@ class UiOrderMixin:
         新加的那一列，而是畫面上全部盤中列一起刷新——單按「重新整理」不會
         觸發這個更新，只有「新增」股票才會。
         """
-        side_text = "買" if self.order_side.get() == orders.SIDE_BUY else "賣"
-        side_style = "Buy.TLabel" if self.order_side.get() == orders.SIDE_BUY else "Sell.TLabel"
+        # 買賣股票的方向是**逐檔逐帳戶**由試算的正負決定（規劃文件：正數為買、
+        # 負數為賣），同一檔股票在甲帳戶是買、在乙帳戶可能是賣。所以這一列不掛
+        # 買賣底色——掛了就是給一個對某些帳戶剛好相反的顏色。方向畫在右邊執行
+        # 預覽的「買賣」欄，那裡才是一列一個帳戶。
+        trade = self.order_job.get() == orders.JOB_TRADE
+        buy = self.order_side.get() == orders.SIDE_BUY
+        side_text = "" if trade else ("買" if buy else "賣")
+        side_style = "TLabel" if trade else ("Buy.TLabel" if buy else "Sell.TLabel")
 
         block = ttk.Frame(self.order_stock_frame)
         block.pack(fill="x", pady=(0, 8))
 
         head = ttk.Frame(block)
         head.pack(fill="x")
-        ttk.Label(head, text=side_text, style=side_style, width=2, anchor="center").pack(side="left")
+        if side_text:
+            ttk.Label(head, text=side_text, style=side_style, width=2, anchor="center").pack(side="left")
         ttk.Label(head, text=f" {row['code']} {row['name']} ", style=side_style).pack(side="left")
         ttk.Button(head, text="移除", bootstyle="danger-outline",
                   command=lambda: self.remove_order_stock(row)).pack(side="left", padx=(6, 0))
 
         fields = ttk.Frame(block)
         fields.pack(fill="x", pady=(4, 0))
+        if trade:
+            # 這一格顯示勾選帳戶的試算股數（9.3：左邊那格顯示 M14:N18 試算值，
+            # 唯讀）。試算是逐帳戶的，所以只有全部一致時才報一個數字，不一致就
+            # 講範圍、叫人看右邊——報一個數字卻其實每個帳戶不同，比不報還糟。
+            # 由 _update_trade_row_labels 在每次重算預覽時更新（勾的人會變）。
+            label = ttk.Label(fields, text="", style="Hint.TLabel", wraplength=wide(240))
+            label.pack(side="left")
+            row["plan_label"] = label
+            row["frame"] = block
+            return
         ttk.Label(fields, text="比重").pack(side="left")
         ttk.Entry(fields, textvariable=row["weight"], width=6,
                  font=(self.family, FONT_SIZE)).pack(side="left", padx=(4, 0))
@@ -641,25 +699,141 @@ class UiOrderMixin:
             return
 
         ordered, skipped = orders.order_accounts(self._selected_order_accounts())
-        stock_settings = self._order_stock_settings()
-        side = self.order_side.get()
         hints = []
 
-        if self.order_mode.get() == "intraday":
+        if self.order_job.get() == orders.JOB_TRADE:
+            # 買賣股票：不讀畫面上的任何數字，張數與價格都來自各帳戶自己那一頁
+            # 的下單試算（見 orders.plan_trade_orders）。
+            codes = [row["code"] for row in self.order_rows]
+            preview = orders.plan_trade_orders(
+                [{"code": row["code"], "name": row["name"]} for row in self.order_rows],
+                ordered, self.order_plans, self.order_holdings, self.order_unit.get())
+            self._update_trade_row_labels([account["sheet"] for account in ordered])
+            if codes and not self.order_plans:
+                hints.append("⚠ 還沒讀到下單試算，先按「持股與報酬率」。")
+        elif self._order_intraday():
+            stock_settings = self._order_stock_settings()
             ticks = self._order_ticks_setting()
             if ticks is None:
                 preview = []
                 hints.append("⚠ 追價檔數要填 0 以上的整數。")
             else:
                 preview = orders.plan_intraday_orders(
-                    stock_settings, ordered, self.order_holdings, ticks, side,
+                    stock_settings, ordered, self.order_holdings, ticks,
+                    self.order_side.get(),
                     prices=self.order_prices, quotes=self.order_quotes)
         else:
-            preview = orders.plan_stock_orders(stock_settings, ordered, self.order_holdings, side)
+            preview = orders.plan_stock_orders(self._order_stock_settings(), ordered,
+                                               self.order_holdings, self.order_side.get())
 
         if skipped:
             hints.append(f"⚠ {'、'.join(a['sheet'] for a in skipped)} 讀不到報酬率，沒有排進執行順序。")
         self._render_order_preview(preview, hints)
+
+    def _update_trade_row_labels(self, sheets):
+        """
+        買賣股票：左邊每一列那句「試算多少股」跟著目前勾選的帳戶更新。
+
+        試算是逐帳戶的，全部一致才報一個數字；不一致就報範圍並叫人看右邊——
+        報一個數字、實際上每個帳戶不同，比不報還糟。
+        """
+        for row in self.order_rows:
+            label = row.get("plan_label")
+            if label is None:
+                continue
+            values = [int((self.order_plans.get((sheet, row["code"])) or {}).get("qty") or 0)
+                      for sheet in sheets]
+            if not values:
+                text = "還沒勾選帳戶"
+            elif set(values) == {0}:
+                text = "勾選的帳戶都沒有試算"
+            elif len(set(values)) == 1:
+                text = f"試算 {show(values[0])} 股"
+            else:
+                text = f"試算各帳戶不同（{show(min(values))} ～ {show(max(values))} 股），見右邊"
+            label.configure(text=text)
+
+    def run_init_order(self):
+        """
+        「初始化下單」：對勾選的每個帳戶各觸發一次使用者既有的巨集
+        （M14:M18 ← O4:O8 加碼股數、N14:N18 ← I4:I8 股價），跑完把試算重讀回來。
+
+        **會把 M14:N18 現在的內容蓋掉**，所以先跳確認。那是使用者自己的巨集、
+        自己平常就會按的按鈕，但從程式按下去跟自己在 Excel 上按下去不一樣：他
+        看不到程式對哪幾個分頁按了幾次。確認框裡直接列出會動到哪幾個分頁，不是
+        只問一句「確定嗎」。
+        """
+        if self._excel_in_use() or not self._require_excel():
+            return
+        ordered, _skipped = orders.order_accounts(self._selected_order_accounts())
+        sheets = [account["sheet"] for account in ordered]
+        if not sheets:
+            messagebox.showinfo("還沒有帳戶", "請先勾選至少一個帳戶。", parent=self.root)
+            return
+
+        if not ask_confirm(
+                self.root, "初始化下單",
+                f"即將對這 {len(sheets)} 個分頁各跑一次 Excel 的「初始化下單」巨集：\n\n"
+                f"　{'、'.join(sheets)}\n\n"
+                f"它會把每一頁的下單試算股數換成「加碼股數」、價格換成目前的股價，"
+                f"現在填在那裡的內容會被蓋掉。\n\n確定要跑嗎？",
+                confirm_style="primary"):
+            return
+
+        self.order_busy = True
+        self._apply_busy_state()
+        self.order_status.configure(text="初始化下單中…")
+        threading.Thread(target=self._order_init_worker,
+                         args=(self.path, sheets), daemon=True).start()
+
+    def _order_init_worker(self, path, sheets):
+        """
+        背景執行緒：一頁 Activate 一次、跑一次巨集、順手把新的試算讀回來
+        （見 excel_io.run_order_macro：這兩支巨集一樣只認 ActiveSheet）。
+        """
+        import pythoncom
+
+        pythoncom.CoInitialize()
+        excel = workbook = sheet = None
+        payload = {}
+        try:
+            with excel_io.opened(path, True) as (excel, workbook, _attached):
+                plans, errors = {}, {}
+                with excel_io.keep_active_sheet(workbook):
+                    for name in sheets:
+                        sheet, error = excel_io.find_sheet(workbook, name)
+                        if sheet is None:
+                            errors[name] = error
+                            continue
+                        excel_io.run_order_macro(excel, sheet, excel_io.INIT_ORDER_MACRO)
+                        plans[name] = excel_io.read_order_plan(sheet)
+                payload = {"plans": plans, "errors": errors}
+        except Exception as exc:
+            payload = {"error": str(exc)}
+        finally:
+            sheet = excel = workbook = None
+            pythoncom.CoUninitialize()
+        self.queue.put(("order_plan_init", payload))
+
+    def _on_order_plan_init(self, payload):
+        """初始化下單的背景回話：把重讀回來的試算換掉，重畫執行預覽。"""
+        self.order_busy = False
+        self._apply_busy_state()
+
+        if "error" in payload:
+            self.order_status.configure(text="初始化下單失敗")
+            messagebox.showerror("初始化下單失敗", payload["error"], parent=self.root)
+            return
+
+        for name, plan in payload["plans"].items():
+            for code, values in plan.items():
+                self.order_plans[(name, code)] = values
+
+        errors = payload["errors"]
+        note = f"　（{len(errors)} 個分頁找不到：{'、'.join(errors)}）" if errors else ""
+        self.order_status.configure(
+            text=f"已對 {len(payload['plans'])} 個分頁跑過「初始化下單」。{note}")
+        self._recompute_order_preview()
 
     def _render_order_preview(self, preview, hints):
         """
@@ -696,7 +870,9 @@ class UiOrderMixin:
                 f"{item['code']} {item['name']}",
                 # 持股最小單位是 1 股，不需要小數點；股數本來就可能上看百萬，
                 # 千分位才看得出位數（util.show 是全專案統一用的數字顯示格式）。
-                show(item["held_qty"]), item["lots"], price_text, item["note"],
+                # 「張數」欄：買賣股票要把整張／零股的拆法寫出來（9.4），其他
+                # 作業沒有這個問題，就是一個數字（沒有 lots_text 就退回 lots）。
+                show(item["held_qty"]), item.get("lots_text") or item["lots"], price_text, item["note"],
             ), tags=(tag,) if tag else ())
 
         self.order_preview_hint.configure(text="　".join(hints))
@@ -834,8 +1010,7 @@ class UiOrderMixin:
         「查詢委買賣」現在有沒有意義：只有「出清股票」有盤前／盤中這個設定，
         而追價比價是盤中限定的（9.3 把盤前／盤中降級成出清作業自己的設定）。
         """
-        return (self.order_job.get() == orders.JOB_CLEAR
-                and self.order_mode.get() == "intraday")
+        return self._order_intraday()
 
     def _update_order_quotes_ui(self):
         if self.order_quotes_busy:

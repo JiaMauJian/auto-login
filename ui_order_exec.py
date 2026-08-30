@@ -129,14 +129,29 @@ class UiOrderExecMixin:
         if self._excel_in_use():
             return
 
+        job = self.order_job.get()
         mode = self.order_mode.get()
         side = self.order_side.get()
         multi_round = self.order_multi_round.get()
         auto_price = self.order_auto_price.get()
         ordered, _skipped = orders.order_accounts(self._selected_order_accounts())
-        stock_settings = self._order_stock_settings()
+        # 凍結起來給多輪用的股票設定（比重／價格）。只有出清作業有這種東西，
+        # 買賣股票的數字全在 Excel 那頁，畫面上一個都沒有——那個作業也不支援
+        # 多輪（切作業時就強制關掉了，見 ui_order._on_order_job_changed），
+        # 所以留空清單，不是漏給。
+        stock_settings = []
 
-        if mode == "intraday":
+        if job == orders.JOB_TRADE:
+            # 買賣股票：張數、價格、方向全部來自各帳戶自己那一頁的下單試算，
+            # 畫面上沒有任何數字要讀（見 orders.plan_trade_orders）。價格已經是
+            # 數字，所以濾法跟盤前那條一樣用 executable_orders。
+            ticks = None
+            preview = orders.plan_trade_orders(
+                [{"code": row["code"], "name": row["name"]} for row in self.order_rows],
+                ordered, self.order_plans, self.order_holdings, self.order_unit.get())
+            queue_rows = orders.executable_orders(preview)
+        elif self._order_intraday():
+            stock_settings = self._order_stock_settings()
             ticks = self._order_ticks_setting()
             if ticks is None:
                 messagebox.showerror("追價檔數不對", "追價檔數要填 0 以上的整數。", parent=self.root)
@@ -147,12 +162,18 @@ class UiOrderExecMixin:
             queue_rows = orders.executable_intraday_orders(preview)
         else:
             ticks = None
-            preview = orders.plan_stock_orders(stock_settings, ordered, self.order_holdings, side)
+            stock_settings = self._order_stock_settings()
+            preview = orders.plan_stock_orders(stock_settings, ordered,
+                                               self.order_holdings, side)
             queue_rows = orders.executable_orders(preview)
 
         if not queue_rows:
-            reason = ("沒有持股，或比重算出來不到 1 張" if mode == "intraday"
-                      else "沒有持股、比重算出來不到 1 張，或者還沒填價格")
+            if job == orders.JOB_TRADE:
+                reason = "下單試算是空的、只有零股沒有整張，或者試算價格是空的"
+            elif self._order_intraday():
+                reason = "沒有持股，或比重算出來不到 1 張"
+            else:
+                reason = "沒有持股、比重算出來不到 1 張，或者還沒填價格"
             messagebox.showinfo("沒有可以執行的委託",
                 f"目前的執行預覽裡，沒有一列是真的可以送出委託的（可能是{reason}）。",
                 parent=self.root)
@@ -162,7 +183,20 @@ class UiOrderExecMixin:
         auto = self.order_auto_confirm.get()
         side_word = "買進" if side == orders.SIDE_BUY else "賣出"
 
-        if mode == "intraday":
+        if job == orders.JOB_TRADE:
+            # 買賣股票的方向是逐筆的（試算正數買、負數賣），不能像出清那樣用一句
+            # 「即將賣出 N 筆」帶過——那會讓人以為整批同一個方向。
+            buys = sum(1 for row in queue_rows if row["side"] == orders.SIDE_BUY)
+            unit_word = orders.UNIT_NAMES[self.order_unit.get()]
+            amount_word = "張" if self.order_unit.get() == orders.UNIT_LOT else "股"
+            head = (
+                f"即將依序處理 {len(queue_rows)} 筆委託"
+                f"（買 {buys} 筆、賣 {len(queue_rows) - buys} 筆，共 {total_lots} {amount_word}），"
+                f"用 ROD-當日有效。\n\n"
+                f"張數與價格都照各帳戶自己那一頁的下單試算（Excel 的下單試算欄），"
+                f"方向由試算的正負決定；這一輪只送「{unit_word}」那一段，另一段不送。\n\n"
+            )
+        elif self._order_intraday():
             # 按過「查詢委買賣」的那幾筆 row["price"] 已經是算好的數字（見
             # orders.plan_intraday_orders），開始下單時會直接照用、不再重查
             # （2026/08/29 使用者要求）；沒查過的那幾筆還是老路，下單前才
@@ -673,6 +707,11 @@ class UiOrderExecMixin:
         if problems:
             raise RuntimeError("；".join(problems))
 
+        # 方向與委託別一律看**那一列自己帶的值**，不是這一輪整批共用的那個：
+        # 買賣股票的方向是逐檔逐帳戶由下單試算的正負算出來的（見
+        # orders.plan_trade_orders），出清那兩支 plan_* 也一樣把 side 寫進每一列，
+        # 所以兩邊共用同一條路，不必在這裡分作業。
+        row_side = row.get("side") or side
         price = row["price"]
         if mode == "intraday" and price is None:
             pricenow = self.order_exec_prices.get(row["code"])
@@ -695,21 +734,24 @@ class UiOrderExecMixin:
                 if stream.subscribe([row["code"]]):
                     quote = stream.wait_for(row["code"])
                     if quote:
-                        best_opposite = quote["ask"] if side == orders.SIDE_BUY else quote["bid"]
+                        best_opposite = quote["ask"] if row_side == orders.SIDE_BUY else quote["bid"]
             finally:
                 stream.close()
 
-            price = orders.chase_price(pricenow, ticks, side, best_opposite)
+            price = orders.chase_price(pricenow, ticks, row_side, best_opposite)
 
         # 委託別跟著模式走，不是兩邊共用同一個值（見 orders.BS_FLAG_PRE 的
         # 說明）：盤前開盤前還沒有連續交易，只能用 ROD；盤中規劃文件明講
         # 用 IOC。2026/08/28 使用者更正過，之前這裡兩種模式都寫死 IOC 是錯的。
-        bs_flag = orders.BS_FLAG_INTRADAY if mode == "intraday" else orders.BS_FLAG_PRE
+        # 買賣股票那幾列自己帶著 bs_flag（規劃文件明講用 ROD），沒帶的才照模式
+        # 決定：盤前只能 ROD，盤中規劃文件明講 IOC。
+        bs_flag = row.get("bs_flag") or (
+            orders.BS_FLAG_INTRADAY if mode == "intraday" else orders.BS_FLAG_PRE)
 
         page.goto(order_fill.ORDER_ENTRY_PAGE, wait_until="domcontentloaded")
         order_fill.open_order_form(page)
         order_fill.select_stock(page, row["code"])
-        order_fill.fill_order(page, side=side, qty=row["lots"], price=price, bs_flag=bs_flag)
+        order_fill.fill_order(page, side=row_side, qty=row["lots"], price=price, bs_flag=bs_flag)
 
         if not auto:
             return page, {}

@@ -49,6 +49,25 @@ COL_PRICE = 9
 # 只對 ActiveSheet 動作，所以「一頁一次」是硬性要求，不是保守做法。
 UPDATE_PRICE_MACRO = "Module1.更新股價"
 
+# 下單試算：M 欄是股數（正買負賣）、N 欄是價格，一列對一檔股票，跟上面 D/E/F
+# 那五列是**同一批股票的另一組列**（D4 對 M14、D5 對 M15…）。列號在巨集裡是算
+# 出來的（stock_limit + 9 ～ stock_limit * 2 + 8，stock_limit = 5），不是寫死
+# 的——那個數字改了這裡要跟著改，見 docs/介面規劃.md 9.1 那張表。
+#
+# 只讀，程式從來不寫這兩欄：要動它們是靠觸發使用者自己的巨集（初始化下單／
+# 清空下單／自動計算），跟 I 欄那個「巨集寫、程式讀」的分工一樣。
+PLAN_ROWS = range(14, 19)
+COL_PLAN_QTY, COL_PLAN_PRICE = 13, 14
+
+# 使用者既有的另外兩支巨集（Module1）。跟「更新股價」不一樣的是這兩支**不會
+# 跳 MsgBox**（九個對話框全在更新股價與自動計算裡，見 docs/介面規劃.md 9.6
+# 第 2 點那張表），所以觸發它們不會有「背景執行緒無聲卡住」那個風險。
+#
+# 但「只認 ActiveSheet」這條照樣適用——它們一樣是標準模組裡的無限定 Range()，
+# 所以一樣要一個分頁 Activate 一次、跑一次。
+INIT_ORDER_MACRO = "Module1.初始化下單"
+CLEAR_ORDER_MACRO = "Module1.清空下單"
+
 # 今年報酬率，下單功能排執行順序用（報酬率低的先執行）。只讀，不寫——
 # 這一格本來就是 Excel 自己的公式算出來的，程式沒有理由覆蓋它。
 CELL_RETURN_RATE = (17, 2)
@@ -193,6 +212,49 @@ def read_return_rate(sheet):
     跟 planner.bank_balance 讀不懂銀行餘額時的態度一樣。
     """
     return to_num(sheet.Cells(*CELL_RETURN_RATE).Value, None)
+
+
+def read_order_plan(sheet):
+    """
+    讀這一頁的下單試算：M14:N18，配上 D4:D8 的股票代號。
+    回傳 {股票代號: {"name", "qty", "price"}}，只讀不寫。
+
+    照 read_return_rate 的樣子獨立一支，不塞進 read_sheet——那支是同步分頁在
+    用的，每次讀取 20 個帳戶都會叫，沒有理由為了下單分頁的功能讓它多讀 10 格。
+
+    配對是**照位置**的（D4↔M14、D5↔M15…），不是照股票代號比對：巨集本身就是
+    這樣算列號的（見 PLAN_ROWS）。所以 D 欄空著的那一列，就算 M 欄有殘值也不會
+    被撿進來——沒有股號的試算值沒有意義（那正是「自動計算」會跳「有股數無股號！」
+    的情況，見 9.6）。
+
+    qty 讀不到當 0（沒有試算＝這一檔這一輪不動），price 讀不到留 None，不要當
+    0——0 在價格這裡看起來像一個真的答案，跟 read_return_rate 的態度一樣。
+    """
+    plan = {}
+    for row, plan_row in zip(HOLDING_ROWS, PLAN_ROWS):
+        code = stock_code_of(sheet.Cells(row, COL_NAME).Value)
+        if not code:
+            continue
+        plan[code] = {
+            "name": str(sheet.Cells(row, COL_NAME).Value or "").strip(),
+            "qty": to_num(sheet.Cells(plan_row, COL_PLAN_QTY).Value, 0) or 0,
+            "price": to_num(sheet.Cells(plan_row, COL_PLAN_PRICE).Value, None),
+        }
+    return plan
+
+
+def run_order_macro(excel, sheet, macro):
+    """
+    對 sheet 這一個分頁觸發「初始化下單」或「清空下單」（見 INIT_ORDER_MACRO）。
+
+    跟 run_update_price_macro 同一條規矩：**一定要傳分頁進來、一頁跑一次**，
+    因為它們一樣只對 ActiveSheet 動作。呼叫端一樣要自己包 keep_active_sheet()。
+
+    這兩支只在 M14:N18 之間搬值（初始化：M ← O 欄加碼股數、N ← I 欄股價；
+    清空：整塊清掉），不打網路、不跳對話框，所以跑起來很快、也不會卡住。
+    """
+    sheet.Activate()
+    excel.Run(macro)
 
 
 @contextlib.contextmanager

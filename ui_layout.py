@@ -786,11 +786,14 @@ class UiLayoutMixin:
         任何數字，所以這一列只有「單位」跟一顆觸發 `初始化下單` 巨集的按鈕
         （M14:M18 ← O4:O8、N14:N18 ← I4:I8，見 9.1 那張表）。
 
-        按鈕先 disabled：這個作業的行為要到 9.7 第 4 步才接上。
+        「初始化下單」會把 M14:N18 蓋掉，所以按下去會先跳確認、列出會動到哪幾個
+        分頁（見 ui_order.run_init_order）。零股那半段還沒接（下單表單的交易盤別
+        要選哪個值還沒人看過），所以「單位」目前只有整張選得到。
         """
         box = ttk.Frame(parent)
         self._build_order_unit(box)
-        self.order_init_button = ttk.Button(box, text="初始化下單", state="disabled",
+        self.order_init_button = ttk.Button(box, text="初始化下單",
+                                            command=self.run_init_order,
                                             bootstyle="secondary-outline")
         self.order_init_button.pack(side="left", padx=(16, 0))
         return box
