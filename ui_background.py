@@ -1075,12 +1075,20 @@ class UiBackgroundMixin:
         self.status.configure(text=message)
 
     def _path_text(self):
-        if self.path is None:
-            return "還沒選檔案 —— 按左邊「開啟EXCEL」挑一份"
-        # 路徑後面直接講「現在開著沒」。登入是灰的時候，人第一個問題就是為什麼，
-        # 答案擺在他正在看的那一行，比藏在狀態列或跳出來的視窗裡好找。
-        return f"{self.path}　—— " + ("已開在 Excel 裡" if self.excel_open
-                                      else "還沒開著，按「開啟EXCEL」")
+        """
+        常駐列上「開啟EXCEL」旁邊那行字。只有兩句：沒開就是「EXCEL未開啟」，
+        開著就是那份檔的路徑。
+
+        2026/08/30 使用者要求收成這兩句。原本是三句（還沒選檔／選了沒開／開著），
+        每一句都把路徑跟一段說明並排。拿掉的理由：
+          - 「按「開啟EXCEL」」那句在講的事，左邊那顆按鈕自己就寫著了。
+          - 還沒開起來的時候路徑不是使用者要看的東西——他要知道的只有「現在有沒有
+            接上」。沒接上就別用一長串路徑去佔那一行。
+          - 「還沒選檔」跟「選了但沒開」對使用者是同一件事：都要按同一顆按鈕。
+            差別只在檔案對話框會不會幫他預選上次那一份，不值得多一種說法。
+        路徑出現本身就等於「已經開著」，所以開著那句不必再補「已開在 Excel 裡」。
+        """
+        return str(self.path) if (self.excel_open and self.path) else "EXCEL未開啟"
 
     def open_excel(self):
         """
