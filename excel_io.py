@@ -19,6 +19,7 @@ Excel 讀寫。只認得持股管理表的這幾格，其餘全是公式，一�
 """
 
 import codecs
+import contextlib
 import os
 import re
 import time
@@ -41,9 +42,10 @@ COL_PRICE = 9
 
 # 使用者既有的巨集（2026/08/28 使用者確認：Module1 的 Sub 更新股價()），
 # 平常手動點的「更新」按鈕背後就是呼叫這個——多輪出清模式的「自動更新股價」
-# 開關，就是每一輪開始前用 COM 觸發同一個巨集，等它跑完再讀 I4:I8（見
-# run_update_price_macro／orders.py 開頭的模式說明）。程式不知道、也不管
-# 這個巨集實際上怎麼拿到報價，只負責觸發它、等它跑完、讀結果。
+# 開關，就是每一輪開始前對「每一個要用到的分頁」各觸發一次這個巨集，等它
+# 跑完再讀那一頁的 I4:I8（見 run_update_price_macro／orders.py 開頭的模式
+# 說明）。2026/08/29 拿到巨集原始碼後確認它抓的是 Yahoo 的報價 API、而且
+# 只對 ActiveSheet 動作，所以「一頁一次」是硬性要求，不是保守做法。
 UPDATE_PRICE_MACRO = "Module1.更新股價"
 
 # 今年報酬率，下單功能排執行順序用（報酬率低的先執行）。只讀，不寫——
@@ -192,20 +194,65 @@ def read_return_rate(sheet):
     return to_num(sheet.Cells(*CELL_RETURN_RATE).Value, None)
 
 
-def run_update_price_macro(excel):
+@contextlib.contextmanager
+def keep_active_sheet(book):
     """
-    觸發使用者既有的「更新股價」巨集（見 UPDATE_PRICE_MACRO 的說明）。
+    把使用者原本停在的那一頁記下來，離開這個區塊時還回去。
+
+    跑「更新股價」巨集一定要一頁一頁 Activate（見 run_update_price_macro），
+    但 Excel 通常就開在使用者眼前——20 個帳戶跑完把他丟在最後一個分頁上，
+    等於每按一次「重新整理」畫面就被搬走一次。記一次、還一次，比每跑一頁
+    就來回切兩次少掉一半的 COM 往返與畫面重繪。
+
+    記不住或還不回去都不是錯誤（分頁被刪了、活頁簿被關了、Excel 正忙），
+    整段吞掉就好：這只是「別動到使用者的畫面」這種禮貌，不該讓真正要做的
+    讀取因為它失敗。
+    """
+    before = None
+    try:
+        before = book.Application.ActiveSheet.Name
+    except Exception:
+        pass
+    try:
+        yield
+    finally:
+        if before is not None:
+            try:
+                sheet, _ = find_sheet(book, before)
+                if sheet is not None:
+                    sheet.Activate()
+            except Exception:
+                pass
+
+
+def run_update_price_macro(excel, sheet):
+    """
+    對 sheet 這一個分頁觸發「更新股價」巨集（見 UPDATE_PRICE_MACRO 的說明）。
+
+    **一定要傳分頁進來、一頁跑一次。** 巨集寫在標準模組裡，用的是無限定的
+    `Range("D" & i)`／`Range("I" & i)`，VBA 把這種寫法解析成 ActiveSheet，
+    所以它只更新「當下作用中的那一頁」。2026/08/29 之前這裡整批只呼叫一次，
+    20 個帳戶裡只有使用者上次剛好停在的那一頁拿到新價格，其餘讀回來的是
+    上一次的舊 I4:I8——不會報錯、不會少一欄、看起來完全正常，而盤中追價的
+    基準價就建立在這上面。呼叫端要自己包 keep_active_sheet()，跑完把畫面
+    還給使用者。
 
     excel 是 open_workbook() 回傳的第一個值（Application 物件，不是
-    Workbook）——巨集是掛在整個活頁簿上的，用 Application.Run 呼叫。
+    Workbook）——巨集掛在整個活頁簿上，用 Application.Run 呼叫；sheet 是
+    find_sheet() 回傳的那個 Worksheet。
 
-    Application.Run 對一般沒有非同步動作的 VBA Sub 是同步呼叫，這支函式
-    回來的時候巨集本身應該已經跑完；但巨集內部實際上怎麼拿到報價（文件
-    上寫「可能是外部報價元件」）程式管不到、也沒去查證，如果報價來源本身
-    是非同步更新（例如靠 RTD 之類的機制），巨集跑完不代表 I 欄數字已經是
-    最新的——呼叫端讀回 I4:I8 之後還是要自己判斷讀到的價格看起來合不合理，
-    不能直接假設「巨集跑完＝資料一定是新的」。
+    巨集內部是 MSXML2.XMLHTTP 對 Yahoo 報價 API 打**同步** GET
+    （`.Open "GET", url, False` 第三個參數 False 就是同步），所以
+    Application.Run 回來的時候 I4:I8 確實已經是這一次抓到的值，不必再等、
+    也不必懷疑讀到舊數字。代價是「一檔股票一次 HTTP 往返」：5 檔 × N 個
+    分頁的請求會逐一發出去，分頁多的時候這一步本來就慢，那是慢不是卡住。
+
+    **抓不到價格時巨集會跳 `MsgBox "xxxx 股價更新失敗"`**，那是 VBA 的
+    modal 對話框，Application.Run 會停在那裡等人按確定——背景執行緒就這樣
+    無聲掛住，畫面停在「更新股價、讀取中…」。Excel 的 DisplayAlerts 管不到
+    VBA 自己叫的 MsgBox，Python 這邊擋不掉，只能改巨集本身。
     """
+    sheet.Activate()
     excel.Run(UPDATE_PRICE_MACRO)
 
 

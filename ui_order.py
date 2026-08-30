@@ -140,10 +140,14 @@ class UiOrderMixin:
         重新讀 Excel：把每個已知名字的帳戶分頁的持股（E/F 欄）、B17、股價
         （I 欄）都讀一次。
 
-        盤中模式先觸發「更新股價」巨集再讀（2026/08/29 使用者確認：盤中
-        追價用的成交價來自這裡讀到的 order_prices，新增股票／重新整理這
-        一步就要盡量拿到新的價格，不能留著上次殘留的舊數字）；盤前模式的
-        價格是人手動填的，不需要 Excel 股價，維持原本只讀不觸發巨集。
+        盤中模式每個分頁在讀它之前先各觸發一次「更新股價」巨集再讀
+        （2026/08/29 使用者確認：盤中追價用的成交價來自這裡讀到的
+        order_prices，新增股票／重新整理這一步就要盡量拿到新的價格，不能
+        留著上次殘留的舊數字）；盤前模式的價格是人手動填的，不需要 Excel
+        股價，維持原本只讀不觸發巨集。
+
+        帳戶多的時候這一步會明顯變慢：巨集是一檔股票打一次 Yahoo 的 HTTP
+        請求，5 檔 × N 個分頁全部逐一發出去，這是慢不是當掉。
 
         帳戶名單只能從 self.trader_of 來——那是「登入過才知道名字」的既有
         規則（見 ui.py），還沒登入過的帳戶這裡也看不到，跟同步分頁的範圍
@@ -167,9 +171,11 @@ class UiOrderMixin:
 
     def _order_read_worker(self, path, names, run_macro):
         """
-        背景執行緒：用 COM 讀 E/F 欄、B17、I 欄。run_macro 為真的話，讀之前
-        先觸發使用者既有的「更新股價」巨集（跟 _order_price_refresh_worker
-        同一個做法，見那邊 write=run_macro 為什麼要一起傳的說明）。
+        背景執行緒：用 COM 讀 E/F 欄、B17、I 欄。run_macro 為真的話，每個
+        分頁在讀它之前先各觸發一次使用者既有的「更新股價」巨集——是「每個
+        分頁各一次」不是「整批一次」，那個巨集只認 ActiveSheet（見
+        excel_io.run_update_price_macro）。跟 _order_price_refresh_worker
+        同一個做法，見那邊 write=run_macro 為什麼要一起傳的說明。
         """
         import pythoncom
 
@@ -179,17 +185,21 @@ class UiOrderMixin:
         try:
             excel, workbook, attached = excel_io.open_workbook(path, run_macro)
             try:
-                if run_macro:
-                    excel_io.run_update_price_macro(excel)
                 sheets, errors = {}, {}
-                for name in names:
-                    sheet, error = excel_io.find_sheet(workbook, name)
-                    if sheet is None:
-                        errors[name] = error
-                        continue
-                    data = excel_io.read_sheet(sheet)
-                    data["return_rate"] = excel_io.read_return_rate(sheet)
-                    sheets[name] = data
+                with excel_io.keep_active_sheet(workbook):
+                    for name in names:
+                        sheet, error = excel_io.find_sheet(workbook, name)
+                        if sheet is None:
+                            errors[name] = error
+                            continue
+                        # 巨集只認 ActiveSheet，所以每一頁都要各 Activate 一次、
+                        # 各跑一次，不能整批只呼叫一次（見
+                        # excel_io.run_update_price_macro 說明的那個 bug）。
+                        if run_macro:
+                            excel_io.run_update_price_macro(excel, sheet)
+                        data = excel_io.read_sheet(sheet)
+                        data["return_rate"] = excel_io.read_return_rate(sheet)
+                        sheets[name] = data
                 payload = {"sheets": sheets, "errors": errors}
             finally:
                 excel_io.close_workbook(excel, workbook, attached)
@@ -431,7 +441,11 @@ class UiOrderMixin:
         threading.Thread(target=self._order_stock_price_worker, args=(self.path, names), daemon=True).start()
 
     def _order_stock_price_worker(self, path, names):
-        """背景執行緒：觸發「更新股價」巨集、重讀 I 欄，跟 _order_price_refresh_worker 同一個做法。"""
+        """
+        背景執行緒：每個分頁各觸發一次「更新股價」巨集、重讀 I 欄，跟
+        _order_price_refresh_worker 同一個做法（一頁一次的理由見
+        excel_io.run_update_price_macro）。
+        """
         import pythoncom
 
         pythoncom.CoInitialize()
@@ -440,12 +454,14 @@ class UiOrderMixin:
         try:
             excel, workbook, attached = excel_io.open_workbook(path, True)
             try:
-                excel_io.run_update_price_macro(excel)
                 sheets = {}
-                for name in names:
-                    sheet, error = excel_io.find_sheet(workbook, name)
-                    if sheet is not None:
-                        sheets[name] = excel_io.read_sheet(sheet)
+                with excel_io.keep_active_sheet(workbook):
+                    for name in names:
+                        sheet, error = excel_io.find_sheet(workbook, name)
+                        if sheet is not None:
+                            # 一頁一次，理由同 _order_read_worker。
+                            excel_io.run_update_price_macro(excel, sheet)
+                            sheets[name] = excel_io.read_sheet(sheet)
                 payload = {"sheets": sheets}
             finally:
                 excel_io.close_workbook(excel, workbook, attached)
@@ -1134,15 +1150,17 @@ class UiOrderMixin:
             # 省這個 True，錯的方向（該可寫卻開成唯讀）比多寫一個參數危險。
             excel, workbook, attached = excel_io.open_workbook(path, run_macro)
             try:
-                if run_macro:
-                    excel_io.run_update_price_macro(excel)
                 data, errors = {}, {}
-                for name in sheets:
-                    sheet, error = excel_io.find_sheet(workbook, name)
-                    if sheet is None:
-                        errors[name] = error
-                        continue
-                    data[name] = excel_io.read_sheet(sheet)
+                with excel_io.keep_active_sheet(workbook):
+                    for name in sheets:
+                        sheet, error = excel_io.find_sheet(workbook, name)
+                        if sheet is None:
+                            errors[name] = error
+                            continue
+                        # 一頁一次，理由同 _order_read_worker。
+                        if run_macro:
+                            excel_io.run_update_price_macro(excel, sheet)
+                        data[name] = excel_io.read_sheet(sheet)
                 payload = {"sheets": data, "errors": errors}
             finally:
                 excel_io.close_workbook(excel, workbook, attached)
