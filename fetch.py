@@ -112,6 +112,21 @@ PAGE_READY_JS = """
 """
 
 
+# 登入完停留的那一頁（welcome/layout.jsp）「身分讀得到了」的條件。給「登入」按鈕
+# 那條路用——它不查資料，只要拿到 sessionStorage 裡的身分就夠，不必再導去帳戶頁
+# （見 _ensure_one 的 land_on_account）。
+#
+# 形狀刻意跟 PAGE_READY_JS 一樣：前半的「已經不在 /welcome/ 了」是給登入失敗那條
+# 路的——2026/08/30 實測，沒有 session 時開 welcome/layout.jsp 會被導到
+# /tbb/index/home.jsp，那一頁永遠等不到 sessionStorage。沒有這一條，登入失敗要白等
+# 滿逾時；有了它就立刻回來，讓呼叫方從「session 裡沒有 cust_id」看出來（那句錯誤
+# 訊息本來就會把當下網址印出來，現在那個網址正好說明了是被打回登入表單）。
+LOGIN_READY_JS = """
+() => !location.pathname.includes('/welcome/')
+   || !!(sessionStorage.getItem('branch_id') && sessionStorage.getItem('cust_id'))
+"""
+
+
 def _open_account_page(page):
     """
     導到帳戶頁，等到能判斷它可不可以用為止。等不到就算了 —— 缺什麼由呼叫方自己去看
@@ -125,6 +140,17 @@ def _open_account_page(page):
     page.goto(ACCOUNT_PAGE, wait_until="domcontentloaded")
     try:
         page.wait_for_function(PAGE_READY_JS, timeout=15000)
+    except (PlaywrightError, PlaywrightTimeoutError):
+        pass
+
+
+def _wait_logged_in(page):
+    """
+    登入完就地等身分寫進 sessionStorage，不導頁。等不到就算了 —— 缺什麼由呼叫方
+    自己去看（`_ensure_one` 之後那句「沒有登入成功」會把當下網址一起印出來）。
+    """
+    try:
+        page.wait_for_function(LOGIN_READY_JS, timeout=15000)
     except (PlaywrightError, PlaywrightTimeoutError):
         pass
 
@@ -192,7 +218,7 @@ def spare_page(context, store=None):
     return None if id(first) in claimed else first
 
 
-def _ensure_one(context, order, account, store, spare):
+def _ensure_one(context, order, account, store, spare, land_on_account=True):
     """
     確保這一組帳號已登入。回傳 (page, session, problems, 還沒被借走的空白分頁)。
 
@@ -210,6 +236,15 @@ def _ensure_one(context, order, account, store, spare):
 
     spare 要一路傳下去、不能每組各自去拿 context.pages[0]：第一組登入完之後，
     那個「第一個分頁」就是第一組在用的分頁了，再借給第二組等於把第一組踢掉。
+
+    land_on_account=False 是「登入」按鈕那條路（見 login_only）：它不查資料，
+    所以剛登入完不必再導去帳戶頁，就地在 welcome 讀 sessionStorage 就夠
+    —— 2026/08/30 用瀏覽器 console 確認過 welcome 有 branch_id / cust_id /
+    account。省下來的是每一組一次完整頁面載入（20 組約 44 秒）。
+
+    **只有「剛 do_login() 完」那一條可以省。** 上面 _revisit 那幾條不行：那個
+    goto 本身就是「session 還活著、而且還是這個人」的檢測（見 _revisit）。
+    剛登入完不需要那個檢測，身分是登入這件事本身確立的。
     """
     reuse_page = (store["pages"].get(order) if store is not None else None)
     if reuse_page is not None and reuse_page.is_closed():
@@ -250,7 +285,10 @@ def _ensure_one(context, order, account, store, spare):
         if session is None:
             page = do_login(context, account["id"], account["password"], reuse_page or spare)
             spare = None
-            _open_account_page(page)
+            if land_on_account:
+                _open_account_page(page)
+            else:
+                _wait_logged_in(page)
             session = page.evaluate(SESSION_JS)
 
         if store is not None:
@@ -274,18 +312,23 @@ def _ensure_one(context, order, account, store, spare):
     return page, session, problems, spare
 
 
-def ensure_logged_in(context, selected, store=None):
+def ensure_logged_in(context, selected, store=None, land_on_account=True):
     """
     把每組帳號都登入好，回傳 {第幾組: (page, session, problems)}。給「登入」按鈕用。
 
     **要抓資料的話不要用這一支**（見 collect）：整個瀏覽器只有一組 cookie，全部
     登入完之後它是最後一組的，這時候回頭查前面幾組會拿到最後那一組的資料。
+
+    land_on_account 預設 True，也就是「登入完把分頁停在帳戶頁」——掛單
+    （ui_pending）與下單（ui_order_exec）接著就要在那個分頁上做事，維持原樣。
+    只有 login_only 會傳 False（見 _ensure_one 的說明）。
     """
     results = {}
     spare = spare_page(context, store)
 
     for order, account in selected:
-        page, session, problems, spare = _ensure_one(context, order, account, store, spare)
+        page, session, problems, spare = _ensure_one(
+            context, order, account, store, spare, land_on_account)
         results[order] = (page, session, problems)
 
     return results
@@ -298,9 +341,14 @@ def login_only(context, selected, store=None):
 
     20 組一次登完之後，每一組的 cookie 都收在 store 裡（見 new_store），
     所以之後「只更新某一位」不必重登 —— 換回他的 cookie 就好。
+
+    land_on_account=False：這一支不查資料，只要 sessionStorage 裡的身分，所以
+    登入完就停在 welcome 不再導去帳戶頁（見 _ensure_one）。20 組省下 20 次完整
+    頁面載入。之後真的要查資料時（collect／掛單／下單）各自會把分頁帶到它要去的
+    地方，而且都會先過 _revisit 那三道核對。
     """
     records = []
-    logins = ensure_logged_in(context, selected, store)
+    logins = ensure_logged_in(context, selected, store, land_on_account=False)
 
     for order, account in selected:
         record = {"order": order, "problems": []}

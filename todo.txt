@@ -36,6 +36,16 @@ A. 開盤前就能做（不必等 09:00）
         注意：登入現在一律登入全部，不看「範圍」——要補登入某一組就按
         「更新（他）帳戶」，那顆本來就會順便登入。
 
+        *** 這一步也是 C4 的驗收（08/30 改的，模擬帳號測不到，只能用真帳號看）***
+        登入完看瀏覽器停在哪一頁：
+          - 應該停在 welcome/layout.jsp?type=1（登入後的首頁）
+          - 不再是 account/layoutRWD.jsp?type=4（未實現損益）
+        然後「範圍」下拉選單裡名字要照樣全部出現——名字就是從那一頁的
+        sessionStorage 讀的，出得來就代表 C4 沒問題。
+        整批登入的時間應該比以前短（每組少一次頁面載入，20 組約 44 秒）。
+        接著 A3、A4 照跑：掛單跟下單走的是別條路，本來就不受 C4 影響，
+        但還是要確認一次。
+
 [ ] A3  接著（還是不要開 Excel）掛單分頁 → 範圍「全部帳戶」→ 按「查詢掛單」
         這頁一格 Excel 都不碰（資料全部來自 queryOrder，帳戶名來自登入時的
         sessionStorage），所以不開 Excel 就該查得到——那正是 A2 那個改動要解開的東西。
@@ -98,7 +108,9 @@ C. 之後才排（不急，也不必週一）
         不要只修大小寫：留一個沒人用的欄位比拼錯更容易誤導。
         零風險，什麼時候順手做都行。
 
-[ ] C4  登入那一趟可以省掉 _open_account_page（約 44 秒／天）
+[x] C4  登入那一趟可以省掉 _open_account_page（約 44 秒／天）
+        2026/08/30 已實作（fetch._ensure_one 的 land_on_account），但**還沒用真帳號
+        跑過**——模擬帳號在 _ensure_one 開頭就 return 了，碰不到這段。驗收在 A2。
         08/30 用 console 在 welcome 頁（登入完停留的那一頁）確認過：
           - B64_XOR_Encode 是 function、XOR_KEY 是 string（common.js 有載）
           - branch_id / cust_id / account 都在
@@ -120,6 +132,19 @@ C. 之後才排（不急，也不必週一）
         welcome/layout.jsp?type=1 會被導到 /tbb/index/home.jsp。所以 do_login()
         返回後只要看網址在 /welcome/ 還是 /index/ 就知道成敗——那是伺服器給的
         答案，比現在靠 sessionStorage（分頁自己的快取）判斷更直接。
+
+        下單會不會受影響？不會，08/30 查過兩層：
+          - 下單走 _order_fill_job -> fetch.ensure_logged_in -> _ensure_one。盤中那個
+            帳號早就登入過，走的是 _revisit 那條（照樣 goto type=4），C4 只動「剛
+            do_login() 完」那一條，碰不到。
+          - 就算真的走到，下一行就是 page.goto(order_fill.ORDER_ENTRY_PAGE)——下單
+            自己會導到下單頁，不管分頁原本停在哪。
+        唯一要確認的是盤中模式：FastQuote 彈出視窗是在 goto 下單頁「之前」開的
+        （見 ui_order_exec._order_fill_job），而且是呼叫網站自己的
+        fastQuoteUtil.openWinURL()（要有 opener 才複製得到 sessionStorage，不能
+        用 goto）。也就是說它用的是「分頁當下停留的那一頁」。
+        -> 08/30 在 welcome 的 console 驗過 typeof fastQuoteUtil === 'object'，
+           所以停在 welcome 一樣開得起來，這個疑慮解除。
 
         *** 如果要做 C5，這一條就不必單獨做了，C5 已經涵蓋它。***
 
