@@ -37,7 +37,7 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 
 from order_cancel import ConfirmDebugLog, close_dialog, log_row_not_found
 from order_fill import CONFIRM_IFRAME_SELECTOR, OrderMaybeSubmitted
-from order_query import PAGE_READY_JS
+from order_query import PAGE_READY_JS, query_orders
 from order_recon import RESERVE_PAGE
 
 # 刪單確認視窗裡那顆真的會送出去的按鈕。整支檔案只有 cancel_orders() 會點它，
@@ -88,20 +88,32 @@ def _open_page(page):
     return page.evaluate(DUMP_ROWS_JS)
 
 
-def _find_row(page, ordno, attempts=3, retry_wait_ms=1000):
+def _find_row(page, session, sheet, ordno, attempts=5, retry_wait_ms=1000):
     """
-    找不到 `ordno` 不能立刻認定「已經不在了」——`_open_page` 兩道
-    `wait_for_function` 逾時是靜靜放行的，換帳號、換頁的當下表格偶爾就是還沒
-    真的渲染完，讀到的是一張空的或半份的表，不是單子真的消失了
+    找不到 `ordno` 不能立刻認定「已經不在了」，也不能靠盲目重讀頁面賭運氣
+    ——`#qOrderTable` 那張表是不是畫完是這一頁自己的事，跟預約單到底還在不在
+    是兩件事：`_open_page` 兩道 `wait_for_function` 逾時是靜靜放行的，換帳號、
+    換頁的當下表格偶爾就是還沒真的渲染完，讀到一張空的或半份的表。
+
+    真正的答案問 `queryOrder` 就有——跟掛單分頁 `order_query.query_orders`
+    同一支 AJAX，直接讀伺服器回應，不依賴這一頁的 DOM 有沒有畫完，也不用
+    另外導到委託查詢頁：`queryOrder` 一次回的就是委託單＋預約單全部
+    （`ordstatus` 分岔哪一個欄位有值，見 `order_query.normalize`），這裡只是
+    借用同一支函式問一次「這筆還在不在、還能不能取消」。查到還是 `open` 就是
+    DOM 沒跟上，值得繼續重讀頁面；查到已經不在或不再 `open`，就是真的沒了，
+    不用再浪費時間重讀。
+
     （2026/09/02 使用者實測：一次取消 20 筆有 5 筆被判定 missing，但那 5 筆
-    其實都還掛在外面——重新整批查詢＋取消一次就正常刪掉，證明是表格沒載完，
-    不是單子真的不見）。所以找不到就重新導頁再讀幾次，真的每一次都讀不到
-    才死心。
+    其實都還掛在外面——重新整批查詢＋取消一次就正常刪掉，證明是 DOM 沒跟上，
+    不是單子真的不見，原本只靠重讀頁面賭運氣的寫法沒有真正解決問題。）
     """
     rows = _open_page(page)
     for _ in range(attempts - 1):
         if any(r["ordno"] == ordno for r in rows):
             break
+        truth = next((r for r in query_orders(page, session, sheet) if r["ordno"] == ordno), None)
+        if not (truth and truth["open"]):
+            break   # queryOrder 說真的不在了，不用再重讀
         page.wait_for_timeout(retry_wait_ms)
         rows = _open_page(page)
     return rows
@@ -179,7 +191,7 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
 
     results, missing, locked = [], [], []
     for ordno in wanted:
-        rows = _find_row(page, ordno)
+        rows = _find_row(page, session, sheet, ordno)
         row = next((r for r in rows if r["ordno"] == ordno), None)
         if row is None:
             missing.append(ordno)

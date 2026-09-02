@@ -33,7 +33,7 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 
 from login import app_dir
 from order_fill import CONFIRM_IFRAME_SELECTOR, OrderMaybeSubmitted
-from order_query import PAGE_READY_JS
+from order_query import PAGE_READY_JS, query_orders
 from order_recon import ORDER_PAGE
 
 # 刪單確認視窗裡那顆真的會送出去的按鈕。整支檔案只有 confirm_cancel() 會點它，
@@ -208,21 +208,32 @@ def _open_page(page):
     return page.evaluate(DUMP_ROWS_JS)
 
 
-def _open_page_until(page, wanted, attempts=3, retry_wait_ms=1000):
+def _open_page_until(page, session, sheet, wanted, attempts=5, retry_wait_ms=1000):
     """
-    找不到要刪的那幾筆不能立刻認定「已經不在了」——`_open_page` 兩道
-    `wait_for_function` 逾時是靜靜放行的，換帳號、換頁的當下表格偶爾就是還沒
-    真的渲染完，讀到的是一張空的或半份的表，不是單子真的消失了
-    （2026/09/02 使用者實測，見 `order_cancel_reservation._find_row` 那邊記的
-    同一起事故：一次取消 20 筆有 5 筆被判定 missing，其實都還掛在外面，重新
-    整批查詢＋取消一次就正常刪掉）。所以缺了任何一筆就重新導頁再讀幾次，真的
-    每一次都湊不齊才死心。
+    找不到要刪的那幾筆不能立刻認定「已經不在了」，也不能靠盲目重讀頁面賭運氣
+    ——`#qOrderTable` 那張表是不是畫完是這一頁自己的事，跟委託到底還在不在是
+    兩件事：`_open_page` 兩道 `wait_for_function` 逾時是靜靜放行的，換帳號、
+    換頁的當下表格偶爾就是還沒真的渲染完，讀到一張空的或半份的表。
+
+    真正的答案問 `queryOrder` 就有——跟掛單分頁 `order_query.query_orders`
+    同一支 AJAX，直接讀伺服器回應，不依賴這一頁的 DOM 有沒有畫完，比等
+    `renderTable()` 快很多也準很多。查到那幾筆還是 `open` 就是 DOM 沒跟上，
+    值得繼續重讀頁面；查到已經不在或不再 `open`，就是真的沒了，不用再浪費
+    時間重讀。
+
+    （2026/09/02 使用者實測：一次取消 20 筆有 5 筆被判定 missing，其實都還
+    掛在外面，重新整批查詢＋取消一次就正常刪掉——證明是 DOM 沒跟上，不是
+    單子真的消失，原本只靠重讀頁面賭運氣的寫法沒有真正解決問題。）
     """
     rows = _open_page(page)
     for _ in range(attempts - 1):
         got = {row["ordno"] for row in rows}
-        if all(ordno in got for ordno in wanted):
+        still_missing = [ordno for ordno in wanted if ordno not in got]
+        if not still_missing:
             break
+        truth = {row["ordno"] for row in query_orders(page, session, sheet) if row["open"]}
+        if not any(ordno in truth for ordno in still_missing):
+            break   # queryOrder 說真的不在了，不用再重讀
         page.wait_for_timeout(retry_wait_ms)
         rows = _open_page(page)
     return rows
@@ -307,7 +318,7 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
     if not wanted:
         raise RuntimeError(f"{sheet}：沒有指定要刪哪一筆。")
 
-    rows = _open_page_until(page, wanted)
+    rows = _open_page_until(page, session, sheet, wanted)
     by_ordno = {row["ordno"]: row for row in rows}
 
     targets, missing, locked = [], [], []
