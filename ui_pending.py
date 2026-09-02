@@ -8,8 +8,12 @@
 
 **為什麼這頁現在就該有**：自動送出委託單已經上線了（order_auto_confirm），
 而人在程式裡沒有任何地方能確認「到底送出去了什麼」。這頁就是那個缺口，也是
-自動送出唯一的驗證面。所以它顯示的是今天**所有**的委託，不只還掛著的那幾筆
-——成交了、被取消了的也要看得到。
+自動送出唯一的驗證面。
+
+**只列還掛在外面的**（`open` 為真，見 order_query.normalize）：已經成交、已經
+取消、或失敗的不再顯示（2026/09/02 使用者要求，也對上規劃文件「列出全部帳戶
+目前的掛單」那句——目前式，不是歷史）。這頁現在單純回答「還剩什麼可以取消」，
+不是對帳用的完整歷史。
 
 跟下單分頁刻意分開：那邊的骨架是「選帳戶 → 選股票 → 設定 → 執行預覽 → 依序
 送出」，這邊沒有股票要選、沒有預覽要看，是對「已經送出去的委託」做事，形狀
@@ -195,20 +199,11 @@ class UiPendingMixin:
         for row in rows:
             groups.setdefault(row["sheet"], []).append(row)
 
-        lines = []
-        for sheet, items in groups.items():
-            lines.append(f"　{sheet}（{len(items)} 筆）")
-            for row in items:
-                # 委託單／預約單混在同一批送的時候，兩者走的取消機制完全不同
-                # （見 order_cancel.py／order_cancel_reservation.py），標出來
-                # 讓人看得出這一筆是哪一種。
-                lines.append(f"　　[{_kind_text(row)}] {row['code']} {row['side_text']} {show(row['left'])}"
-                             f"　{row['price_text']}　委託書號 {row['ordno']}")
-        # 不是只問「確定嗎」：會動到真實委託，要列出這一次會取消幾筆、哪幾檔（10.1）。
+        # 2026/09/02 使用者要求簡化：逐筆列出來的清單拿掉，只問筆數
+        # ——人是看著這張表按下去的，按下去之前要看的細節表上本來就有。
         if not ask_confirm(
                 self.root, CANCEL_TEXTS[kind],
-                f"確定要取消這 {len(rows)} 筆委託嗎？\n\n" + "\n".join(lines)
-                + "\n\n送出之後沒有辦法收回來。",
+                f"確定要取消這 {len(rows)} 筆委託？",
                 confirm_text="取消這幾筆", cancel_text="不要"):
             return
 
@@ -397,7 +392,7 @@ class UiPendingMixin:
 
         problems = payload.get("problems") or []
         open_count = sum(1 for row in self.pending_rows if row["open"])
-        self._say(f"掛單：{len(self.pending_rows)} 筆委託，其中 {open_count} 筆還掛在外面。"
+        self._say(f"掛單：{open_count} 筆還掛在外面。"
                   + (f"　{len(problems)} 個帳戶查不到。" if problems else ""))
         if problems:
             show_warning(self.root, "有帳戶查不到",
@@ -409,10 +404,13 @@ class UiPendingMixin:
             self.pending_tree.delete(item)
 
         for row in self.pending_rows:
-            # 還掛在外面的用買賣底色（跟下單分頁的執行預覽同一組顏色，也跟網站
-            # 本身買紅賣綠一致）；已經成交／取消／失敗的淡化——它們是「已經結束
-            # 的事」，不該看起來跟還能取消的那幾筆一樣醒目。
-            tag = {"B": "buy", "S": "sell"}.get(row["side"], "") if row["open"] else "done"
+            if not row["open"]:
+                # 已經成交／取消／失敗的不列出——這頁現在只回答「還剩什麼可以
+                # 取消」（見檔案開頭的說明）。
+                continue
+            # 還掛在外面的用買賣底色，跟下單分頁的執行預覽同一組顏色，也跟網站
+            # 本身買紅賣綠一致。
+            tag = {"B": "buy", "S": "sell"}.get(row["side"], "")
             # 順序跟 ui_layout._build_pending_tab 的 columns 一模一樣，那邊是照
             # 網站「委託查詢」那張表排的（帳戶、單別這兩欄是程式多的——「單別」
             # 是 2026/09/02 加的，預約單開始跟委託單混在同一張表之後，不標出來

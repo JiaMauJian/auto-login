@@ -601,11 +601,10 @@ class UiLayoutMixin:
         hbar = ttk.Scrollbar(frame, orient="horizontal", command=self.pending_tree.xview)
         self.pending_tree.configure(xscrollcommand=hbar.set)
         hbar.grid(row=2, column=0, sticky="ew")
-        # 還掛在外面的用買賣底色（跟下單分頁執行預覽同一組，也跟網站本身買紅賣綠
-        # 一致）；已經結束的（成交、取消、失敗）淡化，不該跟還能取消的一樣醒目。
+        # 還掛在外面的用買賣底色，跟下單分頁執行預覽同一組，也跟網站本身買紅
+        # 賣綠一致（已經結束的不列出，見 ui_pending._fill_pending）。
         self.pending_tree.tag_configure("buy", background="#FFDFDF")
         self.pending_tree.tag_configure("sell", background="#DCF1EB")
-        self.pending_tree.tag_configure("done", foreground=self.colors.secondary)
 
         cancel_bar = ttk.Frame(frame)
         cancel_bar.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
