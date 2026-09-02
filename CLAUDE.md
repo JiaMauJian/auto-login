@@ -63,5 +63,11 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
   只有一條執行緒在動這份檔」），畫面那一層則問 `_excel_in_use()` 決定按鈕能不能按。
   接上的是使用者眼前那個 Excel 實例，不是各開各的——兩條執行緒交錯 `Activate` 會
   讓巨集跑在別人剛切過去的那一頁上，一樣不報錯、只是靜靜讀到舊 I4:I8。
+- 要跳訊息一律用 `ui_common` 自己畫的那幾顆：通知走 `show_error` / `show_warning` /
+  `show_info`（parent 放第一個參數），要人回答是非走 `ask_confirm`。**不要用
+  `tkinter.messagebox`**——原生的是 Windows 系統對話框，字級不跟著 `UI_FONT_SIZE` 走，
+  介面字調大了它還是系統預設的小字。也**不要換成 `ttkbootstrap.dialogs.Messagebox`**：
+  它斷行用 `textwrap.wrap(width=50)`，那個 50 數的是字元個數，中文會從第 50 個字中間
+  硬切、檔案路徑照切、視窗被撐到 1133 像素寬，按鈕還是英文 OK（2026/08/30 實測後定案）。
 - `.bat` 檔案內容只能純 ASCII（連中文註解都不行），呼叫同層 exe 用 `%~dp0` 完整路徑。
 - exe 是 `--windowed` 打包，啟動失敗看 exe 旁邊的 `crash.log`。

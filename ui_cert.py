@@ -1,9 +1,8 @@
 """憑證分頁的行為：建立/重建 Profile、掃描並遷移憑證。"""
 
-from tkinter import messagebox
 
 import profile_tools
-from ui_common import ask_confirm
+from ui_common import ask_confirm, show_error, show_info, show_warning
 
 
 class UiCertMixin:
@@ -33,43 +32,41 @@ class UiCertMixin:
         raw = self.profile_name.get().strip()
         path = profile_tools.resolve_path(raw)
         if path is None:
-            messagebox.showerror("名稱不能是空的", "請輸入 Profile 名稱。", parent=self.root)
+            show_error(self.root, "名稱不能是空的", "請輸入 Profile 名稱。")
             return
         if profile_tools.is_default_chrome_dir(path):
-            messagebox.showerror(
+            show_error(self.root,
                 "不能用這個資料夾",
                 "不能指向 Chrome 的預設使用者資料夾，Chrome 136 之後禁止自動化連上它。\n"
-                "請換一個名稱（例如 chrome-profile）。", parent=self.root)
+                "請換一個名稱（例如 chrome-profile）。")
             return
 
         if path.is_dir():
             if profile_tools.chrome_pids_for_profile(path):
-                messagebox.showerror(
+                show_error(self.root,
                     "資料夾正在使用中",
-                    f"這個資料夾正被 Chrome 開著，請先把它關掉再試一次：\n{path}", parent=self.root)
+                    f"這個資料夾正被 Chrome 開著，請先把它關掉再試一次：\n{path}")
                 return
             try:
                 profile_tools.delete_profile(path)
             except OSError as exc:
-                messagebox.showerror("刪不掉", f"刪除資料夾失敗：\n{exc}", parent=self.root)
+                show_error(self.root, "刪不掉", f"刪除資料夾失敗：\n{exc}")
                 return
 
         chrome_exe = profile_tools.find_chrome()
         if chrome_exe is None:
-            messagebox.showerror("找不到 Chrome", "這台電腦找不到 Google Chrome，請先安裝。",
-                                 parent=self.root)
+            show_error(self.root, "找不到 Chrome", "這台電腦找不到 Google Chrome，請先安裝。")
             return
 
         try:
             profile_tools.remember_user_data_dir(raw)
         except OSError as exc:
-            messagebox.showwarning("沒寫進 .env", f"這次可以用，但沒能寫進 .env：\n{exc}",
-                                   parent=self.root)
+            show_warning(self.root, "沒寫進 .env", f"這次可以用，但沒能寫進 .env：\n{exc}")
 
         try:
             profile_tools.launch_manual_chrome(chrome_exe, path)
         except OSError as exc:
-            messagebox.showerror("開不起來", f"沒辦法開啟 Chrome：\n{exc}", parent=self.root)
+            show_error(self.root, "開不起來", f"沒辦法開啟 Chrome：\n{exc}")
             return
 
         self.profile_busy = True
@@ -84,21 +81,20 @@ class UiCertMixin:
             self.profile_busy = False
             self.profile_button.configure(state="normal")
             self._refresh_profile_status()
-            messagebox.showinfo(
+            show_info(self.root,
                 "Profile 建好了",
                 f"資料夾已就緒，視窗已經自動關掉：\n{path}\n\n"
                 "接下來可以用下面的「遷移憑證」把憑證複製進來；掃不到的話就是還沒申請過，"
-                "自己開這個資料夾登入 tbbstock 申請一次即可。", parent=self.root)
+                "自己開這個資料夾登入 tbbstock 申請一次即可。")
             return
         if tries >= 60:   # 30 秒
             self.profile_busy = False
             self.profile_button.configure(state="normal")
             self.profile_status.configure(text=f"還沒看到 Profile 初始化完成：{path}")
-            messagebox.showwarning(
+            show_warning(self.root,
                 "沒看到初始化完成",
                 f"30 秒過去了，還沒看到 Chrome 把資料夾初始化好：\n{path}\n\n"
-                "視窗可能還在開啟中，請自己看一下，關掉後再按一次「建立 Profile」確認結果。",
-                parent=self.root)
+                "視窗可能還在開啟中，請自己看一下，關掉後再按一次「建立 Profile」確認結果。")
             return
         self.root.after(500, lambda: self._poll_profile_init(path, tries + 1))
 
@@ -148,31 +144,31 @@ class UiCertMixin:
 
         target = profile_tools.resolve_path(profile_tools.current_raw())
         if target is None or not target.is_dir():
-            messagebox.showerror(
+            show_error(self.root,
                 "目標 Profile 還不存在",
-                "請先用上面的「建立 Profile」把資料夾建出來，再回來複製憑證。", parent=self.root)
+                "請先用上面的「建立 Profile」把資料夾建出來，再回來複製憑證。")
             return
 
         if profile_tools.browser_running(source["exe"]):
-            messagebox.showerror(
+            show_error(self.root,
                 "來源瀏覽器還開著",
                 f"{source['browser']} 還在執行，複製到的可能是還沒寫進磁碟的舊資料。\n"
-                f"請把 {source['browser']} 所有視窗（含背景程序）都關掉再試一次。", parent=self.root)
+                f"請把 {source['browser']} 所有視窗（含背景程序）都關掉再試一次。")
             return
         if profile_tools.chrome_pids_for_profile(target):
-            messagebox.showerror(
+            show_error(self.root,
                 "目標 Profile 正在使用中",
-                f"這個資料夾正被 Chrome 開著，請先關掉：\n{target}", parent=self.root)
+                f"這個資料夾正被 Chrome 開著，請先關掉：\n{target}")
             return
 
         # target 是 USER_DATA_DIR 本身，但 Chrome 實際把資料存在它底下的 Default（或
         # BROWSER_PROFILE_DIR）子資料夾裡 —— copy_cert 要對到那一層，不是 USER_DATA_DIR 自己。
         profile_dir = target / profile_tools.profile_subdir_name()
         if not profile_dir.is_dir():
-            messagebox.showerror(
+            show_error(self.root,
                 "Profile 還沒初始化",
                 f"這個資料夾裡還沒有 {profile_tools.profile_subdir_name()} 子資料夾：\n{target}\n\n"
-                "請先用上面的「建立 Profile」把資料夾初始化，再回來複製憑證。", parent=self.root)
+                "請先用上面的「建立 Profile」把資料夾初始化，再回來複製憑證。")
             return
 
         if not ask_confirm(
@@ -187,14 +183,14 @@ class UiCertMixin:
         try:
             backup = profile_tools.copy_cert(source["path"], profile_dir)
         except OSError as exc:
-            messagebox.showerror("複製失敗", str(exc), parent=self.root)
+            show_error(self.root, "複製失敗", str(exc))
             return
 
         self._refresh_profile_status()
         self.scan_cert_sources()
         note = f"（原本的已備份到 {backup.name}）" if backup else ""
         self.migrate_status.configure(text=f"已複製完成{note}")
-        messagebox.showinfo(
+        show_info(self.root,
             "複製完成",
             f"憑證已複製到自動登入用的 Profile{note}。\n"
-            "接下來按「登入」實際驗證，不再跳「瀏覽器查無有效數位憑證」就是成功了。", parent=self.root)
+            "接下來按「登入」實際驗證，不再跳「瀏覽器查無有效數位憑證」就是成功了。")

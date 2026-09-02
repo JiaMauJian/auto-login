@@ -156,13 +156,13 @@ import datetime
 import queue
 import tkinter as tk
 import traceback
-from tkinter import messagebox
 
 import excel_io
 import ledger as ledger_mod
 from login import load_accounts, log_crash
 from ui_background import UiBackgroundMixin
 from ui_cert import UiCertMixin
+from ui_common import ask_confirm, show_error
 from ui_history import UiHistoryMixin
 from ui_layout import UiLayoutMixin
 from ui_order import UiOrderMixin
@@ -276,13 +276,16 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         elif not self.path.is_file():
             self._say(f"找不到 Excel：{self.path}")
         elif self.ledger_error:
-            messagebox.showerror("紀錄檔有問題", self.ledger_error)
+            show_error(self.root, "紀錄檔有問題", self.ledger_error)
         elif not self.accounts:
             self._say("找不到帳號設定，請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1")
         elif not self.excel_open:
             # 開機這一次只在狀態列講一句，不彈視窗。每次開程式都彈一個，看兩天就
             # 變成閉著眼睛按掉的東西，真的有事要說的時候也會被一起按掉。
-            self._say("這份 Excel 還沒開著 —— 按左上角「開啟EXCEL」把它打開，登入才會亮起來。")
+            # 講的是「更新全部帳戶」跟下單的「讀取持股」，不是「登入」——
+            # 登入從 2026/08/30 起就不看 Excel 了（見 ui_sync._sync_buttons）。
+            self._say("這份 Excel 還沒開著 —— 按左上角「開啟EXCEL」把它打開，"
+                      "「更新全部帳戶」跟下單的「讀取持股」才會亮起來。")
         else:
             self._say("按「登入」開瀏覽器並自動登入，之後要更新資料時再按「更新全部帳戶」。")
 
@@ -305,6 +308,11 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         if name == "掛單":
             # 範圍選單的選項跟著「已經登入過、知道名字」的帳戶走，切過來刷一次。
             self._refresh_pending_scope()
+        elif name == "下單":
+            # 同上，「執行帳戶」清單也跟著已知名字走。它還會順便把還不知道的
+            # 報酬率補讀回來（只讀 B17 一格，不跑巨集），因為清單是照報酬率
+            # 由低到高排的——見 ui_order.refresh_order_accounts。
+            self.refresh_order_accounts()
         elif name == "歷程":
             self.refresh_history()
             # 切過來通常就是想看「剛才那位」的歷程，不必再選一次人。
@@ -330,21 +338,43 @@ def main():
         """
         detail = "".join(traceback.format_exception(exc, val, tb))
         log_crash(detail)
-        messagebox.showerror("發生未預期的錯誤",
-                             f"{val}\n\n詳細內容已經寫進 crash.log。", parent=root)
+        show_error(root, "發生未預期的錯誤",
+                   f"{val}\n\n詳細內容已經寫進 crash.log。")
 
     root.report_callback_exception = on_callback_error
 
     app = SyncApp(root)
 
     def on_close():
-        if app.busy and not messagebox.askokcancel(
-            "還在忙", "背景還在登入或寫入。現在關掉可能會留下寫到一半的狀態，確定要關嗎？"
+        # danger=False：使用者是自己按 X 才走到這裡，本來就打算關，Enter 應該
+        # 順著他的意思關掉（跟原本 messagebox.askokcancel 的預設一致）。
+        if app.busy and not ask_confirm(
+            root, "還在忙",
+            "背景還在登入或寫入。現在關掉可能會留下寫到一半的狀態，確定要關嗎？",
+            danger=False,
         ):
             return
         if app.browser_thread is not None and app.browser_thread.is_alive():
+            # 關掉之前先做一次「全部登出」，跟那顆按鈕走同一條路（2026/08/31
+            # 使用者要求）。差別在「登出」跟「關瀏覽器」不是同一件事：
+            # clear_cookies 才是這個網站認定的登出（JSESSIONID 這類 cookie 是
+            # 伺服器唯一認人的依據，見 _browser_worker 的 logout 分支），而
+            # USER_DATA_DIR 指到的是持久化 profile——只送 stop 的話，收尾那段
+            # 只會 close 掉瀏覽器，cookie 還躺在磁碟上，下次開起來網站可能直接
+            # 把人當成還登入著。
+            #
+            # 兩則指令一起排隊：logout 那則做完（清 cookie、關 context 與
+            # browser）才輪到 stop 讓迴圈收工。它回的那則 "logged_out" 沒有人
+            # 會收——畫面正在關，不必為了它多等一輪。
+            app._say("登出中，瀏覽器會自己關掉…")
+            # update_idletasks 只重畫，不處理使用者事件——用 update() 的話，
+            # 這個空檔裡再按一次 X 會把 on_close 整支重進一遍。
+            root.update_idletasks()
+            app.browser_cmd_queue.put(("logout", None))
             app.browser_cmd_queue.put(("stop", None))
-            app.browser_thread.join(timeout=10)
+            # 比原本的 10 秒寬一點：多了「清 cookie、關 context」這一段，而且
+            # 前面可能還有一則指令正在跑（使用者是在忙的時候按 X 進來的）。
+            app.browser_thread.join(timeout=20)
         excel_io.clear_all_markers(app.path)
         root.destroy()
 

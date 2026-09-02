@@ -9,7 +9,7 @@ import queue
 import threading
 import traceback
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
@@ -21,15 +21,17 @@ import planner
 import fetch as fetch_mod
 from fetch import collect, login_only
 from login import app_dir, configure_browsers_path, open_context
-from ui_common import ask_cash_method, ask_confirm
+from ui_common import ask_cash_method, ask_confirm, show_error, show_warning
 
 # 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
 STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "logged_out": "登出",
               "order_data": "下單資料讀取", "order_filled": "下單填單",
               "order_dialog_closed": "委託確認視窗關閉偵測",
               "order_price_refresh": "多輪出清重讀持股",
-              "order_stock_price": "新增股票查價", "order_plan_init": "初始化下單",
-              "order_quotes_fetched": "查詢委買賣", "pending_fetched": "查詢掛單"}
+              "order_stock_price": "新增股票查價", "order_auto_calc": "更新／自動計算",
+              "order_rates": "帳戶報酬率補讀",
+              "order_quotes_fetched": "查詢委買賣", "pending_fetched": "查詢掛單",
+              "pending_cancelled": "取消掛單"}
 
 # 瀏覽器起不來時，錯誤視窗最上面那段人話。traceback 講的是 Playwright 的內部狀況，
 # 對使用者沒有意義，真正能動手的只有下面這兩件事。
@@ -122,12 +124,24 @@ class UiBackgroundMixin:
         return choices
 
     def _refresh_account_choices(self):
-        """登入或讀取之後名字才知道，選單上那幾列要跟著補上去。選中的那一列不動。"""
+        """
+        登入或讀取之後名字才知道，選單上那幾列要跟著補上去。選中的那一列不動。
+
+        掛單分頁的範圍選單也在這裡一起刷。它本來只在切到那個分頁的時候刷
+        （_on_tab_changed），結果是「人一直待在掛單分頁按登入」的話，那個選單
+        停在登入前的樣子——只剩「全部帳戶」、名字一個都沒有，而且不會自己好
+        （2026/08/31 使用者遇到）。兩個選單問的是同一件事「現在知道哪幾位」，
+        就該在同一個地方一起更新。
+
+        下單分頁的「執行帳戶」**不在這裡**：2026/09/01 起那份清單來自 Excel 分頁
+        （見 ui_order.refresh_order_accounts），跟登入拿到誰的名字無關。
+        """
         keep = max(self.account_choice.current(), 0)
         self.account_choice.configure(values=self._account_choices())
         self.account_choice.current(keep)
         self._apply_scope_state()
         self._refresh_fetch_button()
+        self._refresh_pending_scope()
 
     def _scope_ready(self):
         """範圍下拉能不能讓人手動切到某一組。
@@ -235,10 +249,10 @@ class UiBackgroundMixin:
         if self.busy:
             return
         if not self.accounts:
-            messagebox.showerror("沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
+            show_error(self.root, "沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
             return
         if self.ledger_error:
-            messagebox.showerror("紀錄檔有問題", self.ledger_error)
+            show_error(self.root, "紀錄檔有問題", self.ledger_error)
             return
 
         self._ensure_browser_thread()
@@ -252,10 +266,10 @@ class UiBackgroundMixin:
         if self._excel_in_use() or not self._require_excel():
             return
         if not self.accounts:
-            messagebox.showerror("沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
+            show_error(self.root, "沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
             return
         if self.ledger_error:
-            messagebox.showerror("紀錄檔有問題", self.ledger_error)
+            show_error(self.root, "紀錄檔有問題", self.ledger_error)
             return
 
         # 這一輪要做的是誰，按下去的當下就記起來：等結果回來的這幾十秒裡，
@@ -295,8 +309,10 @@ class UiBackgroundMixin:
         if not ask_confirm(
                 self.root,
                 "登出並關閉瀏覽器",
-                "確定要登出所有帳號並關閉瀏覽器嗎？\n\n"
-                "瀏覽器裡任何你自己開的分頁（例如看盤視窗）也會一起關掉。",
+                # 只留這一句（2026/09/01 使用者指定）。原本下面還接一句「瀏覽器裡任何你
+                # 自己開的分頁（例如看盤視窗）也會一起關掉」——標題已經寫著「關閉瀏覽器」，
+                # 那句是在解釋一件標題上已經講完的事。
+                "確定要登出所有帳號並關閉瀏覽器嗎？",
                 confirm_style="primary"):
             return
 
@@ -453,6 +469,37 @@ class UiBackgroundMixin:
                     self.queue.put(("order_filled", payload))
                     continue
 
+                if cmd == "pending_cancel":
+                    # 掛單分頁三顆取消按鈕的一則＝一個帳戶（見 ui_pending.
+                    # _dispatch_next_cancel）。不收進下面 simple_jobs 那張表：
+                    # 那張表是「一則指令跑完整批就結束」，而取消要一個帳戶一則
+                    # 才停得下來（10.3 第六點），而且它跟下單一樣有
+                    # OrderMaybeSubmitted 要分開處理。
+                    order_number, account, sheet, ordnos = arg
+                    payload = {"sheet": sheet}
+                    try:
+                        ensure_browser()
+                        payload.update(self._pending_cancel_job(
+                            context, store, order_number, account, sheet, ordnos))
+                    except order_fill.OrderMaybeSubmitted as exc:
+                        # 「確認」已經按下去了：那一批多半已經送到券商，絕對不能
+                        # 被當成「這一則沒做，再按一次就好」。旗標讓
+                        # _on_pending_cancelled 走完全不同的路（整批停下來）。
+                        payload["error"] = str(exc)
+                        payload["maybe_submitted"] = True
+                    except RuntimeError as exc:
+                        # order_cancel 與 fetch.ensure_logged_in 丟的 RuntimeError
+                        # 訊息本來就是寫給人看的（核對不過、登入失敗、按鈕不見
+                        # 了…），而且都發生在按下確認之前，不需要連 traceback
+                        # 一起丟到畫面上。
+                        payload["error"] = str(exc)
+                    except Exception:
+                        payload["error"] = traceback.format_exc()
+                        if context is None:
+                            payload["hint"] = BROWSER_HINT
+                    self.queue.put(("pending_cancelled", payload))
+                    continue
+
                 if cmd in simple_jobs:
                     # 「查完就結束」那一類：參數形狀各自不同（一批股票代號、一批
                     # 帳戶…），但錯誤處理與回話方式完全一樣，所以收成一張表，
@@ -588,9 +635,11 @@ class UiBackgroundMixin:
                     "order_dialog_closed": self._on_order_dialog_closed,
                     "order_price_refresh": self._on_order_price_refresh,
                     "order_stock_price": self._on_order_stock_price,
-                    "order_plan_init": self._on_order_plan_init,
+                    "order_auto_calc": self._on_order_auto_calc,
+                    "order_rates": self._on_order_rates,
                     "order_quotes_fetched": self._on_order_quotes_fetched,
-                    "pending_fetched": self._on_pending_fetched}
+                    "pending_fetched": self._on_pending_fetched,
+                    "pending_cancelled": self._on_pending_cancelled}
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
@@ -620,7 +669,7 @@ class UiBackgroundMixin:
         step = STEP_NAMES.get(kind, kind)
         self._set_busy(False)
         self._say(f"「{step}」的後續處理出錯")
-        messagebox.showerror(
+        show_error(self.root,
             "程式出錯",
             f"「{step}」的結果處理到一半出錯，這一批沒有做完。\n"
             f"Excel 與紀錄檔可能只完成了一部分，請切到「歷程」看實際做了哪幾格。\n\n"
@@ -667,7 +716,7 @@ class UiBackgroundMixin:
 
         self._set_busy(False)
         self._say("背景作業中斷，這次的動作沒有做完")
-        messagebox.showerror(
+        show_error(self.root,
             "背景作業中斷",
             "負責瀏覽器的背景作業結束了，這次的動作沒有做完。\n\n"
             f"{BROWSER_HINT}\n\n再按一次「登入」會重新開一個瀏覽器。")
@@ -678,7 +727,7 @@ class UiBackgroundMixin:
 
         if "error" in payload:
             self._say("登入失敗")
-            messagebox.showerror("登入失敗", _error_text(payload))
+            show_error(self.root, "登入失敗", _error_text(payload))
             return
 
         names, problems = [], []
@@ -694,7 +743,7 @@ class UiBackgroundMixin:
         self._refresh_account_choices()
 
         if problems:
-            messagebox.showerror("登入失敗", "\n".join(problems))
+            show_error(self.root, "登入失敗", "\n".join(problems))
             self._say("登入失敗")
             return
 
@@ -767,7 +816,7 @@ class UiBackgroundMixin:
 
         if "error" in payload:
             self._say("讀取失敗")
-            messagebox.showerror("讀取失敗", _error_text(payload))
+            show_error(self.root, "讀取失敗", _error_text(payload))
             return
 
         # 這一輪讀到的一律是「補上去」，不是「整份換掉」：一次只更新一位的時候，
@@ -912,7 +961,7 @@ class UiBackgroundMixin:
 
         if "error" in payload:
             self._say("寫入失敗")
-            messagebox.showerror("寫入失敗", _error_text(payload))
+            show_error(self.root, "寫入失敗", _error_text(payload))
             return
 
         # 紀錄檔一定在 Excel 寫成功之後才更新。順序反過來的話，寫入失敗會留下
@@ -953,7 +1002,7 @@ class UiBackgroundMixin:
 
         if "error" in payload:
             self._say("登出失敗")
-            messagebox.showerror("登出失敗", _error_text(payload))
+            show_error(self.root, "登出失敗", _error_text(payload))
             return
 
         self._say("已全部登出並關閉瀏覽器。下次按「登入」或「更新」會重新開一個瀏覽器。")
@@ -994,17 +1043,23 @@ class UiBackgroundMixin:
         底部狀態列那顆「停止」（見 docs/介面規劃.md 10.2）：跨分頁常駐，人按它的
         時候很可能正在掛單分頁看委託，而下單分頁裡那顆在別的分頁上按不到。
 
-        目前唯一停得掉的是下單分頁的依序執行。登入／讀取／寫入／查詢那幾條沒有
-        「停」這個動作可做——見 _browser_worker：每一個指令都一定要回一則結果，
-        半路抽掉只會讓畫面永遠等不到回話。所以這顆按鈕只在真的有東西停得掉的
-        時候才亮（見 _stop_all_available）。
+        停得掉的有兩件：下單分頁的依序執行，以及掛單分頁的整批取消。兩件的停法
+        一模一樣——都是「不派下一則指令」，正在跑的那一則等它回話。登入／讀取／
+        寫入／查詢那幾條沒有「停」這個動作可做，見 _browser_worker：每一個指令都
+        一定要回一則結果，半路抽掉只會讓畫面永遠等不到回話。所以這顆按鈕只在真的
+        有東西停得掉的時候才亮（見 _stop_all_available）。
+
+        兩件不會同時發生（兩邊都借同一顆 self.busy），所以這裡不必決定先停誰。
         """
-        if self._stop_all_available():
+        if self.order_exec_active or self.order_exec_queue:
             self.stop_order_execution()
+        elif self.pending_cancel_active:
+            self.stop_pending_cancel()
 
     def _stop_all_available(self):
         """現在有沒有「停得掉」的東西。跟 order_exec_active 分開看的理由見那裡。"""
-        return bool(self.order_exec_active or self.order_exec_queue)
+        return bool(self.order_exec_active or self.order_exec_queue
+                    or self.pending_cancel_active)
 
     def _sync_stop_all_button(self):
         """
@@ -1022,12 +1077,13 @@ class UiBackgroundMixin:
         """
         現在有沒有任何一條路正在用 COM 動那份活頁簿。
 
-        四個旗標各自誕生於不同的功能，本來各管各的：self.busy 是更新分頁的
-        登入／讀取／寫入，order_busy 是下單分頁的「持股與報酬率」，
+        五個旗標各自誕生於不同的功能，本來各管各的：self.busy 是更新分頁的
+        登入／讀取／寫入，order_busy 是下單分頁的「讀取持股」，
         order_stock_price_busy 是盤中「新增」股票附帶的那次股價重讀，
-        order_exec_price_busy 是多輪之間的重讀。問題是它們動的是**同一個
-        Excel 實例**——程式接上的是使用者眼前開著的那個（見
-        excel_io._open_once 的 GetObject 分支），不是各開各的一份。
+        order_exec_price_busy 是多輪之間的重讀，order_rates_busy 是「執行帳戶」
+        清單那趟只讀 B17 的補讀（見 ui_order.refresh_order_accounts）。問題是
+        它們動的是**同一個 Excel 實例**——程式接上的是使用者眼前開著的那個
+        （見 excel_io._open_once 的 GetObject 分支），不是各開各的一份。
 
         程式自己的讀寫都是限定寫法（sheet.Cells(...)），不受別人 Activate
         影響；但巨集用的是無限定的 Range()，只認 ActiveSheet。兩條執行緒交錯
@@ -1035,18 +1091,18 @@ class UiBackgroundMixin:
         自己這一頁從來沒更新過，而讀回來的是舊的 I4:I8，然後盤中追價就拿這個
         舊價當基準。不報錯、不缺欄位，只是靜靜地錯。
 
-        所以四個旗標從這裡開始當成一個看。CLAUDE.md 那條「自動計算執行期間
+        所以五個旗標從這裡開始當成一個看。CLAUDE.md 那條「自動計算執行期間
         更新分頁的讀取／寫入要鎖住，反之亦然」就是靠這個述詞（畫面層）加上
         excel_io._EXCEL_LOCK（執行緒層）兩層一起實作的。
         """
         return bool(self.busy or self.order_busy or self.order_stock_price_busy
-                    or self.order_exec_price_busy)
+                    or self.order_exec_price_busy or self.order_rates_busy)
 
     def _apply_busy_state(self):
         """
-        把「現在能不能碰 Excel」套到所有相關按鈕上。**四個旗標任何一個變動都要
-        叫一次**，不然畫面會停在上一個狀態：按鈕亮著、按下去卻被 guard 擋掉，
-        看起來就是「按了沒反應」。
+        把「現在能不能碰 Excel」套到所有相關按鈕上。**四個旗標、以及 excel_open，
+        任何一個變動都要叫一次**，不然畫面會停在上一個狀態：按鈕亮著、按下去卻
+        被 guard 擋掉，看起來就是「按了沒反應」。
         """
         # 寫到一半換檔沒有意義，這一輪要動哪個檔早就決定了。
         self.excel_button.configure(state="disabled" if self._excel_in_use() else "normal")
@@ -1131,14 +1187,14 @@ class UiBackgroundMixin:
         try:
             ledger = ledger_mod.Ledger(path)
         except RuntimeError as exc:
-            messagebox.showerror("紀錄檔有問題", str(exc))
+            show_error(self.root, "紀錄檔有問題", str(exc))
             return
 
         try:
             excel_io.remember_excel_path(path)
         except OSError as exc:
-            messagebox.showwarning("沒寫進 .env",
-                                   f"這次可以用，但路徑沒記起來，下次要再選一次：\n{exc}")
+            show_warning(self.root, "沒寫進 .env",
+                         f"這次可以用，但路徑沒記起來，下次要再選一次：\n{exc}")
         self.path = path
         self.ledger = ledger
         self.ledger_error = None
@@ -1192,19 +1248,17 @@ class UiBackgroundMixin:
                 os.startfile(str(path))
             except OSError as exc:
                 self._set_excel_open(False)
-                messagebox.showerror("開不起來", f"沒辦法用 Excel 打開這個檔：\n{path}\n\n{exc}")
+                show_error(self.root, "開不起來", f"沒辦法用 Excel 打開這個檔：\n{path}\n\n{exc}")
                 return
             self._say(f"正在用 Excel 開啟 {path.name}…")
         if tries >= 60:                   # 30 秒
             self._set_excel_open(False)
             self._say(f"還沒看到 {path.name} 開起來。")
-            messagebox.showwarning(
+            show_warning(self.root,
                 "沒看到 Excel 開起來",
                 f"{path.name} 交給 Excel 了，但 30 秒過去還沒看到它被開啟。\n\n"
                 f"Excel 可能卡在「受保護的檢視」或啟用提示上，也可能還在啟動。\n"
-                f"請看一下 Excel 那邊；等它真的開好，登入就會自己亮起來。",
-                parent=self.root,
-            )
+                f"請看一下 Excel 那邊；等它真的開好，登入就會自己亮起來。")
             return
         self.root.after(500, lambda: self._open_in_excel(path, tries + 1))
 
@@ -1242,7 +1296,16 @@ class UiBackgroundMixin:
             return
         self.excel_open = value
         self.path_label.configure(text=self._path_text())
-        self._sync_buttons()
+        # 走 _apply_busy_state() 而不是只叫 _sync_buttons()：下單分頁的「讀取持股」
+        # 也卡在 excel_open 上（見 ui_order._order_excel_buttons），只更新更新分頁
+        # 那幾顆的話，Excel 一關它會一直亮著。
+        self._apply_busy_state()
+        # 接上的那一刻才讀得到那份表裡有誰——下單分頁的「執行帳戶」整格都是
+        # Excel 那一頭的答案（分頁名＋B17，見 refresh_order_accounts 與
+        # _forget_round）。這裡是換檔那條路唯一「新路徑 ＋ 真的開著」同時成立
+        # 的地方，也是「開啟EXCEL 之後帳戶就自己出現」靠的那一下。
+        if value:
+            self.refresh_order_accounts()
 
     def _has_round_data(self):
         """畫面上（左邊名單、右邊明細、訊息框）現在有沒有東西。"""
@@ -1271,22 +1334,41 @@ class UiBackgroundMixin:
         self.current_sheet = None
         self.account_choice.current(0)
         self._refresh_fetch_button()
+        # 下單分頁那幾份也是「這一份 Excel 的」：持股、試算、股價、報酬率全部
+        # 來自分頁上的格子，換一份檔案就全數作廢。報酬率還多一層——它決定
+        # 「執行帳戶」清單本身（有誰、排序、號碼），留著舊檔的名單會讓人對著
+        # 另一份表裡的人下單。下一次 Excel 接上時會重讀（見 _set_excel_open）。
+        self.order_return_rates = {}
+        # 只重畫選單，不在這裡去讀新檔的 B17：這支被呼叫的時候 Excel 一定是
+        # 「還沒接上」的狀態（換檔那條路剛把 excel_open 設成 False，Excel 被關掉
+        # 那條路更不用說）。補讀交給 _set_excel_open——接上的那一刻才是能讀的
+        # 那一刻。
+        self._fill_order_accounts()
+        # 持股、試算、股價、股票清單那幾份跟「換帳戶」要清的東西一模一樣，走同
+        # 一支，不在這裡再列一次（列兩份遲早會有一邊漏掉一項）。選中的那一位
+        # 不會被清掉——他是登入來的，跟開哪一份 Excel 無關（同 trader_of），
+        # 只是他手上的數字全部作廢，狀態列會退回「接著按『讀取持股』」。
+        self._clear_order_round()
 
     def _require_excel(self):
-        """登入／讀取前的最後一道關卡。按鈕平常是灰的，這裡擋的是鍵盤觸發那種漏網。"""
+        """
+        讀取（更新分頁）與「讀取持股」（下單分頁）之前的最後一道關卡。
+        按鈕平常是灰的，這裡擋的是鍵盤觸發那種漏網。
+
+        「Excel 沒開著」那一種刻意不跳視窗，只是擋下來（2026/08/31 使用者要求）：
+        兩顆按鈕現在都跟著 excel_open 變灰（見 ui_sync._sync_buttons、
+        ui_order._order_excel_buttons），常駐列上又寫著「EXCEL未開啟」、旁邊就是
+        「開啟EXCEL」那顆按鈕——畫面已經把這件事講完了，再彈一個視窗要人按掉是
+        在重複同一句話。剩下兩種（沒選檔、檔案不見了）還是要說：那是畫面上看不
+        出來的事。
+        """
         if self.path is None:
-            messagebox.showerror("還沒選檔案", "請先按左上角「開啟EXCEL」選一份持股管理表。")
+            show_error(self.root, "還沒選檔案", "請先按左上角「開啟EXCEL」選一份持股管理表。")
             return False
         if not self.path.is_file():
-            messagebox.showerror("找不到 Excel", f"{self.path}\n\n可以在 .env 用 EXCEL_PATH 指定位置。")
+            show_error(self.root, "找不到 Excel", f"{self.path}\n\n可以在 .env 用 EXCEL_PATH 指定位置。")
             return False
-        if not self.excel_open:
-            messagebox.showwarning("Excel 沒開著",
-                                   f"請先按左上角「開啟EXCEL」把 {self.path.name} 打開。\n\n"
-                                   f"程式要接上你那個 Excel 視窗才會同步。",
-                                   parent=self.root)
-            return False
-        return True
+        return bool(self.excel_open)
 
     def _default_method(self):
         """
@@ -1382,7 +1464,7 @@ class UiBackgroundMixin:
         if self.ledger is None or self.path in self.cash_method_asked:
             return True
 
-        picked = ask_cash_method(self.root, self.family, self.cash_method.get())
+        picked = ask_cash_method(self.root, self.cash_method.get())
         if picked is None:
             return False
         self._set_method(picked, asked=True)

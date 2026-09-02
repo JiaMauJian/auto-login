@@ -22,13 +22,16 @@
 「order_fill.py 半自動下單已跑通」裡，之後改版遇到類似症狀先查那邊。
 
 用法：
-    python order_fill.py <第幾組帳號> <股票代號> <張數> <價格> [bs_flag]
+    python order_fill.py <第幾組帳號> <股票代號> <數量> <價格> [bs_flag] [--odd]
 
+    數量的單位跟著 --odd 走：沒帶就是整張、數量填「張」；帶了 --odd 是零股、
+    數量填「股」（1~999）。--odd 放在哪個位置都可以。
     bs_flag 預設 I（IOC，立即成交否則取消，安全，不會掛著等成交）。
     真正盤前要用的 R（ROD，當日有效）會真的掛在那邊等撮合，測試時要留意。
 
 例：
     python order_fill.py 1 1714 1 14.9 I
+    python order_fill.py 1 1714 350 14.9 R --odd
 
 下一步：接到「下單」分頁的執行預覽，讓多帳戶依序跑（一個一個開委託確認
 視窗，還是人自己按確認），還沒做，也還沒驗證過「換帳戶 cookie 不重登」
@@ -41,8 +44,27 @@ from playwright.sync_api import Error as PlaywrightError, TimeoutError as Playwr
 from playwright.sync_api import sync_playwright
 
 from login import app_dir, configure_browsers_path, do_login, load_accounts, open_context, pause
+from orders import SHARES_PER_LOT
 
 ORDER_ENTRY_PAGE = "https://www.tbbstock.com.tw/tbb/order/layoutRWD.jsp?type=0"
+
+# 交易盤別（.tab1）。整股的 "1" 是 2026/08/28 實測跑通的；零股的 "5" 是
+# 2026/09/01 09:18 盤中跑 recon_order_form.py 倒出來的（報告在
+# 偵察資料60901_0918_下單表單選項.txt）。這個下拉選單一共四個選項：
+#
+#     '1' = 整股      '2' = 盤後      '5' = 盤中零股      '3' = 盤後零股
+#
+# 零股取 '5'（盤中零股）不是 '3'（盤後零股）：'5' 對整股的 '1'，是同一段連續
+# 交易時間裡的另一半，規劃文件的零股流程（買賣股票照試算送、出清零股「全部掛
+# 賣單、20 秒後取消」）講的都是這一段。'3' 是 13:40~14:30 那場盤後集合競價，
+# 對到的是 '2'（盤後），整張那半邊也沒在用——真的要做盤後那一場的話，是多一個
+# 「時機」設定，不是把這個值改掉。
+#
+# 同一份報告確認的另外兩件（都跟程式原本的假設一致，所以沒有東西要改）：
+#   - 零股的數量欄旁邊寫的是「股」（整股寫「張」），見 _check_qty
+#   - 零股的委託別只剩 'R'（ROD），交易別只剩 '0'（現股）——整股才有 IOC/FOK
+TAB1_LOT = "1"
+TAB1_ODD = "5"
 
 
 class OrderMaybeSubmitted(RuntimeError):
@@ -145,9 +167,9 @@ def select_stock(page, code):
     return stk_name
 
 
-def open_order_form(page):
+def open_order_form(page, *, odd=False):
     """
-    交易盤別（整股）／交易別（現股）先設好，一定要排在選股票之前。
+    交易盤別（整股／零股）／交易別（現股）先設好，一定要排在選股票之前。
 
     2026/08/28 實測發現：頁面自己有一段 `$('.tab1').on('change', function(){
     $('#stockId').val('').trigger('change'); ... })`，只要 .tab1 這個下拉選單
@@ -155,19 +177,72 @@ def open_order_form(page):
     把這兩個下拉選單的設定放在 select_stock() 之後，結果就是股票選好了、
     緊接著被這個 handler 清掉，等按「確認下單」的時候 #stkName 又變回
     "--"，跳出「請輸入正確股號」，跟股票選錯是同一種症狀但成因完全不同。
+
+    odd=True 是零股那一段（同一個試算數字的另一半，見 orders.split_lots）。
     """
-    page.select_option(".tab1", "1")        # 整股
+    tab1 = TAB1_ODD if odd else TAB1_LOT
+    page.select_option(".tab1", tab1)
+
+    # 選完讀回來核對一次。select_option 選一個「不存在」的值會自己丟例外，但
+    # 「選項在、這個時段不能選」會怎樣沒人試過——2026/09/01 那份報告是 09:18
+    # 盤中倒的，四個盤別當時都切得過去，**盤前（09:00 以前）切不切得過去還
+    # 沒人看過**。真的沒切過去的話下面填的數量會用整股的單位送出去，多問這一
+    # 句就擋掉了，成本是一次 evaluate。
+    actual = page.eval_on_selector(".tab1", "el => el.value")
+    if actual != tab1:
+        raise RuntimeError(
+            f"交易盤別設成 {tab1!r} 沒有生效，頁面現在停在 {actual!r}"
+            f"（{'零股' if odd else '整股'}這個選項這個時段可能不能選）。這一筆不送。")
+
     page.select_option("#tradeType", "0")   # 現股
 
 
-def fill_order(page, *, side, qty, price, bs_flag="I"):
+def _check_qty(qty, *, odd):
     """
-    填好整股限價單的其餘欄位、按「確認下單」開出委託確認視窗，不按裡面的
+    數量欄填錯單位不會報錯，只會送出差 1000 倍的委託，所以填之前先量一下。
+
+    整張填「張」、零股填「股」（不到一張的量本來就寫不成張），兩者共用
+    plan_* 那一列的 "lots" 欄位（見 orders.plan_trade_orders）——正因為同一個
+    欄位名裝著兩種單位，把「這一列的 unit 跟裡面的數字對不對得起來」在送出去
+    之前問一次才有意義。
+
+    B1 如果查出零股的數量欄其實不收「股」，要改的是這個檢查跟呼叫端算出來的
+    數字，不是在這裡偷偷除以 1000。
+    """
+    try:
+        value = int(str(qty).strip())
+    except ValueError:
+        raise RuntimeError(f"數量看不懂：{qty!r}，這一筆不送。") from None
+    if value <= 0:
+        raise RuntimeError(f"數量要是正整數，收到 {value}，這一筆不送。")
+    if odd and value >= SHARES_PER_LOT:
+        raise RuntimeError(
+            f"零股的數量要是 1~{SHARES_PER_LOT - 1} 股，收到 {value}——這個數字"
+            f"看起來是「張」不是「股」（差 {SHARES_PER_LOT} 倍），這一筆不送。")
+    return value
+
+
+def fill_order(page, *, side, qty, price, bs_flag="I", odd=False):
+    """
+    填好限價單的其餘欄位、按「確認下單」開出委託確認視窗，不按裡面的
     「確認」——那一步留給人。side 是 'B' 或 'S'，對到 #orderB / #orderS。
+
+    qty 的單位跟著 odd 走：整張填「張」、零股填「股」（2026/09/01 的偵察報告
+    確認過，見 TAB1_ODD 那段）。
+    odd 只影響這裡的範圍檢查，真正切盤別的是 open_order_form(odd=...)
+    ——兩支要帶同一個值，只帶一邊會變成「用整股的盤別送零股的數量」。
 
     呼叫這支之前一定要先 open_order_form() 再 select_stock()，順序反了
     股票會被清空（見 open_order_form 的說明）。
     """
+    qty = _check_qty(qty, odd=odd)
+    if odd and bs_flag != "R":
+        # 零股的委託別只剩 ROD（2026/09/01 偵察報告）。硬選下去 select_option
+        # 會丟「找不到這個選項」，訊息看不出真正的原因，先在這裡講清楚。
+        raise RuntimeError(
+            f"零股的委託別只有 R（ROD-當日有效），收到 {bs_flag!r}——IOC／FOK 是"
+            f"整股才有的。這一筆不送。")
+
     page.check(f"#order{side}")             # 買進/賣出
     page.fill("#qty", str(qty))
     page.select_option("#priceRadio", "0")  # 限價
@@ -254,13 +329,16 @@ def confirm_order(page, timeout_ms=15000):
 
 
 def main():
-    if len(sys.argv) < 5:
+    # --odd 可以放在任何位置（它不是位置參數），先濾掉再照位置讀其餘的。
+    argv = [arg for arg in sys.argv[1:] if arg != "--odd"]
+    odd = "--odd" in sys.argv
+    if len(argv) < 4:
         print(__doc__)
         sys.exit(1)
 
-    which = int(sys.argv[1])
-    code, qty, price = sys.argv[2], sys.argv[3], sys.argv[4]
-    bs_flag = sys.argv[5] if len(sys.argv) > 5 else "I"
+    which = int(argv[0])
+    code, qty, price = argv[1], argv[2], argv[3]
+    bs_flag = argv[4] if len(argv) > 4 else "I"
 
     accounts = load_accounts()
     if not accounts:
@@ -280,9 +358,9 @@ def main():
         try:
             page = do_login(context, account["id"], account["password"], spare_page)
             page.goto(ORDER_ENTRY_PAGE)
-            open_order_form(page)
+            open_order_form(page, odd=odd)
             select_stock(page, code)
-            fill_order(page, side="S", qty=qty, price=price, bs_flag=bs_flag)
+            fill_order(page, side="S", qty=qty, price=price, bs_flag=bs_flag, odd=odd)
         except PlaywrightTimeoutError as exc:
             print(f"逾時：{exc}")
         except PlaywrightError as exc:

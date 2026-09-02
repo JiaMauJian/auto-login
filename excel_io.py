@@ -8,7 +8,8 @@ Excel 讀寫。只認得持股管理表的這幾格，其餘全是公式，一�
                            「更新股價」巨集（Module1.更新股價）填入，出清股票
                            多輪模式的「自動更新股價」用（見 orders.py 開頭說明）
     B8     現金餘額         <- 由紀錄檔的現金流水算出來
-    B17    今年報酬率       只讀，下單功能排執行順序用（見 orders.order_accounts）
+    B17    今年報酬率       只讀，下單分頁的「執行帳戶」選單照它由低到高排序
+                           （＝建議的處理順序，見 orders.order_accounts）
     D1     程式維護提醒      每次寫入順便刷新，關閉程式時清掉，見 marker_enabled
 
 位置寫死是刻意的：這支程式只認得這個特定格式的持股管理表，
@@ -54,19 +55,18 @@ UPDATE_PRICE_MACRO = "Module1.更新股價"
 # 出來的（stock_limit + 9 ～ stock_limit * 2 + 8，stock_limit = 5），不是寫死
 # 的——那個數字改了這裡要跟著改，見 docs/介面規劃.md 9.1 那張表。
 #
-# 只讀，程式從來不寫這兩欄：要動它們是靠觸發使用者自己的巨集（初始化下單／
-# 清空下單／自動計算），跟 I 欄那個「巨集寫、程式讀」的分工一樣。
+# 只讀，程式從來不寫這兩欄：要動它們是靠觸發使用者自己的「自動計算」巨集，
+# 跟 I 欄那個「巨集寫、程式讀」的分工一樣。
 PLAN_ROWS = range(14, 19)
 COL_PLAN_QTY, COL_PLAN_PRICE = 13, 14
 
-# 使用者既有的另外兩支巨集（Module1）。跟「更新股價」不一樣的是這兩支**不會
-# 跳 MsgBox**（九個對話框全在更新股價與自動計算裡，見 docs/介面規劃.md 9.6
-# 第 2 點那張表），所以觸發它們不會有「背景執行緒無聲卡住」那個風險。
-#
-# 但「只認 ActiveSheet」這條照樣適用——它們一樣是標準模組裡的無限定 Range()，
-# 所以一樣要一個分頁 Activate 一次、跑一次。
-INIT_ORDER_MACRO = "Module1.初始化下單"
-CLEAR_ORDER_MACRO = "Module1.清空下單"
+# 使用者既有的另一支巨集（Module1）。跟「更新股價」一樣，只認 ActiveSheet
+# （無限定的 Range()），一定要一個分頁 Activate 一次、跑一次；而且一樣會跳
+# MsgBox——「檢查輸入錯誤」那段最多 23 個（見 docs/介面規劃.md 9.6 第 2 點
+# 那張表），Application.Run 會卡在那裡等人按確定，背景執行緒就無聲掛住。
+# 9.6 那套 Python 事前檢查刻意還沒做（真的卡住了再回頭照那裡寫的做），跟
+# 「更新股價」的 #1 MsgBox 是同一種、一直以來就有的風險，不是這裡新加的。
+AUTO_CALC_MACRO = "Module1.自動計算"
 
 # 今年報酬率，下單功能排執行順序用（報酬率低的先執行）。只讀，不寫——
 # 這一格本來就是 Excel 自己的公式算出來的，程式沒有理由覆蓋它。
@@ -214,6 +214,39 @@ def read_return_rate(sheet):
     return to_num(sheet.Cells(*CELL_RETURN_RATE).Value, None)
 
 
+def list_account_sheets(book):
+    """
+    這份活頁簿裡有哪幾位交易人，以及各自的今年報酬率（B17）。
+    回傳 [(分頁名, 報酬率或 None), ...]，順序照活頁簿裡分頁本來的順序。
+
+    給下單分頁的「執行帳戶」用（2026/09/01）：那份清單原本要等登入拿到名字才
+    長得出來，但一份持股管理表的分頁**本來就是一位交易人一頁**，開檔當下就
+    知道有誰了，不必等登入。登入只跟「送得出委託」有關，跟「這份表裡有誰」無關。
+
+    只讀 B17 與 D4:D8，不跑巨集、不碰 E/F/I/M——一位一到六格 COM 往返，20 位也
+    只是幾十毫秒，這也是它敢在開檔／切分頁時自動跑的原因（見
+    ui_order.refresh_order_accounts）。
+
+    **哪些分頁算數**：看得見的、而且「B17 讀得到數字」或「D4:D8 至少有一個股票
+    代號」——那兩樣是持股管理表分頁的特徵（見這個檔案開頭的格子地圖）。純說明頁、
+    工作用的空白頁兩樣都沒有，就不會混進交易人清單裡。不用分頁名稱去猜（名字就是
+    人名，猜不出規則），也不預設「所有分頁都是交易人」——2026/09/01 當下這份表
+    確實只有一頁而且就是交易人，但那不是可以靠的前提。
+    """
+    accounts = []
+    for sheet in book.Worksheets:
+        # -1 是 xlSheetVisible；0 隱藏、2 是「非常隱藏」（只能用 VBA 叫回來）。
+        if sheet.Visible != -1:
+            continue
+        rate = read_return_rate(sheet)
+        has_stock = any(stock_code_of(sheet.Cells(row, COL_NAME).Value)
+                        for row in HOLDING_ROWS)
+        if rate is None and not has_stock:
+            continue
+        accounts.append((sheet.Name.strip(), rate))
+    return accounts
+
+
 def read_order_plan(sheet):
     """
     讀這一頁的下單試算：M14:N18，配上 D4:D8 的股票代號。
@@ -243,18 +276,21 @@ def read_order_plan(sheet):
     return plan
 
 
-def run_order_macro(excel, sheet, macro):
+def run_auto_calc_macro(excel, sheet):
     """
-    對 sheet 這一個分頁觸發「初始化下單」或「清空下單」（見 INIT_ORDER_MACRO）。
+    對 sheet 這一個分頁觸發「自動計算」巨集：依 M4:M8 目標比重反覆試算，
+    結果寫進 M14:N18。
 
     跟 run_update_price_macro 同一條規矩：**一定要傳分頁進來、一頁跑一次**，
-    因為它們一樣只對 ActiveSheet 動作。呼叫端一樣要自己包 keep_active_sheet()。
+    只認 ActiveSheet；呼叫端一樣要自己包 keep_active_sheet()。
 
-    這兩支只在 M14:N18 之間搬值（初始化：M ← O 欄加碼股數、N ← I 欄股價；
-    清空：整塊清掉），不打網路、不跳對話框，所以跑起來很快、也不會卡住。
+    過程中會**暫時改寫 E4:E8／F4:F8／B8 再還原**（docs/介面規劃.md 9.6 第 3
+    點），跟更新分頁「E/F/B8 一律覆蓋」正面衝突，呼叫端要確保跟那邊互斥
+    （`_excel_in_use()`）。也可能跳 MsgBox（見 AUTO_CALC_MACRO 上面的說明），
+    卡住的話畫面會停在「跑巨集中」不動，要去 Excel 視窗把對話框按掉。
     """
     sheet.Activate()
-    excel.Run(macro)
+    excel.Run(AUTO_CALC_MACRO)
 
 
 @contextlib.contextmanager
@@ -264,8 +300,8 @@ def keep_active_sheet(book):
 
     跑「更新股價」巨集一定要一頁一頁 Activate（見 run_update_price_macro），
     但 Excel 通常就開在使用者眼前——20 個帳戶跑完把他丟在最後一個分頁上，
-    等於每按一次「重新整理」畫面就被搬走一次。記一次、還一次，比每跑一頁
-    就來回切兩次少掉一半的 COM 往返與畫面重繪。
+    等於每按一次「讀取持股」畫面就被搬走一次。記一次、還一次，比每
+    跑一頁就來回切兩次少掉一半的 COM 往返與畫面重繪。
 
     記不住或還不回去都不是錯誤（分頁被刪了、活頁簿被關了、Excel 正忙），
     整段吞掉就好：這只是「別動到使用者的畫面」這種禮貌，不該讓真正要做的
@@ -399,7 +435,7 @@ def is_open_in_excel(path):
 # 同一份活頁簿一次只讓一條執行緒操作。
 #
 # 為什麼需要：程式接上的是使用者眼前那個 Excel 實例（見 _open_once 的 GetObject
-# 分支），不是各開各的一份。而「更新分頁寫入」「下單分頁的持股與報酬率／新增
+# 分支），不是各開各的一份。而「更新分頁寫入」「下單分頁的讀取持股／新增
 # 股票／多輪之間重讀」各有各的忙碌旗標、各跑各的執行緒，彼此不知道對方存在。
 #
 # 程式自己的讀寫都是 sheet.Cells(...) 這種限定寫法，不受別人 Activate 影響；

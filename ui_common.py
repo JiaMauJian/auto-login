@@ -140,10 +140,24 @@ CELL_PAD = 8
 PRICE_PENDING_TEXT = "依 Excel 成交價追價"
 
 
-def col_width(family, texts, minimum=0):
+# 下單分頁「指定股票」一檔一列（一行排完）連下方間距的高度。2026/08/31 在
+# 11 級字下實測一列 37 像素，換算回 10 級字的基準就是這個數字。原本一檔分兩行
+# 是 wide(71)，改成一行之後少掉一半——那一半直接變成下面執行預覽的高度。
+# 「指定股票」那一格的高度＝這個 × 目前檔數，最多三檔（使用者指定），第四檔起
+# 用捲軸——見 ui_layout._build_order_stocks 與 ui_order._resize_order_stock_panel。
+# 定義在這裡是因為建版面（ui_layout）與清單變動時重算（ui_order）兩邊都要用，
+# 兩邊都認 ui_common 就不必互相 import（跟 PRICE_PENDING_TEXT 同一個理由）。
+ORDER_STOCK_ROW_H = wide(34)
+ORDER_STOCK_ROWS_SHOWN = 3
+
+
+def col_width(family, texts, minimum=0, bold=False):
     """
     量一批候選字串（Treeview 目前的字型：family + FONT_SIZE）裡最寬的一個，
     算出這一欄該給多寬，取代原本用固定數字硬猜寬度。
+
+    表頭要用 bold=True 量：Treeview.Heading 是粗體（見 ui_layout._build 的
+    style.configure），拿一般體去量表頭會少算，欄位名就從最後一兩個字被切掉。
 
     只適合用在「候選字串是有限、可列舉的」欄位（股票名稱清單、帳戶名單、
     orders.py 那幾句固定備註）——不能拿使用者正在打字的即時輸入內容當
@@ -158,7 +172,8 @@ def col_width(family, texts, minimum=0):
     pad = CELL_PAD * 2 + 10
     if not texts:
         return minimum
-    font = tkfont.Font(family=family, size=FONT_SIZE)
+    font = tkfont.Font(family=family, size=FONT_SIZE,
+                       weight="bold" if bold else "normal")
     return max(max(font.measure(t) for t in texts) + pad, minimum)
 
 
@@ -261,8 +276,8 @@ def ask_opening_balance(parent, family, name, current):
             return
         value = to_num(raw, None)
         if value is None:
-            messagebox.showerror("看不懂這個數字",
-                                 f"「{text.get().strip()}」不是一個數字。", parent=win)
+            show_error(win, "看不懂這個數字",
+                       f"「{text.get().strip()}」不是一個數字。")
             entry.focus_set()
             return
         answer["opening"] = value
@@ -285,6 +300,163 @@ def ask_opening_balance(parent, family, name, current):
     entry.select_range(0, "end")
     parent.wait_window(win)
     return answer.get("opening")
+
+
+# 訊息視窗（show_message）的版面。數字都是「10 級字下的像素」，靠 wide() 跟著字級走。
+MESSAGE_WRAP = 520          # 一行排到多寬換行
+MESSAGE_ICON = 26           # 左邊那顆圖示的邊長
+
+# 訊息比這還長就改用可捲動、可選取的文字框。會這麼長的只有夾帶 traceback 的那幾則
+# （見 ui_background._error_text，光 traceback 就留 1500 字）：排成一整片 Label 會把
+# 視窗撐得比螢幕還高，下面的「確定」直接被推出畫面外，而且一個字也複製不出來 ——
+# 而 traceback 這種東西的用途就是複製給別人看。
+MESSAGE_LONG_CHARS = 500
+MESSAGE_BOX_LINES = 14      # 文字框先顯示幾行，其餘用捲的
+
+# 三種訊息的圖示：Bootstrap Icons 的字符名 + ttkbootstrap 的語意色，跟它自己
+# Messagebox.show_* 用的是同一組（見 ttkbootstrap/dialogs/message.py 的 _ALERT_ICONS），
+# 換掉對話框之後圖示看起來還是同一套。
+MESSAGE_ICONS = {
+    "error": ("x-circle-fill", "danger"),
+    "warning": ("exclamation-triangle-fill", "warning"),
+    "info": ("info-circle-fill", "info"),
+}
+
+# 自己這顆畫不出來時，退回原生 messagebox 的哪一顆（見 show_message 最後一段）。
+MESSAGE_FALLBACK = {
+    "error": messagebox.showerror,
+    "warning": messagebox.showwarning,
+    "info": messagebox.showinfo,
+}
+
+
+def show_message(parent, title, message, *, kind="info"):
+    """
+    通知用的訊息視窗，取代 messagebox.showerror / showwarning / showinfo。
+
+    理由跟 ask_confirm 是同一條：原生 messagebox 跳出來的是 Windows 系統對話框，
+    字級不跟著 UI_FONT_SIZE 走 —— 介面的字調大了，跳出來的訊息還是系統預設那個
+    小字，而這些視窗要講的常常正是最需要看清楚的幾句（登入失敗、寫入失敗、
+    traceback）。「把字調大」在這裡不是偏好，是這個程式唯一的無障礙調節。
+
+    沒有直接用 ttkbootstrap.dialogs.Messagebox：字級它是跟得上沒錯（內文是一顆
+    沒設 font 的 ttk.Label，吃得到我們配的 TLabel），但它斷行用的是
+    textwrap.wrap(width=50)，而那個 50 數的是「字元個數」—— 中文一個字算一個，
+    50 個中文字排出來是 100 個半形寬（2026/08/30 實測，視窗被撐到 1133 像素寬），
+    而且中文沒有空白可以斷字，它就從第 50 個字中間硬切，檔案路徑也照切。按鈕
+    文字還是英文 OK。改用 Tk 自己的 wraplength 就沒有這些問題（它按像素斷、中文
+    逐字斷得開），順帶跟 ask_confirm 長得一模一樣。
+
+    kind 只決定圖示的字符與顏色，不決定按鈕：三種都只有一顆「確定」，因為這
+    三種都是「講完就沒事了」的通知，沒有要人選什麼 —— 要人選的走 ask_confirm。
+    """
+    grabbed = parent.grab_current()      # 從別的對話框上面疊出來的，等一下要還回去
+    win = None
+    try:
+        win = _build_message(parent, title, message, kind)
+        parent.wait_window(win)
+    except Exception:
+        # 這顆視窗本身畫不出來時的退路。多數訊息無所謂，但 ui.py 的
+        # report_callback_exception 是「已經出過一次錯」才會走到的路 —— 那裡再靜靜
+        # 失敗一次，畫面上就完全看不到東西了，只剩 crash.log。原生 messagebox 不
+        # 依賴我們配的樣式，是這種時候唯一還算得上可靠的東西。
+        if win is not None and win.winfo_exists():
+            win.destroy()
+        MESSAGE_FALLBACK[kind](title, message, parent=parent)
+    finally:
+        # grab 是全域的，被 destroy 掉不會自動還給下面那層 —— 不還的話，疊在
+        # ask_opening_balance 上面的那則錯誤訊息一關掉，底下那個對話框就從
+        # modal 變成不是 modal（見 ask_opening_balance 裡的「看不懂這個數字」）。
+        if grabbed is not None and grabbed.winfo_exists():
+            grabbed.grab_set()
+
+
+def show_error(parent, title, message):
+    show_message(parent, title, message, kind="error")
+
+
+def show_warning(parent, title, message):
+    show_message(parent, title, message, kind="warning")
+
+
+def show_info(parent, title, message):
+    show_message(parent, title, message, kind="info")
+
+
+def _build_message(parent, title, message, kind):
+    win = tk.Toplevel(parent)
+    try:
+        return _fill_message(win, parent, title, message, kind)
+    except Exception:
+        # 蓋到一半失敗的話這扇窗要自己收掉再往上丟：show_message 那邊接不到它
+        # （還沒 return，那邊的 win 還是 None），留著就是一個空白、關不掉、還
+        # 卡著 grab 的視窗 —— 比「訊息沒跳出來」難處理得多。
+        win.destroy()
+        raise
+
+
+def _fill_message(win, parent, title, message, kind):
+    win.title(title)
+    win.transient(parent)
+    win.resizable(False, False)
+
+    outer = ttk.Frame(win, padding=16)
+    outer.pack(fill="both", expand=True)
+
+    body = ttk.Frame(outer)
+    body.pack(fill="both", expand=True)
+
+    glyph, color = MESSAGE_ICONS[kind]
+    # ttk.Icon 回傳的是 Tk 的圖片名稱（字串），活著的那份存在 ttkbootstrap 自己的
+    # 快取裡，不必像 PhotoImage 那樣在這邊留一個參照才不會被回收。
+    ttk.Label(body, image=ttk.Icon(glyph, wide(MESSAGE_ICON), color)).pack(
+        side="left", anchor="n", padx=(0, 12))
+
+    if len(message) > MESSAGE_LONG_CHARS:
+        _message_box(body, message)
+    else:
+        ttk.Label(body, text=message, justify="left",
+                  wraplength=wide(MESSAGE_WRAP)).pack(side="left", fill="both", expand=True)
+
+    buttons = ttk.Frame(outer)
+    buttons.pack(fill="x", pady=(16, 0))
+    ok = ttk.Button(buttons, text="確定", command=win.destroy, bootstyle="primary")
+    ok.pack(side="right")
+
+    win.protocol("WM_DELETE_WINDOW", win.destroy)
+    win.bind("<Escape>", lambda _e: win.destroy())
+    win.bind("<Return>", lambda _e: win.destroy())
+    center_on(win, parent)
+    win.grab_set()
+    ok.focus_set()
+    return win
+
+
+def _message_box(parent, message):
+    """
+    很長的訊息（實際上都是夾帶 traceback 的那幾則）改用文字框裝。
+
+    唯讀但選得起來：state="disabled" 擋的是打字，不擋選取與複製。
+
+    wrap="char" 不是 "word"：這裡的內容是中英夾雜的 traceback，"word" 遇到中文
+    那一段（整段沒有空白，Tk 眼中是一個超長的字）反而斷得比較難看。
+    """
+    family = pick_font()
+    frame = ttk.Frame(parent)
+    frame.pack(side="left", fill="both", expand=True)
+    # 寬度只能用「幾個字元」給，換算成跟 Label 那條 wraplength 一樣的像素寬，
+    # 兩種版面才不會一則寬一則窄。中文一個字佔兩欄，所以同樣的欄數裝的中文字
+    # 比較少 —— 那正是要的，量的本來就是像素。
+    columns = max(20, wide(MESSAGE_WRAP) // tkfont.Font(family=family, size=FONT_SIZE).measure("0"))
+    text = tk.Text(frame, wrap="char", font=(family, FONT_SIZE), width=columns,
+                   height=MESSAGE_BOX_LINES, relief="solid", borderwidth=1,
+                   highlightthickness=0, padx=8, pady=6)
+    bar = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+    text.configure(yscrollcommand=bar.set)
+    text.insert("1.0", message)
+    text.configure(state="disabled")
+    text.pack(side="left", fill="both", expand=True)
+    bar.pack(side="left", fill="y")
 
 
 def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否", danger=True,
@@ -348,7 +520,7 @@ def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否"
     return answer["ok"]
 
 
-def ask_cash_method(parent, family, current):
+def ask_cash_method(parent, current):
     """
     今天的現金餘額要用哪一種算法。回傳選定的算法；取消（按「取消」、X 或 Escape）
     回傳 None，呼叫端要當成「這次不讀取了」處理，不能套用任何一種算法。

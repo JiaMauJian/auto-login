@@ -125,7 +125,15 @@ widget.grid(row=0, column=0, sticky="nsew")
 
 ## 八、錯誤處理與使用者提示
 
-- 統一用 `messagebox`（`showerror` / `showwarning` / `showinfo`）呈現錯誤或提示，不要用 `print` 或讓程式直接崩潰
+- 統一用同一組對話框呈現錯誤或提示，不要用 `print` 或讓程式直接崩潰
+- **這個專案不用 tkinter 內建的 `messagebox`**（見 `ui_common.show_message`）：它跳出來的是 Windows
+  系統對話框，字級不跟著 `UI_FONT_SIZE` 走 —— 介面的字調大了，最需要看清楚的那幾句反而還是系統
+  預設的小字。改用 `ui_common` 的 `show_error` / `show_warning` / `show_info`（通知）與 `ask_confirm`
+  （要人回答是非），它們是自己畫的 `Toplevel`，吃得到主視窗那一套字型與配色
+- 也**不要換成 `ttkbootstrap.dialogs.Messagebox`**：字級它跟得上，但斷行用的是
+  `textwrap.wrap(width=50)`，那個 50 數的是字元個數 —— 50 個中文字排出來是 100 個半形寬（2026/08/30
+  實測視窗被撐到 1133 像素），而且中文沒有空白可斷字，它會從第 50 個字中間硬切，檔案路徑照切，
+  按鈕文字還是英文 `OK`
 - 可能出錯的操作（檔案讀寫、網路連線、資料庫存取等）建議用 `try/except` 包裝，並在 `except` 中給使用者清楚、口語化的錯誤訊息（避免直接把例外訊息原封不動丟給使用者）
 
 ---
@@ -320,5 +328,5 @@ for axis, sticky in (("Vertical", "ns"), ("Horizontal", "we")):
 6. 若專案已引入 `ttkbootstrap` 或 `customtkinter`，優先沿用既有套件風格，避免混搭不同美化套件
 7. 遇到耗時操作（I/O、網路、大量運算），一律評估是否需要背景執行緒 + queue，避免主執行緒卡住
 8. 涉及圖片顯示時，務必確認圖片物件有被保留參照，避免圖片消失的常見坑
-9. 錯誤情境一律用 `messagebox` 呈現，並包在 `try/except` 中，不可讓例外直接中斷程式或用 `print` 呈現給使用者
+9. 錯誤情境一律用對話框呈現（這個專案是 `ui_common.show_error`，不是內建 `messagebox`，理由見第八章），並包在 `try/except` 中，不可讓例外直接中斷程式或用 `print` 呈現給使用者
 10. 子視窗、背景執行緒、資料庫連線等資源，需在視窗關閉事件中正確釋放

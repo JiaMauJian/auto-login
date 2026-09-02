@@ -3,10 +3,9 @@
 import datetime
 import json
 
-from tkinter import messagebox
 
 from util import show, to_num
-from ui_common import ALL_CHOICE, ask_confirm, stock_title, within
+from ui_common import ALL_CHOICE, ask_confirm, show_error, stock_title, within
 
 def item_order(label):
     """
@@ -219,7 +218,7 @@ class UiHistoryMixin:
         try:
             self.ledger.clear_history()
         except OSError as exc:
-            messagebox.showerror("清不掉", f"歷程檔可能正被別的程式開著：\n{exc}")
+            show_error(self.root, "清不掉", f"歷程檔可能正被別的程式開著：\n{exc}")
             return
 
         self.refresh_history()

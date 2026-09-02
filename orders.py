@@ -7,8 +7,8 @@
 服務兩個模式：
     盤前  一次設定（股票、比重、價格）套用到好幾個帳戶，價格是人手動填的
           固定值，預覽階段就算得出完整的執行清單（見 plan_stock_orders）。
-    盤中  價格不是人填的，成交價來自 Excel I 欄（新增股票／重新整理時就
-          讀進來，見 ui_order.order_prices／order_exec_prices，不再現查
+    盤中  價格不是人填的，成交價來自 Excel I 欄（新增股票／讀取持股
+          時就讀進來，見 ui_order.order_prices／order_exec_prices，不再現查
           網頁），下單前那一刻只再跟對手方第一檔比大小算出最終委託價
           （見 chase_price）。plan_intraday_orders 是純函式，不自己查 Excel
           或即時報價，但呼叫端（ui_order.py）如果已經把這兩份資料查回來
@@ -52,11 +52,35 @@ JOB_NAMES = {JOB_TRADE: "買賣股票", JOB_CLEAR: "出清股票", JOB_FULL: "�
 JOBS_READY = (JOB_CLEAR, JOB_TRADE)
 
 # 單位：整張／零股。M14:M18 是股數不是張數，整張與零股是同一個數字拆兩段
-# （見 9.4），「單位」決定這一輪送哪一段。零股還沒實作，先只有整張。
+# （見 9.4），「單位」決定這一輪送哪一段。
 UNIT_LOT = "lot"
 UNIT_ODD = "odd"
 UNIT_NAMES = {UNIT_LOT: "整張", UNIT_ODD: "零股"}
-UNITS_READY = (UNIT_LOT,)
+
+# 執行預覽那一欄的欄名跟著單位換（2026/09/01 使用者指定）：單位寫在欄名上，
+# 格子裡就只放數字，不必每一格都跟一個「張」或「股」。出清那兩個作業只有
+# 整張，換不到「股數」那個字。
+UNIT_COLUMN_TITLES = {UNIT_LOT: "張數", UNIT_ODD: "股數"}
+
+# 哪個作業的哪個單位真的接上了——**不是三個作業共用一個開關**。「零股」在買賣
+# 股票是同一個數字的另一半（照下單試算的股數送出去，見 9.4），在出清股票卻是
+# 另一套流程（全部掛賣單、20 秒後全部取消，見規劃文件「出清股票－零股」），
+# 兩邊不會同一天做完。共用一個開關的話，買賣股票這半邊接好的那天會順手把出清
+# 那半邊還沒寫的流程也變成按得下去，而且不會報錯——它會照整張的流程送出去。
+UNITS_READY = {
+    JOB_TRADE: (UNIT_LOT, UNIT_ODD),   # 零股 2026/09/01 接上（order_fill.TAB1_ODD = "5"）
+    JOB_CLEAR: (UNIT_LOT,),            # 零股：出清・零股 那套流程本身還沒寫
+    JOB_FULL: (UNIT_LOT,),
+}
+
+
+def unit_ready(job, unit):
+    """
+    這個作業的這個單位接上了沒（見 UNITS_READY）。畫單選鈕（ui_layout.
+    _build_order_unit）跟切作業時的保護（ui_order._on_order_job_changed）
+    問的是同一支，兩邊不會各判各的。
+    """
+    return unit in UNITS_READY.get(job, (UNIT_LOT,))
 
 # 委託別（bs_flag）兩個模式不一樣，不是同一個值兩邊共用：盤前是預約單，
 # 掛在開盤前排隊等撮合，那個時間點根本還沒有連續交易，交易所不接受「當下
@@ -84,6 +108,9 @@ REASON_CHASE_FROZEN_TEMPLATE = "已查{opposite} {value}，下單會直接用這
 REASON_NO_PLAN = "下單試算是空的，略過"
 REASON_ONLY_ODD_TEMPLATE = "試算只有零股 {odd} 股，整張是 0，略過"
 REASON_WITH_ODD_TEMPLATE = "另有零股 {odd} 股，這一輪不送"
+# 上面那句的鏡像：選零股的時候，沒送出去的是整張那一半。兩句都放備註欄，
+# 「這一輪送多少」那一欄就只剩一個純數字（2026/09/01 使用者指定）。
+REASON_WITH_LOT_TEMPLATE = "另有整張 {lots} 張，這一輪不送"
 
 
 def split_lots(shares):
@@ -123,7 +150,7 @@ def lots_from_weight(held_qty, weight_pct):
 
 def order_accounts(accounts):
     """
-    依今年報酬率（Excel B17）由低到高排出執行順序。
+    依今年報酬率（Excel B17）由低到高排序。
 
     accounts 是 [{"sheet": 分頁名, "return_rate": 數字或 None}, ...]。
 
@@ -132,6 +159,13 @@ def order_accounts(accounts):
     讀不到就當成最低硬排進去，等於用猜的決定誰先執行，比漏掉一位還危險，
     這裡刻意跟 planner.bank_balance「讀不懂就回 None，絕對不要回 0」同一種
     態度。
+
+    2026/09/01 起這份順序排的是**「執行帳戶」選單**，不是一輪要跑的帳戶——
+    下單分頁改成一次只處理一位（使用者決定，見 docs/介面規劃.md 9.3 第 5 點），
+    規格那句「報酬率低的先執行」因此落在選單上：號碼小的排前面，人照號碼
+    由小到大一位一位處理（見 ui_order._fill_order_accounts）。
+    skipped 那幾位在選單上照樣選得到、排在最後，號碼寫「－」——這裡不給順序
+    的理由（用猜的決定誰先執行）在「一次只有一位」的情況下本來就不成立。
     """
     ready = [a for a in accounts if a.get("return_rate") is not None]
     skipped = [a for a in accounts if a.get("return_rate") is None]
@@ -200,8 +234,8 @@ def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down,
     共用、買賣共用同一條比重公式）也跟 plan_stock_orders 一樣，見那邊的說明。
 
     stock_settings 是 [{"code", "name", "weight_pct"}, ...]——沒有 "price"，
-    這是跟盤前最大的結構差異：盤中的成交價已經在新增股票／重新整理時讀進
-    Excel（見 ui_order.order_prices／order_exec_prices）。
+    這是跟盤前最大的結構差異：盤中的成交價已經在新增股票／讀取持股時
+    讀進 Excel（見 ui_order.order_prices／order_exec_prices）。
 
     prices／quotes 都是可選的（預設 None，當空字典用），呼叫端（ui_order.py）
     才碰得到 Excel 跟即時報價這兩份資料，這支函式本身仍然不碰 Excel、不碰
@@ -306,6 +340,9 @@ def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit):
                 # 不是略過的理由，是一句提醒：選整張的時候送出去的量會比 Excel
                 # 上那個數字少，人要看得出來為什麼（9.4）。
                 reasons.append(REASON_WITH_ODD_TEMPLATE.format(odd=abs(odd)))
+            elif unit == UNIT_ODD and lots:
+                # 反過來那一半：選零股的時候沒送出去的是整張。
+                reasons.append(REASON_WITH_LOT_TEMPLATE.format(lots=abs(lots)))
             if to_num(price, None) is None or to_num(price, 0) <= 0:
                 reasons.append(REASON_NO_PRICE)
 
@@ -316,13 +353,20 @@ def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit):
                 "name": stock.get("name", ""),
                 "side": SIDE_BUY if shares > 0 else SIDE_SELL,
                 "bs_flag": BS_FLAG_PRE,
-                # 「持股」欄就是持股，不塞試算股數——試算已經在「張數」欄用
-                # 「2 張（餘 350 股）」的形式講清楚了（見 _lots_text），這一欄
-                # 拿來對照「要動的量跟手上有多少」反而有用。
+                # 這一列送的是整張還是零股，寫進列裡跟著凍結好的 queue 一起走
+                # （跟 side／bs_flag 同一個道理，見 ui_order_exec._order_fill_job）：
+                # 下單表單的「交易盤別」要選哪一個、下面的 "lots" 是張還是股，
+                # 都看這個值。出清那兩支 plan_* 不帶這一欄，執行端當整張。
+                "unit": unit,
+                # 「持股」欄就是持股，不塞試算股數——試算已經在「張數」欄有
+                # 交代（見 _lots_text），這一欄拿來對照「要動的量跟手上有
+                # 多少」反而有用。
                 "held_qty": holdings.get((account["sheet"], code), 0) or 0,
+                # 送出去的量是絕對值（方向靠 side，不是靠負號）。單位跟著
+                # "unit" 走：整張是**張**、零股是**股**，同一個欄位名兩種單位，
+                # 差 1000 倍——執行端填進 #qty 之前會照 unit 再量一次範圍
+                # （見 order_fill._check_qty）。
                 "lots": abs(send),
-                # 送出去的量是絕對值（方向靠 side，不是靠負號），但畫面上要把
-                # 拆法寫出來，人才看得懂為什麼選整張時送的比 Excel 上少（9.4）。
                 "lots_text": _lots_text(lots, odd, unit),
                 "price": price,
                 "skip": send == 0,
@@ -332,10 +376,16 @@ def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit):
 
 
 def _lots_text(lots, odd, unit):
-    """執行預覽「張數」欄要顯示的字：把整張／零股的拆法寫出來（9.4）。"""
-    if unit == UNIT_LOT:
-        return f"{abs(lots)} 張" + (f"（餘 {abs(odd)} 股）" if odd else "")
-    return f"{abs(odd)} 股" + (f"（另有 {abs(lots)} 張）" if lots else "")
+    """
+    執行預覽那一欄要顯示的字（9.4）：**只有一個純數字**，沒有單位也沒有拆法。
+    單位在欄名上（UNIT_COLUMN_TITLES：張數／股數），沒送出去的另一半在備註欄
+    （REASON_WITH_ODD_TEMPLATE／REASON_WITH_LOT_TEMPLATE）——2026/09/01 使用者
+    指定，原本這一欄是「847 股（另有 2 張）」那種寫法。
+
+    出清那兩支 plan_* 不產生這一欄的文字，畫面上直接顯示 lots 那個數字，
+    形狀本來就是純數字，這次的改法是讓買賣股票跟它們一致。
+    """
+    return str(abs(lots if unit == UNIT_LOT else odd))
 
 
 def executable_orders(preview):

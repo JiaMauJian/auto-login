@@ -47,6 +47,29 @@ BUYSELL_NAMES = {"B": "買進", "S": "賣出"}
 BS_FLAG_NAMES = {"F": "FOK全部成交否則取消", "R": "ROD當日有效", "I": "IOC立即成交否則取消"}
 ACT_NAMES = {"C": "刪單成功", "R": "改價成功", "M": "減量成功", "O": "委託成功"}
 
+# 「交易別」要拿 apcode 與 trade 兩碼**合起來**查，不是各查各的：委託確認視窗
+# 自己的 type{} 就是這樣寫的（var aType = orderObj.apcode + orderObj.trade，見
+# 偵察資料\委託確認視窗\orderConfirmRWD.html）。單看 trade 的 "0" 會以為那一碼
+# 自己就是現股，其實整張表是兩碼一組，換一種盤別就換一組碼。
+TRADE_NAMES = {
+    "10": "現股", "13": "融資", "14": "融券", "1A": "現沖賣",
+    "20": "現股", "23": "融資", "24": "融券",
+    "30": "現股", "40": "現股", "50": "現股",
+}
+
+# 委託價格的種類，抄同一份 orderConfirmRWD.html 的 priceFlag{}。程式自己送出去的
+# 一律是限價（order_fill.py 的 #priceRadio 固定 "0"），但人自己在網站上下的單會
+# 查回同一張表，市價單的 odprice 是 0，直接印那個 0 會看起來像「委託價 0 元」。
+PRICE_FLAG_NAMES = {"0": "限價", "1": "平盤價", "2": "跌停價", "3": "漲停價", "4": "市價"}
+
+
+def describe_trade(row):
+    """網站「交易別」那一欄：盤別（整股／盤後…）加上現股／融資／融券。"""
+    apcode = str(row.get("apcode") or "")
+    kind = APCODE_NAMES.get(apcode, apcode)
+    trade = TRADE_NAMES.get(apcode + str(row.get("trade") or ""), "")
+    return f"{kind} {trade}".strip()
+
 
 def describe_outcome(row):
     """

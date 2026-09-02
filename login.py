@@ -376,8 +376,8 @@ def route():
     而部署方式是整包資料夾複製到目標電腦。
 
     GUI 是預設行為，因為登入、抓網頁、寫 Excel 現在全部都在 GUI 裡做（見
-    ui_background.py），GUI 錯誤也全部走 messagebox、不靠印在主控台上，exe
-    也打包成 --windowed，讓使用者可以直接雙擊 tbb-login.exe 開介面。
+    ui_background.py），GUI 錯誤也全部走訊息視窗（ui_common.show_error）、不靠印在
+    主控台上，exe 也打包成 --windowed，讓使用者可以直接雙擊 tbb-login.exe 開介面。
 
     ui 刻意在函式裡才 import：它反過來 import 這個模組，寫在檔案最上面會變成
     循環匯入。

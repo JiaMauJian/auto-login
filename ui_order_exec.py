@@ -3,7 +3,7 @@
 再決定要不要接下一輪。
 
 跟 ui_order.py 分開的界線是**「這一輪要送什麼」跟「怎麼把它送出去」**：
-ui_order.py 收使用者的輸入（選股票、填比重、勾帳戶）、讀 Excel、查即時報價、
+ui_order.py 收使用者的輸入（選帳戶、選股票、填比重）、讀 Excel、查即時報價、
 算出執行預覽；這裡從按下「開始下單」那一刻接手——把當下的設定整份凍結起來
 （見 _order_exec_init_state 的說明），之後每一筆、每一輪都只認凍結的那份，
 使用者中途改了畫面上的東西都只影響下一輪。
@@ -18,7 +18,6 @@ order_auto_confirm 決定（關＝停在那裡等人按，開＝程式自己按�
 
 import threading
 import tkinter as tk
-from tkinter import messagebox
 
 from playwright.sync_api import Error as PlaywrightError
 
@@ -27,7 +26,7 @@ import fastquote
 import fetch as fetch_mod
 import order_fill
 import orders
-from ui_common import ask_confirm
+from ui_common import ask_confirm, show_error, show_info, show_warning
 
 # 「多輪直到出清」的安全上限：不管有沒有真的出清，跑滿這個輪數就一定停下來
 # 等人看過再決定要不要繼續，不無限跑下去——2026/08/28 使用者確認要做這個
@@ -88,9 +87,9 @@ class UiOrderExecMixin:
         self.order_exec_accounts = []
         # 代號 -> Excel 讀回來的股價，盤中模式 _order_fill_job 算追價時一律
         # 拿這裡的值當 pricenow，不現查網頁成交價（2026/08/29 使用者確認：
-        # 成交價已經在新增股票／重新整理時讀進 Excel，不必等下單前才查）。
-        # 開始下單那一刻先用 self.order_prices（見那裡的說明）當第 1 輪的
-        # 起始值（start_order_execution），之後每輪重讀就整份換掉，不是
+        # 成交價已經在新增股票／讀取持股時讀進 Excel，不必等下單前
+        # 才查）。開始下單那一刻先用 self.order_prices（見那裡的說明）當第 1
+        # 輪的起始值（start_order_execution），之後每輪重讀就整份換掉，不是
         # 累加（同一檔股票這一輪的價格只有一個版本）——order_exec_auto_price
         # 這個開關現在只決定重讀前要不要先觸發「更新股價」巨集，不再決定
         # pricenow 走哪條路（見 _on_order_price_refresh）。
@@ -134,7 +133,7 @@ class UiOrderExecMixin:
         side = self.order_side.get()
         multi_round = self.order_multi_round.get()
         auto_price = self.order_auto_price.get()
-        ordered, _skipped = orders.order_accounts(self._selected_order_accounts())
+        ordered = self._order_execution_accounts()
         # 凍結起來給多輪用的股票設定（比重／價格）。只有出清作業有這種東西，
         # 買賣股票的數字全在 Excel 那頁，畫面上一個都沒有——那個作業也不支援
         # 多輪（切作業時就強制關掉了，見 ui_order._on_order_job_changed），
@@ -154,7 +153,7 @@ class UiOrderExecMixin:
             stock_settings = self._order_stock_settings()
             ticks = self._order_ticks_setting()
             if ticks is None:
-                messagebox.showerror("追價檔數不對", "追價檔數要填 0 以上的整數。", parent=self.root)
+                show_error(self.root, "追價檔數不對", "追價檔數要填 0 以上的整數。")
                 return
             preview = orders.plan_intraday_orders(
                 stock_settings, ordered, self.order_holdings, ticks, side,
@@ -169,32 +168,31 @@ class UiOrderExecMixin:
 
         if not queue_rows:
             if job == orders.JOB_TRADE:
-                reason = "下單試算是空的、只有零股沒有整張，或者試算價格是空的"
+                reason = "下單試算是空的、只有零股，或沒填價格"
             elif self._order_intraday():
-                reason = "沒有持股，或比重算出來不到 1 張"
+                reason = "沒有持股，或比重不到 1 張"
             else:
-                reason = "沒有持股、比重算出來不到 1 張，或者還沒填價格"
-            messagebox.showinfo("沒有可以執行的委託",
-                f"目前的執行預覽裡，沒有一列是真的可以送出委託的（可能是{reason}）。",
-                parent=self.root)
+                reason = "沒有持股、比重不到 1 張，或還沒填價格"
+            show_info(self.root, "沒有可以執行的委託",
+                f"執行預覽裡沒有一列可以送出委託（{reason}）。")
             return
 
-        total_lots = sum(row["lots"] for row in queue_rows)
+        # 「共 N 張／N 股」那句 2026/09/01 拿掉了（使用者指定）：總量在執行預覽
+        # 那張表上一列一列看得到，確認框再報一次總和是重複講同一件事。留下來的
+        # 數字都是「那張表上數不出來」的東西——幾筆、買幾筆賣幾筆、用哪種委託別。
         auto = self.order_auto_confirm.get()
         side_word = "買進" if side == orders.SIDE_BUY else "賣出"
 
         if job == orders.JOB_TRADE:
             # 買賣股票的方向是逐筆的（試算正數買、負數賣），不能像出清那樣用一句
-            # 「即將賣出 N 筆」帶過——那會讓人以為整批同一個方向。
+            # 「即將賣出 N 筆」帶過——那會讓人以為整批同一個方向。買賣確實可能
+            # 混在同一輪裡（不同股票試算正負不同），所以買、賣兩個數字都要列。
             buys = sum(1 for row in queue_rows if row["side"] == orders.SIDE_BUY)
             unit_word = orders.UNIT_NAMES[self.order_unit.get()]
-            amount_word = "張" if self.order_unit.get() == orders.UNIT_LOT else "股"
             head = (
-                f"即將依序處理 {len(queue_rows)} 筆委託"
-                f"（買 {buys} 筆、賣 {len(queue_rows) - buys} 筆，共 {total_lots} {amount_word}），"
-                f"用 ROD-當日有效。\n\n"
-                f"張數與價格都照各帳戶自己那一頁的下單試算（Excel 的下單試算欄），"
-                f"方向由試算的正負決定；這一輪只送「{unit_word}」那一段，另一段不送。\n\n"
+                f"{unit_word}流程（ROD-當日有效）\n"
+                f"即將依序處理 {len(queue_rows)} 筆委託\n"
+                f"買 {buys} 筆、賣 {len(queue_rows) - buys} 筆\n\n"
             )
         elif self._order_intraday():
             # 按過「查詢委買賣」的那幾筆 row["price"] 已經是算好的數字（見
@@ -214,11 +212,17 @@ class UiOrderExecMixin:
                               f"直接用執行預覽上看到的數字；其餘 {len(queue_rows) - frozen} 筆"
                               f"還沒查過，下單前才會即時查一次算出來。\n")
             head = (
-                f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託（共 {total_lots} 張），用 IOC。\n\n"
+                f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託，用 IOC。\n\n"
                 f"{price_note}沒成交的部位 IOC 會自動取消，不會掛著。\n"
             )
         else:
-            head = f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託（共 {total_lots} 張），用 ROD-當日有效。\n\n"
+            head = f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託，用 ROD-當日有效。\n\n"
+
+        # 第一句先講是誰（2026/09/01 起一輪只服務一位）。以前是多帳戶，「這一輪
+        # 有誰」只有執行預覽那張表答得出來；現在人是從一個選單挑的，挑錯了整輪
+        # 都會掛到別人帳上，而畫面上唯一顯示他名字的地方就是那個選單本身——
+        # 這一句是委託送出去之前最後一次讓人看見名字的機會。
+        head = f"帳戶：{ordered[0]['sheet']}\n" + head
 
         if multi_round:
             if auto_price:
@@ -261,8 +265,8 @@ class UiOrderExecMixin:
         self.order_exec_stock_settings = stock_settings
         self.order_exec_accounts = ordered
         # 第 1 輪（沒勾自動更新股價時就是唯一一輪）直接拿 self.order_prices
-        # 當起點——那是新增股票／上次「重新整理」讀進來的 Excel 成交價，
-        # 不用再另外查一次。勾了自動更新股價的話，這份值一送進
+        # 當起點——那是新增股票／上次「讀取持股」讀進來的 Excel
+        # 成交價，不用再另外查一次。勾了自動更新股價的話，這份值一送進
         # _prepare_next_round 馬上就會被剛重讀（含觸發巨集）的結果整份蓋掉
         # （見 _on_order_price_refresh），不是兩份資料混用。
         self.order_exec_prices = dict(self.order_prices)
@@ -291,7 +295,7 @@ class UiOrderExecMixin:
         row = self.order_exec_queue[self.order_exec_pos]
         order_number = self._order_number_for_sheet(row["sheet"])
         if order_number is None:
-            messagebox.showerror("找不到帳戶", f"{row['sheet']} 對不到任何一組帳號，這筆沒辦法執行，這一輪停止。")
+            show_error(self.root, "找不到帳戶", f"{row['sheet']} 對不到任何一組帳號，這筆沒辦法執行，這一輪停止。")
             self.order_exec_active = False
             self.order_exec_queue = []
             self.order_exec_pos = 0
@@ -324,21 +328,17 @@ class UiOrderExecMixin:
         """
         if not self.order_exec_active:
             return
-        if self.order_exec_price_busy:
-            note = ("\n\n目前正在背景重讀 Excel／觸發「更新股價」巨集，這個動作沒辦法"
-                    "中途中斷，會等它跑完，但跑完的結果不會再接下一輪。")
-        else:
-            note = ""
-        if not ask_confirm(
-                self.root, "停止下單",
-                f"確定要停止整批「多輪直到出清」作業嗎？{note}\n\n"
-                f"如果瀏覽器裡還留著一個沒處理的委託確認視窗，"
-                f"程式不會再幫你追蹤它，請自己到瀏覽器裡按「確認」或「取消」。"
-                if self.order_exec_multi_round else
-                "確定要停止這一輪嗎？\n\n如果瀏覽器裡還留著一個沒處理的委託確認視窗，"
-                "程式不會再幫你追蹤它，請自己到瀏覽器裡按「確認」或「取消」。",
-                confirm_style="primary"):
-            return
+
+        # 停止不問「確定嗎」（2026/09/01 使用者指定）：要停的人已經決定了，中間
+        # 再擋一個對話框只是拖時間——而按停止的時候通常正是最急的時候。它也不是
+        # 不可逆的動作，停完再按一次「開始」就是重新算一輪。
+        #
+        # 原本確認框裡那兩句提醒不能跟著消失，改成停完之後寫在狀態列上：那兩件事
+        # 是「停了之後你還要自己處理什麼」，本來就比較適合當結果講，而不是當成
+        # 攔在動作前面的問題。
+        watching = self.order_exec_watching
+        price_busy = self.order_exec_price_busy
+
         self.order_exec_active = False
         self.order_exec_queue = []
         self.order_exec_pos = 0
@@ -347,7 +347,14 @@ class UiOrderExecMixin:
         self.order_exec_last_note = ""
         self._set_busy(False)
         self._update_order_exec_ui()
-        self._say("下單：已停止。")
+
+        notes = ["下單：已停止。"]
+        if watching:
+            notes.append("瀏覽器裡那個委託確認視窗程式不再追蹤，請自己按「確認」或「取消」。")
+        if price_busy:
+            notes.append("背景正在重讀 Excel／跑「更新股價」巨集，沒辦法中斷，"
+                         "會等它跑完，但不會再接下一輪。")
+        self._say(" ".join(notes))
 
     def _on_order_filled(self, payload):
         """
@@ -374,7 +381,7 @@ class UiOrderExecMixin:
             hint = payload.get("hint")
             text = f"{hint}\n\n────────────────\n{detail}" if hint else detail
             if payload.get("maybe_submitted"):
-                messagebox.showerror(
+                show_error(self.root,
                     "委託結果不確定——請先去網站查證",
                     f"{row['sheet']} {row['code']} 這一筆已經按下「確認」，但程式沒辦法"
                     f"確定送出去的結果。\n請先到瀏覽器裡「委託查詢」或「預約查詢」頁自己"
@@ -383,7 +390,7 @@ class UiOrderExecMixin:
                 self._say(f"下單：第 {self.order_exec_pos + 1}/{len(self.order_exec_queue)} 筆"
                           f"結果不確定，先去網站查證，不要按「下一筆」。")
             else:
-                messagebox.showerror(
+                show_error(self.root,
                     "這一筆下單失敗",
                     f"{row['sheet']} {row['code']} 這一筆失敗，這一輪先停在這裡。\n"
                     f"排除問題後按「下一筆」會重試同一筆，或按「停止」放棄這一輪。\n\n{text}")
@@ -431,11 +438,11 @@ class UiOrderExecMixin:
             self._set_busy(False)
             self._update_order_exec_ui()
             self._say(f"下單：已經連續跑了 {ORDER_MULTI_ROUND_CAP} 輪，先停在這裡等你確認。")
-            messagebox.showwarning(
+            show_warning(self.root,
                 "已到多輪上限",
                 f"「多輪直到出清」已經連續跑了 {ORDER_MULTI_ROUND_CAP} 輪，為了安全先停下來，"
                 f"不會無限跑下去。\n請自己檢查目前持股，如果還沒出清，可以再按一次"
-                f"「開始下單」重新跑一輪。", parent=self.root)
+                f"「開始下單」重新跑一輪。")
             return
 
         self._say(f"下單：第 {self.order_exec_round} 輪已跑完，重新讀取持股中…")
@@ -519,10 +526,10 @@ class UiOrderExecMixin:
             self.order_exec_active = False
             self._set_busy(False)
             self._update_order_exec_ui()
-            messagebox.showerror(
+            show_error(self.root,
                 "重讀持股失敗",
                 f"第 {self.order_exec_round} 輪跑完後想重新讀取持股，但失敗了，"
-                f"「多輪直到出清」先停在這裡：\n\n{payload['error']}", parent=self.root)
+                f"「多輪直到出清」先停在這裡：\n\n{payload['error']}")
             self._say("下單：重讀持股失敗，多輪出清已停止。")
             return
 
@@ -534,10 +541,10 @@ class UiOrderExecMixin:
             self.order_exec_active = False
             self._set_busy(False)
             self._update_order_exec_ui()
-            messagebox.showerror(
+            show_error(self.root,
                 "重讀持股失敗",
                 f"這幾個帳戶讀不到，「多輪直到出清」先停在這裡：\n"
-                f"{'、'.join(f'{name}：{msg}' for name, msg in errors.items())}", parent=self.root)
+                f"{'、'.join(f'{name}：{msg}' for name, msg in errors.items())}")
             self._say("下單：部分帳戶讀不到持股，多輪出清已停止。")
             return
 
@@ -645,7 +652,14 @@ class UiOrderExecMixin:
                 text=self._order_exec_label(),
                 state="disabled" if self.busy or not ready else "normal")
             self.order_exec_stop_button.configure(state="disabled")
-            self.order_exec_status.configure(text="")
+            # 灰掉的第二個理由要自己講。作業還沒接上的那個理由由正上方預覽區
+            # 那行說明講（見 ui_order._recompute_order_preview），但「背景有工作
+            # 在跑」原本沒有任何地方講——按鈕就這樣灰在那裡，看起來像壞了。
+            # self.busy 是登入／登出／讀取／寫入／查掛單／查委買賣共用的那一顆
+            # （見 ui_background._set_busy），這幾條路跑完它就會自己亮回來。
+            self.order_exec_status.configure(
+                text="背景有工作在跑（登入／登出／讀取／寫入／查詢），跑完這顆才會亮。"
+                     if self.busy and ready else "")
             return
 
         self.order_exec_stop_button.configure(state="normal")
@@ -696,9 +710,9 @@ class UiOrderExecMixin:
         Excel I 欄讀回來的成交價，不現查網頁（2026/08/29 使用者確認：沒必要
         等下單前才另外查一次）。第 1 輪這份值是開始下單那一刻拿 self.
         order_prices 當快照（見 start_order_execution），也就是上一次
-        「重新整理」讀到的數字——盤中模式的「重新整理」會先觸發「更新股價」
+        「讀取持股」讀到的數字——盤中模式的這顆按鈕會先觸發「更新股價」
         巨集才讀（見 refresh_order_data），所以只要開始下單前有按過一次
-        「重新整理」，這個基準價就是新的，不是放到過期的舊資料。
+        「讀取持股」，這個基準價就是新的，不是放到過期的舊資料。
         order_exec_auto_price 這個開關現在只決定多輪出清時，輪與輪之間重讀
         Excel 前要不要先觸發巨集，不再決定 pricenow 的資料來源。
         """
@@ -718,7 +732,7 @@ class UiOrderExecMixin:
             if pricenow is None:
                 raise RuntimeError(
                     f"沒有讀到 {row['code']} 的股價（Excel I 欄），這一筆沒辦法算追價。"
-                    f"請先按「重新整理」讓 Excel 更新股價。")
+                    f"請先按「讀取持股」讓 Excel 更新股價。")
 
             # 對手方第一檔：借這個已登入的 page 開一個 FastQuote 彈出視窗，
             # 只為了這一檔股票訂閱、等一下、拿到就關掉（見 fastquote.py
@@ -748,10 +762,19 @@ class UiOrderExecMixin:
         bs_flag = row.get("bs_flag") or (
             orders.BS_FLAG_INTRADAY if mode == "intraday" else orders.BS_FLAG_PRE)
 
+        # 整張還是零股也看**那一列自己帶的值**（理由同上面的 side／bs_flag）：
+        # 這台引擎吃的是凍結好的 queue，不回頭問畫面上現在選的是哪一個——多輪
+        # 之間、或人在執行中動了那顆單選鈕，畫面上的值跟這批 queue 算出來的量
+        # 就對不起來了。沒帶這一欄的（出清那兩支 plan_*）當整張。
+        # row["lots"] 的單位跟著它走：整張是張、零股是股（見
+        # orders.plan_trade_orders），兩支 order_fill 都要帶同一個 odd。
+        odd = row.get("unit") == orders.UNIT_ODD
+
         page.goto(order_fill.ORDER_ENTRY_PAGE, wait_until="domcontentloaded")
-        order_fill.open_order_form(page)
+        order_fill.open_order_form(page, odd=odd)
         order_fill.select_stock(page, row["code"])
-        order_fill.fill_order(page, side=row_side, qty=row["lots"], price=price, bs_flag=bs_flag)
+        order_fill.fill_order(page, side=row_side, qty=row["lots"], price=price,
+                              bs_flag=bs_flag, odd=odd)
 
         if not auto:
             return page, {}

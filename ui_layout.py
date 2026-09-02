@@ -6,11 +6,11 @@ import ttkbootstrap as ttk
 
 import orders
 import profile_tools
-from ui_pending import PENDING_ALL
+from ui_pending import CANCEL_KINDS, PENDING_ALL
 from ui_common import (
-    ALL_CHOICE, APP_VERSION, CELL_PAD, FONT_SIZE, HINT_SIZE, PRICE_PENDING_TEXT, WHEN_TODAY,
-    WHEN_WEEK, WINDOW_H, WINDOW_W, cash_method_toggle_enabled, col_width, pick_font, wide,
-    work_area,
+    ALL_CHOICE, APP_VERSION, CELL_PAD, FONT_SIZE, HINT_SIZE, ORDER_STOCK_ROW_H,
+    PRICE_PENDING_TEXT, WHEN_TODAY, WHEN_WEEK, WINDOW_H, WINDOW_W,
+    cash_method_toggle_enabled, col_width, pick_font, wide, work_area,
 )
 
 
@@ -31,7 +31,13 @@ class UiLayoutMixin:
         # 高度不跟著帳號數長：名單本來就有捲軸，滑鼠滾兩下的成本遠低於「20 個帳號
         # 就開一個佔滿整個桌面的視窗」。要一次看完整份名單就自己把視窗拉高，
         # 或在 .env 設 UI_HEIGHT。
-        height = min(WINDOW_H or wide(720), room_h - 60)
+        #
+        # 2026/08/31 從 wide(720) 加到 wide(860)：下單分頁改成「左欄帳戶、右欄
+        # 指定股票＋執行預覽上下疊」之後，右欄要在同一個高度裡塞下三檔股票
+        # （約 300px）、執行預覽、動作列與多輪那一列（固定約 150px）。原本的
+        # 720 底下執行預覽只剩得到一列，實際上等於沒有預覽。這只是預設值，
+        # 上面那道可用區的夾還在，.env 的 UI_HEIGHT 也照樣蓋得過。
+        height = min(WINDOW_H or wide(860), room_h - 60)
 
         # 先擺一個大概的中心點，等元件都建好、標題列量得到了再擺準一次
         # （見 _build 最後的 _center）。不指定位置的話由視窗管理員決定，
@@ -156,7 +162,9 @@ class UiLayoutMixin:
         self._refresh_fetch_button()
         # 按鈕的初始亮暗也要照規則來。少了這一次，Excel 沒開著時「登入」會亮到
         # 第一次狀態改變為止 —— 而「一直沒開」正好就是不會有改變的那種情況。
-        self._sync_buttons()
+        # 叫 _apply_busy_state() 是為了連下單分頁那幾顆一起設到（開機那一刻
+        # excel_open 一定是 False，而 _set_excel_open 狀態沒變就不動畫面）。
+        self._apply_busy_state()
 
         self._center(width, height)
 
@@ -522,9 +530,9 @@ class UiLayoutMixin:
         三顆取消按鈕。
 
         「列出掛單」跟「取消掛單」放同一頁不是硬湊在一起——取消之前本來就要先
-        看到會取消掉什麼。三顆取消按鈕現在一律 disabled：那支 API 還沒偵察過
-        （9.7 第 3 步），先畫出來讓版面完整，跟下單分頁那幾個還沒接上的控制項
-        同一種做法。
+        看到會取消掉什麼。三顆取消按鈕接的是 ui_pending.cancel_pending（規格見
+        10.3），亮不亮由 _update_pending_ui 決定：這一類真的有東西可取消、而且
+        沒有別的事在跑，才按得下去。
 
         「範圍」跟更新分頁的範圍選單同一個概念，但這裡預設「全部」——看掛單本來
         就是要一次看完所有帳戶。
@@ -549,19 +557,36 @@ class UiLayoutMixin:
         self.pending_stamp = ttk.Label(top, text="還沒查過", style="Hint.TLabel")
         self.pending_stamp.pack(side="right")
 
-        columns = ("sheet", "stock", "side", "price", "qty", "matched", "left", "status", "ordno")
-        titles = {"sheet": "帳戶", "stock": "股票", "side": "買賣", "price": "委託價",
-                  "qty": "委託量", "matched": "成交", "left": "未成交",
-                  "status": "狀態", "ordno": "委託書號"}
-        # 數量欄都是短數字，壓小沒關係；「狀態」可能是網站回的失敗原因（errmsg
-        # 是自由文字，量不出上限），給它 stretch 吃掉剩下的寬度。
-        narrow = {"side": 50, "price": 80, "qty": 80, "matched": 70, "left": 80, "ordno": 100}
+        # 欄位跟網站「委託查詢」那張表一欄一欄對齊，連名字都照抄（2026/08/31
+        # 使用者要求）：這一頁存在的意義就是拿來跟網頁互相核對，欄位名不一樣、
+        # 少一欄多一欄，核對的人就得先在腦子裡做一次對照表。多出來的只有最前面
+        # 的「帳戶」——網站一次只看得到登入的那一個人，這裡是所有帳戶攤在一起。
+        columns = ("sheet", "ordered", "workdate", "ordno", "stock", "trade", "side",
+                   "price", "qty", "cancelled", "matched", "flag", "status", "left")
+        titles = {"sheet": "帳戶", "ordered": "委託日期", "workdate": "有效交易日",
+                  "ordno": "委託書號", "stock": "股票代號", "trade": "交易別",
+                  "side": "買賣別", "price": "委託價格", "qty": "原委託數量",
+                  "cancelled": "已取消數量", "matched": "已成交數量",
+                  "flag": "委託別", "status": "委託狀態", "left": "有效數量"}
+        # 這裡只是下限，真正的欄寬是量出來的（見 ui_pending._resize_pending_columns）
+        # ——欄寬用固定數字猜，字級、字型、DPI 只要有一項跟猜的時候不一樣就會切字
+        # （2026/08/31 實際切到過：委託日期只剩「09:00:4.」）。所以這幾個數字刻意
+        # 給得小：它們只管「還沒查過、表格是空的」那一刻不要有欄位窄得莫名其妙，
+        # 給大了反而是在替沒出現的內容先佔位，整張表白白變寬、多一段捲軸。
+        self.pending_widths = {"sheet": 90, "ordered": 120, "workdate": 85, "ordno": 70,
+                               "stock": 70, "trade": 70, "side": 55, "price": 70,
+                               "qty": 80, "cancelled": 80, "matched": 80, "flag": 70,
+                               "status": 90, "left": 75}
+        # 數字置中，文字靠左。「委託狀態」可能是網站回的失敗原因（errmsg 是自由
+        # 文字，量不出上限），給它 stretch 吃掉剩下的寬度。
+        centered = ("side", "price", "qty", "cancelled", "matched", "left")
         self.pending_tree = ttk.Treeview(frame, columns=columns, show="headings", height=14)
         for key in columns:
             self.pending_tree.heading(key, text=titles[key])
-            self.pending_tree.column(key, width=wide(narrow.get(key, 110)),
-                                     anchor="center" if key in ("side", "price", "qty", "matched", "left") else "w",
+            self.pending_tree.column(key, width=wide(self.pending_widths[key]),
+                                     anchor="center" if key in centered else "w",
                                      stretch=(key == "status"))
+        self._resize_pending_columns()   # 還沒有資料，先照表頭量一次
         self.pending_tree.grid(row=1, column=0, sticky="nsew")
         bar = ttk.Scrollbar(frame, orient="vertical", command=self.pending_tree.yview)
         self.pending_tree.configure(yscrollcommand=bar.set)
@@ -577,13 +602,16 @@ class UiLayoutMixin:
 
         cancel_bar = ttk.Frame(frame)
         cancel_bar.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        self.pending_cancel_buttons = []
-        for text in ("取消全部買單", "取消全部賣單", "取消全部掛單"):
-            button = ttk.Button(cancel_bar, text=text, state="disabled", bootstyle="danger-outline")
+        # 一開始一律 disabled——還沒查過就沒有列可取消，_update_pending_ui 會
+        # 在每次查詢／每次狀態變動之後重算。kind 用 lambda 綁進去，不能直接寫
+        # command=self.cancel_pending(kind)（那是「現在就呼叫」）。
+        self.pending_cancel_buttons = {}
+        for kind, text, _side in CANCEL_KINDS:
+            button = ttk.Button(cancel_bar, text=text, state="disabled",
+                                bootstyle="danger-outline",
+                                command=lambda k=kind: self.cancel_pending(k))
             button.pack(side="left", padx=(0, 8))
-            self.pending_cancel_buttons.append(button)
-        ttk.Label(cancel_bar, text="取消掛單還沒接上（那支 API 還沒偵察過，見 9.7 第 3 步）",
-                  style="Hint.TLabel").pack(side="left", padx=(8, 0))
+            self.pending_cancel_buttons[kind] = button
 
         frame.rowconfigure(1, weight=1)
         frame.columnconfigure(0, weight=1)
@@ -731,17 +759,26 @@ class UiLayoutMixin:
         """
         版面分四列（見 docs/介面規劃.md 9.2）：
 
-            1. 持股與報酬率　│　作業 ○買賣股票 ●出清股票 ○全持股交易
+            1. 作業 ○買賣股票 ●出清股票 ○全持股交易
             ────────────────────────────────────────────────
-            2. 那個作業自己的設定 —— 整列隨作業換掉（三個預建 Frame 互換）
-            3. 左邊指定股票 │ 右邊 勾帳戶＋執行預覽＋執行按鈕列
+            2. 那個作業自己的設定 │ 狀態文字（讀了誰、跑了哪支巨集）
+               —— 設定那半邊整列隨作業換掉（三個預建 Frame 互換），
+                  狀態那半邊三個作業共用同一份，掛在外層不跟著換
+            3. 左欄 執行帳戶（讀取按鈕＋兩欄表格）│ 右欄 指定股票（上）／執行預覽（下）
 
-        重點是**右半邊三個作業共用同一份 widget，不複製**：三個作業的差別只有
-        「左邊那格要填什麼」跟「張數與價格從哪來」，帳戶勾選、執行預覽、依序
-        執行、多輪、自動送出逐字相同，拆成三個分頁等於把這一整套複製三份，
-        而且「現在在跑什麼」會變成三個地方要看。
+        重點是**三個作業共用同一份 widget，不複製**：三個作業的差別只有
+        「第二列要填什麼」跟「張數與價格從哪來」，帳戶、執行預覽、依序執行、
+        多輪、自動送出逐字相同，拆成三個分頁等於把這一整套複製三份，而且
+        「現在在跑什麼」會變成三個地方要看。
 
-        目前只有「出清股票」的行為真的接上了（見 ui_order._order_job_ready）。
+        2026/09/01 帳戶那一格換過三種形狀，第三種是定案（每一種都是使用者指定）：
+        checkbox 多選 → 第一列的單選下拉 → 左欄 radiobutton 清單 → **左欄的兩欄
+        Treeview（帳戶／今年報酬率），一次只能選一位**（見 9.3 第 5 點，元件為什麼
+        是 Treeview 見 _build_order_accounts）。「讀取持股」跟著搬進那一格
+        的最上面——它讀的就是表裡選中的那一位，兩件事擺在一起才看得出因果。
+
+        目前只有「出清股票」與「買賣股票」的行為真的接上了
+        （見 ui_order._order_job_ready）。
         """
         frame = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(frame, text="  下單  ")
@@ -749,28 +786,23 @@ class UiLayoutMixin:
         top = ttk.Frame(frame, padding=(0, 0, 0, 6))
         top.grid(row=0, column=0, sticky="ew")
 
-        # 「持股與報酬率」排在最前面：讀資料是整個分頁的起點，先讀完才知道
-        # 有哪些持股可選、B17 報酬率排序長什麼樣（2026/08/28 使用者要求調整
-        # 順序——跟選哪個作業比起來，讀不讀資料才是決定接下來能不能動作的
-        # 第一步）。
-        self.order_refresh_button = ttk.Button(top, text="持股與報酬率",
-                                               command=self.refresh_order_data,
-                                               bootstyle="primary-outline")
-        self.order_refresh_button.pack(side="left")
-
         # 「作業」三選一：買賣股票／出清股票／全持股交易（見 docs/介面規劃.md
         # 9.2）。這一列是「要做哪一種事」，下面那一列是「這種事自己的設定」，
         # 兩列的層級不一樣——中間用一條橫線斷開，不要讓兩列看起來像同一組
         # 選項（跟原本盤前/盤中與賣/買之間那條直線同一個理由）。
-        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=(16, 0), pady=2)
-        ttk.Label(top, text="作業").pack(side="left", padx=(16, 0))
+        #
+        # 它排在「讀取持股」左邊，因為作業是上位選擇，不是跟讀取平行的
+        # 另一個選項：切作業會把股票清單整批清空（ui_order._on_order_job_changed），
+        # 而且「讀取」要讀什麼是它決定的——只有買賣股票會順便讀下單試算
+        # M14:N18、只有出清・盤中會順便跑「更新股價」巨集。反過來擺（2026/08/28
+        # ～08/31 的版本）等於請人先讀一次、再選作業，只要作業跟預設值不同就得
+        # 再讀第二次；出清・盤中那種更隱性，讀是讀到了，只是 I4:I8 停在上次
+        # 巨集留下的舊價，不會報錯。
+        ttk.Label(top, text="作業").pack(side="left")
         for value in (orders.JOB_TRADE, orders.JOB_CLEAR, orders.JOB_FULL):
             ttk.Radiobutton(top, text=orders.JOB_NAMES[value], variable=self.order_job,
                             value=value, style="Choice.TRadiobutton",
                             command=self._on_order_job_changed).pack(side="left", padx=(8, 0))
-
-        self.order_status = ttk.Label(top, text="", style="Hint.TLabel")
-        self.order_status.pack(side="left", padx=(16, 0))
 
         ttk.Separator(frame, orient="horizontal").grid(row=1, column=0, sticky="ew")
 
@@ -789,49 +821,80 @@ class UiLayoutMixin:
             if key != self.order_job.get():
                 box.grid_remove()
 
+        # 狀態文字接在第二列後面（買賣股票就是「零股」右邊，2026/09/01 使用者
+        # 指定）。它**不放進那三個互換的 Frame 裡**，而是跟它們一樣掛在 job_bar
+        # 上、佔右邊那一格：三個作業共用同一份狀態，塞進去就要複製三份，切一次
+        # 作業還要把話重抄一次。
+        #
+        # 位置在這一列換過三次（同一天）：第一列的尾巴 → 自己一整列 → 這裡。
+        # 自己一列是為了讓路給當時排在第一列的帳戶選單與讀取按鈕，那兩個都搬進
+        # 左欄之後就不必了；併回第二列還省下一整列高度，那高度本來是從執行預覽
+        # 身上扣的。
+        ttk.Separator(job_bar, orient="vertical").grid(row=0, column=1, sticky="ns",
+                                                       padx=(16, 0), pady=2)
+        self.order_status = ttk.Label(job_bar, text="", style="Hint.TLabel")
+        self.order_status.grid(row=0, column=2, sticky="w", padx=(16, 0))
+
+        # 左欄執行帳戶、右欄「指定股票 ／ 執行預覽」上下疊（見 docs/介面規劃.md
+        # 9.2）。三個面板量出來的最大需求不一樣，所以位置不是隨便擺的：
+        #
+        #   執行帳戶    20 組 × 一列   剛好吃滿一整欄      → 獨佔左欄
+        #   指定股票    最多 5 檔      吃不滿一整欄        → 右欄上緣一條帶狀
+        #   執行預覽    5 檔（一位）   跳過的列也照列      → 剩下全部
         body = ttk.Panedwindow(frame, orient="horizontal")
         body.grid(row=3, column=0, sticky="nsew")
         frame.rowconfigure(3, weight=1)
         frame.columnconfigure(0, weight=1)
+        self._build_order_accounts(body)
 
-        self._build_order_stocks(body)
-        self._build_order_right(body)
+        # 上下分隔做成可拖的：會長的是預覽，指定股票有上限，彈性留給預覽。
+        # 存成屬性是因為「指定股票」加減一檔要跟著把分隔推到新位置——ttk 的
+        # Panedwindow 只在第一次排版時照子元件的 reqheight 定分隔位置，之後子元件
+        # 長高了它不會自己跟（見 ui_order._resize_order_stock_panel）。
+        right = ttk.Panedwindow(body, orient="vertical")
+        self.order_body_paned = right
+        body.add(right, weight=1)
+        self._build_order_stocks(right)
+        self._build_order_preview(right)
         # 執行按鈕上的字是算出來的（作業／單位／時機，見 ui_order._order_exec_label），
         # 不能只靠使用者切了什麼才更新——開機那一次也要算一次，不然按鈕會停在
         # 下面寫死的那個預設字串上。
         self._update_order_exec_ui()
 
-    def _build_order_unit(self, parent):
+    def _build_order_unit(self, parent, job):
         """
         「單位」整張／零股，買賣股票與出清股票兩張第二列各畫一組。兩組綁的是
         同一個變數（self.order_unit），Tk 會自己讓它們保持一致，不必手動同步。
 
-        零股還沒實作（9.7 第 4 步），先 disabled——看得到、選不到，跟原本
-        「買」那顆單選鈕同一種做法：留著讓人知道有這個東西，不整個藏起來。
+        還沒接上的那一段 disabled——看得到、選不到，跟原本「買」那顆單選鈕同
+        一種做法：留著讓人知道有這個東西，不整個藏起來。要問的是「這個作業的
+        這個單位」而不是一個共用的清單（所以要傳 job 進來）：零股在買賣股票是
+        照試算股數送出去，在出清股票是另一套流程，兩邊各自接（見
+        orders.UNITS_READY）。
+
+        兩組單選鈕共用一個變數的副作用在 ui_order._on_order_job_changed 收尾：
+        切到另一個作業時，如果現在選的單位在那邊還沒接上，要把它扳回整張，
+        不然畫面上是灰的、變數卻停在選不到的那一個。
         """
         ttk.Label(parent, text="單位").pack(side="left")
         for value in (orders.UNIT_LOT, orders.UNIT_ODD):
             ttk.Radiobutton(parent, text=orders.UNIT_NAMES[value], variable=self.order_unit,
                             value=value, style="Choice.TRadiobutton",
-                            state="normal" if value in orders.UNITS_READY else "disabled",
+                            state="normal" if orders.unit_ready(job, value) else "disabled",
                             command=self._on_order_unit_changed).pack(side="left", padx=(8, 0))
 
     def _build_order_job_trade(self, parent):
         """
         買賣股票的第二列：張數與價格都來自 Excel 的下單試算 M14:N18，人不必填
-        任何數字，所以這一列只有「單位」跟一顆觸發 `初始化下單` 巨集的按鈕
-        （M14:M18 ← O4:O8、N14:N18 ← I4:I8，見 9.1 那張表）。
+        任何數字，所以這一列只剩「單位」一項設定。
 
-        「初始化下單」會把 M14:N18 蓋掉，所以按下去會先跳確認、列出會動到哪幾個
-        分頁（見 ui_order.run_init_order）。零股那半段還沒接（下單表單的交易盤別
-        要選哪個值還沒人看過），所以「單位」目前只有整張選得到。
+        「執行 更新→自動計算」那顆按鈕在「指定股票」那一格的「新增」右邊
+        （2026/08/31 使用者指定，見 _build_order_stocks），不在這一列。零股那半段
+        還沒接（下單表單的交易盤別要選哪個值還沒人看過，見 order_fill.TAB1_ODD），
+        所以「單位」目前只有整張選得到。
         """
         box = ttk.Frame(parent)
-        self._build_order_unit(box)
-        self.order_init_button = ttk.Button(box, text="初始化下單",
-                                            command=self.run_init_order,
-                                            bootstyle="secondary-outline")
-        self.order_init_button.pack(side="left", padx=(16, 0))
+        self._build_order_unit(box, orders.JOB_TRADE)
         return box
 
     def _build_order_job_clear(self, parent):
@@ -841,7 +904,7 @@ class UiLayoutMixin:
         頂層開關，是這個作業自己的設定）。
         """
         box = ttk.Frame(parent)
-        self._build_order_unit(box)
+        self._build_order_unit(box, orders.JOB_CLEAR)
 
         ttk.Separator(box, orient="vertical").pack(side="left", fill="y", padx=(16, 0), pady=2)
         ttk.Label(box, text="時機").pack(side="left", padx=(16, 0))
@@ -869,7 +932,7 @@ class UiLayoutMixin:
         全持股交易的第二列：不必指定股票，整張與零股各自一個追價檔數，加上一顆
         觸發 `自動計算` 巨集的按鈕——那支巨集算出來的 M14:N18 就是「這一輪打算
         做什麼」的完整計畫，人看過執行預覽才按下去（9.5：兩步，不是一顆按鈕
-        直通下單）。
+        直通下單）。位置跟買賣股票那顆對齊：設定在左、一條直線、動作在右。
 
         全部先 disabled：這個作業的行為要到 9.7 第 4 步才接上，而且 `自動計算`
         還會暫時改寫 E/F/B8（9.6 第 3 點），不是可以隨手按著玩的東西。
@@ -881,52 +944,161 @@ class UiLayoutMixin:
             ttk.Entry(box, textvariable=var, width=4, font=(self.family, FONT_SIZE),
                       state="disabled").pack(side="left", padx=(4, 0))
             ttk.Label(box, text="檔", style="Hint.TLabel").pack(side="left")
+        ttk.Separator(box, orient="vertical").pack(side="left", fill="y", padx=(16, 0), pady=2)
         self.order_calc_button = ttk.Button(box, text="跑自動計算", state="disabled",
                                             bootstyle="secondary-outline")
         self.order_calc_button.pack(side="left", padx=(16, 0))
         return box
 
+    def _build_order_accounts(self, paned):
+        """
+        左欄：執行帳戶，一張兩欄的表（帳戶／今年報酬率），每一列一位。
+
+        整格都是 Excel 那一頭的答案，**開檔就有，不必等登入**（2026/09/01 使用者
+        要求）：一份持股管理表的分頁本來就是一位交易人一頁，名字與 B17 一起讀回來
+        （見 excel_io.list_account_sheets 與 ui_order.refresh_order_accounts）。
+        列本身在 ui_order._fill_order_accounts 裡動態建。
+
+        **Treeview，`selectmode="browse"`（單選）**，跟更新分頁的交易人名單同一
+        個元件、同一個形狀（2026/09/01 使用者要求兩邊一致）。這一格 09/01 一天
+        之內換過三種：checkbox 多選 → 第一列的單選下拉 → 左欄 radiobutton 清單
+        → 這個。Treeview 在這個專案本來是「不得已才用」的元件（見設計原則第十三
+        節：畫不出格線、欄寬不會照內容自動調），這裡的不得已就是**一致性**：
+        兩份看起來像同一種東西的名單，用兩種不同元件會讓人以為它們的互動方式
+        不一樣。
+
+        單選這件事因此改由「一次只有一列被選取」來表達，不再是 radiobutton 的
+        圓點——所以 ui_order 那邊要多做兩件事：`<<TreeviewSelect>>` 連程式自己
+        設定選取也會觸發（radiobutton 的 command 不會），重畫清單時得擋掉那次
+        假的「使用者換人了」；忙碌時也不能只把元件變灰，還要把選取扳回去
+        （見 _fill_order_accounts 與 _on_order_account_changed 的說明）。
+
+        這一格**沒有按鈕**：清單自己會進來，而「讀取持股」是對選中那一位做的事，
+        擺在右邊「指定股票」那一列（見 _build_order_stocks）——它讀回來的東西
+        （持股、股價、試算）也是給那一列的股票下拉用的。
+
+        獨佔一整欄是量過的：20 組帳號一列疊一列大約 480 像素，剛好吃滿一欄，
+        再多也不會（帳號數有上限）。寬度鎖 260（做法同指定股票欄：
+        `grid_propagate(False)` 才擋得住子元件反過來把這一欄撐寬）；兩欄加起來
+        200、捲軸與內距再吃掉一些，260 塞得下。weight 給 0：視窗變寬時多出來的
+        空間全部給右邊，這一欄不必跟著長。
+        """
+        box = ttk.LabelFrame(paned, text="執行帳戶", padding=8)
+        box.configure(width=wide(260))
+        box.grid_propagate(False)
+        paned.add(box, weight=0)
+
+        # #0（樹狀那一欄）當「帳戶」，跟更新分頁的名單一樣——那一欄不必自己
+        # 建，而且是唯一能靠左對齊放名字的欄。show="tree headings" 才會同時
+        # 畫出 #0 與表頭。
+        self.order_accounts = ttk.Treeview(box, columns=("rate",), show="tree headings",
+                                           selectmode="browse")
+        self.order_accounts.heading("#0", text="帳戶")
+        self.order_accounts.column("#0", width=wide(120), minwidth=wide(80), stretch=True)
+        self.order_accounts.heading("rate", text="今年報酬率")
+        self.order_accounts.column("rate", width=wide(80), minwidth=wide(64),
+                                   anchor="e", stretch=False)
+        self.order_accounts.grid(row=0, column=0, sticky="nsew")
+        acc_bar = ttk.Scrollbar(box, orient="vertical", command=self.order_accounts.yview)
+        acc_bar.grid(row=0, column=1, sticky="ns")
+        self.order_accounts.configure(yscrollcommand=acc_bar.set)
+        self.order_accounts.bind("<<TreeviewSelect>>",
+                                 lambda _e: self._on_order_account_changed())
+
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+
     def _build_order_stocks(self, paned):
         """
-        左邊：指定股票，一檔一列。盤前模式比重／價格各自設定（見 CLAUDE.md
+        右欄上緣：指定股票，一檔一列。盤前模式比重／價格各自設定（見 CLAUDE.md
         的討論決定）；盤中模式只有比重，價格改成整批共用的「追價檔數」
-        （上面 top 那一列）。
+        （第二列那一排）。
+
+        高度**跟著實際加了幾檔長，最多三檔**（2026/08/31 使用者指定「留三檔的
+        空間就好」），第四、五檔用捲軸。不是固定三檔高：這一格空著的時候佔的
+        每一像素都是從下面的執行預覽身上扣的，而預覽的列數是「帳戶 × 股票」
+        的交叉（20 組 × 5 檔 ＝ 100 列），它才是永遠不夠的那個。重算在
+        ui_order._resize_order_stock_panel。
+
+        高度鎖在 **Canvas** 上而不是外面的 LabelFrame：LabelFrame 的 reqheight
+        是子元件撐出來的，而 Canvas 的 reqheight 跟它裡面畫了什麼無關（內容是
+        create_window 掛上去的，不是它的子元件在排版），所以鎖 LabelFrame 只會
+        鎖到 Canvas 那個「378×265」的預設值，加幾檔都不動——量過才會發現，
+        畫面上看起來只是「怎麼一直這麼高」。
+
+        weight 給 0，多出來的高度全部給下面的執行預覽——這一格最多就 5 檔
+        （9.1 的 `stock_limit = 5`），預覽卻是帳戶 × 股票 的交叉，該長的是它。
+
+        原本這一格在左欄、寬度鎖 300（盤前一列要塞「比重」「價格」兩組
+        label+entry，窄了最後那個「元」會被切掉）。搬到右欄之後寬度綽綽有餘，
+        那個鎖就不需要了。
         """
         box = ttk.LabelFrame(paned, text="指定股票", padding=8)
-        # ttk Panedwindow 沒有 pane 的 width 選項，初始寬度預設是靠子元件的
-        # reqwidth 撐出來的——只調 weight 不夠，子元件（下面這個下拉選單、
-        # 說明文字）本身還是會把這一格撐寬。這裡改成直接鎖死寬度
-        # （grid_propagate(False)），子元件多寬都不會反過來撐大這一格，
-        # 讓出來的空間才會確實跑到右邊的執行預覽 Treeview
-        # （2026/08/28 使用者反映「備註」欄還是被切到看不全，調過 weight
-        # 一次沒解決，這次換這個做法）。
-        # 300 這個數字不是隨便抓的下限：盤前模式一列要同時塞「比重」「價格」
-        # 兩組 label+entry（見 _build_order_stock_row），實測窄於這個寬度
-        # 那一列最後的「元」會被切到看不見——這個 Canvas 只有垂直捲軸，横向
-        # 沒有任何補救辦法，鎖寬度時不能只顧右邊、把左邊自己的欄位擠壞。
-        box.configure(width=wide(300))
-        box.grid_propagate(False)
-        paned.add(box, weight=1)
+        paned.add(box, weight=0)
 
+        # 這一列用 grid 不用 pack：最左邊那顆「執行 更新→自動計算」只有買賣股票
+        # 有，切到別的作業要收起來，而 grid_remove() 記得住格子位置、放回來會回到
+        # 原位（9.3 第 2 點，跟第二列整列互換同一條規矩）。
         pick = ttk.Frame(box)
         pick.grid(row=0, column=0, sticky="ew")
+        # 觸發「更新股價」「自動計算」兩支巨集，把 M14:N18 重算一遍再讀回來
+        # （見 excel_io.run_update_price_macro／run_auto_calc_macro）。只有買賣
+        # 股票用得到那兩格，所以只有那個作業看得到這一顆（切換在
+        # ui_order._on_order_job_changed）。
+        #
+        # 位置換過四次，這是最新的一次（2026/09/01 使用者指定）：第二列 → 右下
+        # 動作列 → 第二列 → 「新增」右邊 → 這裡，整列最前面。理由是**它排在
+        # 選股票之前**：一輪的動作是「選帳戶 → 讀取 → 更新→自動計算 → 挑股票」，
+        # 按下去算出來的試算就是下面每一檔那句「試算 N 股」的來源，先算完再挑，
+        # 由左到右讀就是實際的操作順序。
+        #
+        # 間距掛在自己的右邊（padx=(0, 16)）而不是下一格的左邊：切到別的作業時
+        # 它整格 grid_remove 掉，那 16 像素要跟著一起消失——掛在下拉選單左邊的話,
+        # 按鈕不見了、選單卻還往右縮排 16 像素，看起來像沒對齊。
+        self.order_auto_calc_button = ttk.Button(pick, text="執行 更新→自動計算",
+                                                 command=self.run_auto_calc,
+                                                 bootstyle="primary-outline")
+        self.order_auto_calc_button.grid(row=0, column=0, sticky="w", padx=(0, 16))
+        if self.order_job.get() != orders.JOB_TRADE:
+            self.order_auto_calc_button.grid_remove()
+
+        # 「讀取持股」：把選中那一位的持股（E/F）、股價（I）、下單試算（M14:N18）
+        # 讀進來，也就是下面那個股票下拉的候選從哪來。2026/09/01 從左欄搬過來、
+        # 順便改名——原本叫「讀取持股」擺在帳戶清單上面，而報酬率現在
+        # 開檔就自己進來了（見 ui_order.refresh_order_accounts），名字裡那一半
+        # 不再是它的工作。
+        #
+        # 排在「更新→自動計算」右邊、股票下拉左邊，還是由左到右就是操作順序：
+        # 點人 → 算試算 → 把它讀進來 → 挑股票。
+        self.order_refresh_button = ttk.Button(pick, text="讀取持股",
+                                               command=self.refresh_order_data,
+                                               bootstyle="primary-outline")
+        self.order_refresh_button.grid(row=0, column=1, sticky="w", padx=(0, 16))
+
         self.order_stock_pick = ttk.Combobox(pick, width=15, font=(self.family, FONT_SIZE))
-        self.order_stock_pick.pack(side="left")
-        # 存成屬性是因為它會跟「持股與報酬率」一起變灰：盤中模式按「新增」會
-        # 附帶跑一次「更新股價」巨集（見 ui_order._refresh_added_stock_price），
+        self.order_stock_pick.grid(row=0, column=2, sticky="w")
+        # 存成屬性是因為它會跟「讀取持股」一起變灰：盤中模式按「新增」
+        # 會附帶跑一次「更新股價」巨集（見 ui_order._refresh_added_stock_price），
         # 那是一條會動 COM 的路，不能在別人正在動同一份活頁簿的時候按下去。
         self.order_add_button = ttk.Button(pick, text="新增", command=self.add_order_stock,
                                            bootstyle="primary-outline")
-        self.order_add_button.pack(side="left", padx=(8, 0))
+        self.order_add_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
 
-        # 加進來的股票一樣用 Canvas＋Scrollbar 包起來（跟帳戶勾選區同一個
+        # 加進來的股票用 Canvas＋Scrollbar 包起來（原本帳戶那一格也是這樣做的，
         # 理由）：這裡原本用 sticky="new" 的 Frame，加多了會把 LabelFrame
         # 撐得比視窗還高，超出視窗底下的部分沒有任何辦法捲到——「按新增
         # 沒反應」很可能就是新那一列其實加進去了，只是被撐到看不見的地方。
-        canvas = tk.Canvas(box, highlightthickness=0)
-        canvas.grid(row=1, column=0, sticky="nsew")
+        # 高度跟著實際加了幾檔走（最多三檔），由 ui_order._resize_order_stock_panel
+        # 在清單結構變動時重算；這裡只給空清單時的初始值。
+        canvas = tk.Canvas(box, height=ORDER_STOCK_ROW_H, highlightthickness=0)
+        # pady 那 6 像素是「新增」那一列跟第一檔之間的呼吸空間。沒有它，第一檔
+        # 會直接貼著「新增」按鈕的下緣——一檔改成一行之後（原本兩行，中間還有
+        # 一行墊著）就變得很明顯，看起來像那一列是選單列的一部分。跟左欄帳戶那
+        # 一格「讀取」按鈕與清單之間那 8 像素是同一件事。
+        canvas.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        self.order_stock_canvas = canvas
         stock_bar = ttk.Scrollbar(box, orient="vertical", command=canvas.yview)
-        stock_bar.grid(row=1, column=1, sticky="ns")
+        stock_bar.grid(row=1, column=1, sticky="ns", pady=(6, 0))
         canvas.configure(yscrollcommand=stock_bar.set)
 
         self.order_stock_frame = ttk.Frame(canvas)
@@ -944,50 +1116,29 @@ class UiLayoutMixin:
         box.rowconfigure(1, weight=1)
         box.columnconfigure(0, weight=1)
 
-    def _build_order_right(self, paned):
-        """右邊：選帳戶（報酬率排序）＋執行預覽。"""
-        box = ttk.Frame(paned)
-        paned.add(box, weight=3)
+    def _build_order_preview(self, paned):
+        """
+        右欄下半：執行預覽那張表，以及它下面的動作列、多輪那一列、狀態文字。
 
-        accounts = ttk.LabelFrame(box, text="選擇執行的帳戶", padding=8)
-        accounts.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(accounts, text="依今年報酬率由低到高排序",
-                 style="Hint.TLabel", wraplength=wide(480)).grid(
-            row=0, column=0, columnspan=2, sticky="w")
-
-        # 真的 checkbox，不是「選取列＝有勾」那種要猜互動方式的畫法（Listbox
-        # 的多選模式看起來就是個藍底選取，不像勾選框）。帳戶數不固定（最多
-        # 20 組），checkbox 疊起來可能比面板高，所以外面包一層 Canvas＋
-        # Scrollbar 做捲動；每個帳戶的 Checkbutton 本身在 ui_order.py 裡動態建。
-        canvas = tk.Canvas(accounts, height=wide(150), highlightthickness=0)
-        canvas.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
-        acc_bar = ttk.Scrollbar(accounts, orient="vertical", command=canvas.yview)
-        acc_bar.grid(row=1, column=1, sticky="ns", pady=(4, 0))
-        canvas.configure(yscrollcommand=acc_bar.set)
-
-        self.order_account_inner = ttk.Frame(canvas)
-        window_id = canvas.create_window((0, 0), window=self.order_account_inner, anchor="nw")
-        self.order_account_inner.bind(
-            "<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        # 內層 Frame 寬度跟著 Canvas 走，checkbox 才會撐滿整個面板寬度，
-        # 不會因為文字比較短就縮成一小塊、右邊留一大片空白看起來像沒放滿。
-        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(window_id, width=e.width))
-
-        def _on_wheel(event):
-            canvas.yview_scroll(int(-event.delta / 120), "units")
-
-        # 滑鼠移進這塊才接手滾輪，離開就放掉——不然這裡的滾輪會蓋掉整個
-        # 視窗其他地方原本的滾動。
-        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_wheel))
-        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
-
-        accounts.columnconfigure(0, weight=1)
-
-        preview = ttk.LabelFrame(box, text="執行預覽（依序）", padding=8)
-        preview.grid(row=1, column=0, sticky="nsew")
-        columns = ("order", "sheet", "side", "stock", "held", "lots", "price", "note")
+        weight 給 1、上面的指定股票給 0：預覽的列數是「帳戶 × 股票」的交叉
+        （20 組 × 5 檔 ＝ 100 列，而且跳過的列也照列），另外兩個面板都有上限，
+        所以視窗多出來的高度全部要流到這裡。
+        """
+        preview = ttk.LabelFrame(paned, text="執行預覽（依序）", padding=8)
+        paned.add(preview, weight=1)
+        # 欄位順序：左半邊是「這一輪會送出什麼」（帳戶／買賣／股票／張數／價格），
+        # 右半邊是「為什麼是這樣」（持股／備註）。持股是算張數的依據、不是會送出去
+        # 的東西，所以擺在備註前面跟它同一區，不夾在股票與張數中間（2026/08/31
+        # 使用者指定）。改這一行的話 ui_order._render_order_preview 那個 values
+        # tuple 要跟著換順序——Treeview 是照位置對欄位的，錯了不會報錯，只是每一
+        # 欄顯示別欄的值。
+        columns = ("order", "sheet", "side", "stock", "lots", "price", "held", "note")
+        # 「張數」那一欄的欄名跟著單位換（張數／股數，見
+        # orders.UNIT_COLUMN_TITLES）——欄位鍵一直是 "lots"，只有顯示的字會換，
+        # 換的地方在 ui_order._recompute_order_preview。這裡填的是開機那一次的
+        # 預設值（開機一定是整張）。
         titles = {"order": "順序", "sheet": "帳戶", "side": "買賣", "stock": "股票", "held": "持股",
-                 "lots": "張數", "price": "價格", "note": "備註"}
+                 "lots": orders.UNIT_COLUMN_TITLES[orders.UNIT_LOT], "price": "價格", "note": "備註"}
         # 窄欄位（順序／買賣／持股／張數）都是短數字或單一個字，內容範圍本來
         # 就小，壓小一點沒關係。held 加了千分位逗號，可能到「1,234,567」這種
         # 長度，壓太窄反而看不到完整數字（Treeview 超出欄寬不會換行也不會
@@ -1013,8 +1164,8 @@ class UiLayoutMixin:
             "note": col_width(self.family, note_candidates, minimum=wide(160)),
             "price": col_width(self.family, price_candidates, minimum=wide(70)),
         }
-        # 「股票」「帳戶」欄的候選內容要等重新整理讀到股票清單／帳戶名單才
-        # 知道，這裡先用預設寬度墊著，讀到資料後由 ui_order.py
+        # 「股票」「帳戶」欄的候選內容要等「讀取持股」讀到股票清單／
+        # 帳戶名單才知道，這裡先用預設寬度墊著，讀到資料後由 ui_order.py
         # _resize_order_stock_column／_resize_order_sheet_column 重新量寬。
         self.order_preview = ttk.Treeview(preview, columns=columns, show="headings", height=10)
         for key in columns:
@@ -1046,6 +1197,7 @@ class UiLayoutMixin:
         # 講現在卡在第幾筆、在等什麼。
         exec_bar = ttk.Frame(preview)
         exec_bar.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
         self.order_exec_button = ttk.Button(exec_bar, text="開始下單（依序執行）",
                                             command=self.start_order_execution,
                                             bootstyle="danger")
@@ -1055,6 +1207,10 @@ class UiLayoutMixin:
         # ——2026/08/29 使用者要求，出清股票時想在按下「開始下單」之前就看到
         # 實際會用的價位，不是等依序跑到那一筆才臨時查。跟 order_ticks_entry
         # 同一個道理，盤前模式底下維持看得到但 disabled，不整個藏起來。
+        #
+        # 它留在這一列、不像兩顆巨集按鈕那樣擺到第二列去，是因為它查的是網站的
+        # 即時報價、算的是這一輪實際會送出去的價格——跟上面那張執行預覽是同一
+        # 件事的兩半，不是「這個作業的設定」。
         self.order_quotes_button = ttk.Button(exec_bar, text="查詢委買賣",
                                               command=self.fetch_order_quotes,
                                               bootstyle="info-outline", state="disabled")
@@ -1093,6 +1249,3 @@ class UiLayoutMixin:
 
         preview.rowconfigure(0, weight=1)
         preview.columnconfigure(0, weight=1)
-
-        box.rowconfigure(1, weight=1)
-        box.columnconfigure(0, weight=1)

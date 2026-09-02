@@ -105,6 +105,31 @@ def account_code(session):
 # _revisit 仍然用 /account/，理由是成本不是正確性：welcome 一載入就自己打
 # query610 與 queryInstantAccount_new，拿它當檢查點等於每次換人多兩趟往返，
 # 而 /account/ 那一頁是接下來本來就要去查資料的地方，順路。
+#
+# ---- 「乾脆連 _revisit 那次 goto 都不要」已經評估過，決定不做（2026/08/30）----
+# 記在這裡是為了讓下一個想到同一個點子的人不用再推一次（原本記在 todo.txt C5，
+# 那個檔案已經清掉）。
+#
+# 點子：登入後就停在 welcome，之後每次換人只換 cookie、一次都不導頁，_revisit
+# 整個拿掉。技術上真的做得到，用瀏覽器 console 逐項驗過：welcome 有 common.js
+# （B64_XOR_Encode 是 function、XOR_KEY 是 string）與 branch_id / cust_id /
+# account；從 welcome 用程式原樣的參數打 queryInstantAccount_new 回 status 200、
+# retcode 000000（伺服器不挑哪一頁發的請求）；FETCH_JS 用絕對路徑加
+# credentials: 'same-origin'，就地重打帶的就是當下那組 cookie。
+#
+# 不做的理由是它拿掉的東西：_revisit 那三道核對（還在不在 /account/、
+# sessionStorage 有沒有值、身分對不對）沒了之後，身分安全只剩查詢回應裡每一列的
+# bhno/cseq 那一道。而那條防線的下游是真錢——更新 -> 寫 E/F/B8 -> 下單分頁讀
+# Excel 算張數 -> 真的送出委託，寫錯人的話會用 B 的持股算出張數、掛在 A 的帳上，
+# 而且全程不報錯。省下來的其實很少：最常按的「更新（某一位）」只省一次頁面載入
+# （約 1~2 秒）。拿這個換「委託掛錯帳戶而且不報錯」，不划算。
+#
+# 哪天又想省那些重複往返，走這條零風險的路：type=4 那一頁自己載入時就會打一次
+# queryInstantAccount_new（等於每次 _revisit 都重複打一次程式接著要自己打的查詢），
+# 那不是防線造成的。找一頁「有 common.js 但載入時不自動查」的 /account/ 頁，把
+# _open_account_page 指過去就好——導頁還在、三道核對一動不動，重複的往返消失。
+# 找法：把 account/layoutRWD.jsp?type= 的數字換幾個開起來，看 console 有沒有冒出
+# {CMD: ...}，挑一個沒有的。
 PAGE_READY_JS = """
 () => !location.pathname.includes('/account/')
    || (typeof B64_XOR_Encode === 'function' && typeof XOR_KEY !== 'undefined'

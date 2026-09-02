@@ -22,10 +22,10 @@ paramInfo 有兩個容易猜錯的地方（見 `order_recon.py` 開頭）：`bra
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
 from fetch import account_code
-from order_recon import (APCODE_NAMES, BS_FLAG_NAMES, BUYSELL_NAMES, ORDER_PAGE,
-                         describe_outcome)
+from order_recon import (BS_FLAG_NAMES, BUYSELL_NAMES, ORDER_PAGE, PRICE_FLAG_NAMES,
+                         describe_outcome, describe_trade)
 from recon import account_codes, query
-from util import to_num
+from util import show, to_num
 
 # 委託查詢頁「可以打 AJAX 了」的條件：加密參數用的 common.js 全域函式真的載好了。
 # 刻意不等 networkidle——這個網站的頁面有背景請求一直在跑，等它安靜是在等一件我們
@@ -43,38 +43,77 @@ def _int(value):
         return 0
 
 
+def _date(text):
+    """網站的 yyyymmdd → yyyy/mm/dd。不是 8 位數字就原樣回去，不要自己補。"""
+    value = str(text or "").strip()
+    if len(value) == 8 and value.isdigit():
+        return f"{value[:4]}/{value[4:6]}/{value[6:8]}"
+    return value
+
+
+def _time(text):
+    """
+    網站的 hhmmssSSS → hh:mm:ss。
+
+    毫秒不印：網站畫面上有（09:00:43.783），但那三位數是用來分辨「同一秒送出的
+    兩筆誰先誰後」的，人在這一頁核對的是「這張單是幾點下的」，多三位只是變窄。
+    """
+    value = str(text or "").strip()
+    if len(value) >= 6 and value.isdigit():
+        return f"{value[:2]}:{value[2:4]}:{value[4:6]}"
+    return value
+
+
 def normalize(row, sheet):
     """
     把 `queryOrder` 的一列整理成掛單分頁直接畫得出來的欄位。
 
-    「未成交」是自己算的（原委託 − 成交 − 取消）：網站回的欄位裡沒有這個數字，
+    欄位是照網站「委託查詢」那張表一欄一欄對過來的（2026/08/31 使用者要求兩邊
+    對得起來，才好拿程式的表跟網頁的表互相核對），只有最前面的「帳戶」是這裡
+    多的一欄——網站一次只看得到登入的那一個人，程式是所有帳戶攤在同一張表上，
+    不標名字就分不出誰是誰。
+
+    「有效數量」是自己算的（原委託 − 已成交 − 已取消）：網站回的欄位裡沒有這個
+    數字（`celable` 不是數量，那筆 IOC 失敗單的 orgqty 是 1、celable 卻是 2），
     但那正是「現在還掛在外面多少」，也是取消掛單真正會動到的量（9.7 第 3 步）。
 
-    `open` 是「這一列還掛在外面、取消得掉」：委託本身沒失敗，而且還有沒成交也
-    沒被取消的量。第 3 步的三顆取消按鈕就是照這個旗標挑要送哪幾筆，這一步先
-    只拿它決定畫面上要不要淡化顯示。
+    `open` 是「這一列還掛在外面、取消得掉」，用的是網站自己的判斷：`celable`
+    等於 `'1'` 才畫得出那一列的勾選框（見「委託查詢」頁 renderTable 裡的
+    celBox，2026/08/31 偵察確認）。**不要改回自己算「原委託 − 已成交 − 已取消
+    > 0」**——那個算式目前結論一樣，但它是推的，`celable` 是網站給的答案，而
+    取消掛單那三顆按鈕就是照這個旗標挑要送哪幾筆（10.3 第一點）。順便擋掉
+    errcode 失敗的那幾列：那種列本來就沒有勾選框。
     """
     org, mat, cel = _int(row.get("orgqty")), _int(row.get("matqty")), _int(row.get("celqty"))
     left = max(org - mat - cel, 0)
     ok = str(row.get("errcode") or "") == "00000000"
+    cancellable = str(row.get("celable") or "").strip() == "1"
     side = (row.get("buysell") or "").strip()
+    # 市價／漲跌停單的 odprice 是 0，那一欄直接印 0 會看起來像「委託價 0 元」，
+    # 所以非限價的改印價格種類（網站自己也是這樣分的，見 PRICE_FLAG_NAMES）。
+    price_flag = str(row.get("priceflag") or "0")
+    price = to_num(row.get("odprice"), None)
     return {
         "sheet": sheet,
+        "ordered_at": f"{_date(row.get('orddate'))} {_time(row.get('ordtime'))}".strip(),
+        "work_date": _date(row.get("workdate")),
+        "ordno": (row.get("ordno") or "").strip(),
         "code": (row.get("stockno") or "").strip(),
+        "trade_text": describe_trade(row),
         "side": side,
         "side_text": BUYSELL_NAMES.get(side, side),
-        "kind_text": APCODE_NAMES.get(row.get("apcode"), row.get("apcode") or ""),
         "flag_text": BS_FLAG_NAMES.get(row.get("bs_flag"), row.get("bs_flag") or ""),
-        "price": to_num(row.get("odprice"), None),
+        "price": price,
+        "price_text": (show(price) if price is not None else "") if price_flag == "0"
+                      else PRICE_FLAG_NAMES.get(price_flag, price_flag),
         "qty": org,
         "matched": mat,
         "cancelled": cel,
         "left": left,
         "status": describe_outcome(row),
-        "ordno": (row.get("ordno") or "").strip(),
-        "open": ok and left > 0,
-        # 取消掛單要用到的欄位還沒全部確認（那支 API 還沒偵察過），先把原始那一列
-        # 整份留著，免得第 3 步發現少帶了什麼又要回頭改這裡的形狀。
+        "open": ok and cancellable,
+        # 原始那一列整份留著：取消掛單認的是委託書號（ordno），但真的出事要對帳
+        # 的時候，errcode/celable/ordstatus 這些沒進欄位的值就在這裡面。
         "raw": row,
     }
 
