@@ -121,6 +121,30 @@ class ConfirmDebugLog:
         except OSError:
             pass
 
+
+def log_row_not_found(sheet, ordno, page, rows, reason):
+    """
+    「missing」／「locked」這兩種也要留痕跡，跟 `ConfirmDebugLog` 目的一樣，只是
+    這裡要留的是「頁面當下那張表長什麼樣子」——不然事後沒辦法分辨這一筆是真的
+    已經成交／被刪掉了，還是表格剛好沒載出來就被讀成空的（2026/09/02 使用者
+    實測：一次取消 20 筆有 5 筆回報 missing，而且完全沒有任何記錄可查，回頭
+    完全沒辦法判斷是哪一種）。純觀察，不影響任何判斷邏輯，跟 `ConfirmDebugLog`
+    共用同一個資料夾與檔名格式，這樣兩種記錄混在同一批時間序上看得出先後。
+    """
+    out_dir = app_dir() / DEBUG_LOG_DIR
+    out_dir.mkdir(exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_sheet = "".join(c if c not in '\\/:*?"<>|' else "_" for c in sheet)
+    path = out_dir / f"{stamp}_{safe_sheet}_取消掛單{reason}.txt"
+    lines = [f"帳戶: {sheet}　委託/預約書號: {ordno}　網址: {page.url}",
+             f"頁面讀到的表格（{len(rows)} 列）："]
+    lines.extend(f"  {row}" for row in rows)
+    try:
+        path.write_text("\n".join(lines), encoding="utf-8")
+    except OSError:
+        pass
+
+
 # 頁面自己那張表：一個 <tbody id="bar<i>"> 一筆委託。欄位位置抄自頁面
 # `#openConfirm` 的 handler（td:eq(3) 委託書號、td:eq(4) 股票、td:eq(6) 買賣別、
 # td:eq(13) 有效數量），不是自己數出來的。沒有勾選框就是這一列刪不掉。
@@ -182,6 +206,26 @@ def _open_page(page):
         pass
 
     return page.evaluate(DUMP_ROWS_JS)
+
+
+def _open_page_until(page, wanted, attempts=3, retry_wait_ms=1000):
+    """
+    找不到要刪的那幾筆不能立刻認定「已經不在了」——`_open_page` 兩道
+    `wait_for_function` 逾時是靜靜放行的，換帳號、換頁的當下表格偶爾就是還沒
+    真的渲染完，讀到的是一張空的或半份的表，不是單子真的消失了
+    （2026/09/02 使用者實測，見 `order_cancel_reservation._find_row` 那邊記的
+    同一起事故：一次取消 20 筆有 5 筆被判定 missing，其實都還掛在外面，重新
+    整批查詢＋取消一次就正常刪掉）。所以缺了任何一筆就重新導頁再讀幾次，真的
+    每一次都湊不齊才死心。
+    """
+    rows = _open_page(page)
+    for _ in range(attempts - 1):
+        got = {row["ordno"] for row in rows}
+        if all(ordno in got for ordno in wanted):
+            break
+        page.wait_for_timeout(retry_wait_ms)
+        rows = _open_page(page)
+    return rows
 
 
 def _verify_dialog(page, expected, sheet, session):
@@ -249,7 +293,7 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
 
     `ordnos` 是委託書號，不是索引——頁面那個 `value` 會隨著新委託整批位移。
     要刪的單如果已經不在頁面上（成交了、剛剛被別人刪了），不算失敗：它會出現在
-    回傳的 `missing` 裡，其餘照樣送出。
+    回傳的 `missing` 裡，其餘照樣送出。找不到會重讀幾次才判定，見 `_open_page_until`。
 
     **例外的兩種意思差很多**：
       - `RuntimeError`：發生在按下確認**之前**（登入不對、按鈕不見了、核對不過），
@@ -263,7 +307,7 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
     if not wanted:
         raise RuntimeError(f"{sheet}：沒有指定要刪哪一筆。")
 
-    rows = _open_page(page)
+    rows = _open_page_until(page, wanted)
     by_ordno = {row["ordno"]: row for row in rows}
 
     targets, missing, locked = [], [], []
@@ -271,10 +315,12 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
         row = by_ordno.get(ordno)
         if row is None:
             missing.append(ordno)
+            log_row_not_found(sheet, ordno, page, rows, "找不到")
         elif not row["cancellable"]:
             # 網站沒畫勾選框就是這一列刪不掉（celable != '1'）——通常是已經成交
             # 或已經刪過了。硬去勾也沒有那個框，據實回報比較有用。
             locked.append(ordno)
+            log_row_not_found(sheet, ordno, page, rows, "刪不掉")
         else:
             targets.append(row)
 

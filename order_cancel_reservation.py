@@ -35,7 +35,7 @@ docs/自動下單與半自動下單規劃.pptx.txt 81-85 行，原始規劃沒�
 
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
-from order_cancel import ConfirmDebugLog, close_dialog
+from order_cancel import ConfirmDebugLog, close_dialog, log_row_not_found
 from order_fill import CONFIRM_IFRAME_SELECTOR, OrderMaybeSubmitted
 from order_query import PAGE_READY_JS
 from order_recon import RESERVE_PAGE
@@ -86,6 +86,25 @@ def _open_page(page):
         pass
 
     return page.evaluate(DUMP_ROWS_JS)
+
+
+def _find_row(page, ordno, attempts=3, retry_wait_ms=1000):
+    """
+    找不到 `ordno` 不能立刻認定「已經不在了」——`_open_page` 兩道
+    `wait_for_function` 逾時是靜靜放行的，換帳號、換頁的當下表格偶爾就是還沒
+    真的渲染完，讀到的是一張空的或半份的表，不是單子真的消失了
+    （2026/09/02 使用者實測：一次取消 20 筆有 5 筆被判定 missing，但那 5 筆
+    其實都還掛在外面——重新整批查詢＋取消一次就正常刪掉，證明是表格沒載完，
+    不是單子真的不見）。所以找不到就重新導頁再讀幾次，真的每一次都讀不到
+    才死心。
+    """
+    rows = _open_page(page)
+    for _ in range(attempts - 1):
+        if any(r["ordno"] == ordno for r in rows):
+            break
+        page.wait_for_timeout(retry_wait_ms)
+        rows = _open_page(page)
+    return rows
 
 
 def _verify_dialog(page, expected_ordno, sheet, session):
@@ -147,7 +166,7 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
     那條路開的是另一份沒偵察過的確認視窗，見檔頭說明）。**每一筆都重新導頁重讀
     一次表格**——上一筆刪成功後 orderConfirmRWD.html 自己會呼叫
     `parent.renderTable()` 把表重畫，`bar{i}` 的索引會跟著位移，沿用舊的 `bar`
-    id 會點錯列。
+    id 會點錯列。找不到要刪的那筆會重讀幾次才判定 missing，見 `_find_row`。
 
     例外的兩種意思跟 order_cancel.cancel_orders 一樣：
       - `RuntimeError`：發生在按下確認之前，這一筆沒送出，重試安全。
@@ -160,13 +179,15 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
 
     results, missing, locked = [], [], []
     for ordno in wanted:
-        rows = _open_page(page)
+        rows = _find_row(page, ordno)
         row = next((r for r in rows if r["ordno"] == ordno), None)
         if row is None:
             missing.append(ordno)
+            log_row_not_found(sheet, ordno, page, rows, "找不到")
             continue
         if not row["cancellable"]:
             locked.append(ordno)
+            log_row_not_found(sheet, ordno, page, rows, "刪不掉")
             continue
 
         with ConfirmDebugLog(page, sheet, [ordno]):
