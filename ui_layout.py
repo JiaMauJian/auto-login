@@ -888,10 +888,8 @@ class UiLayoutMixin:
         買賣股票的第二列：張數與價格都來自 Excel 的下單試算 M14:N18，人不必填
         任何數字，所以這一列只剩「單位」一項設定。
 
-        「執行 更新→自動計算」那顆按鈕在「指定股票」那一格的「新增」右邊
-        （2026/08/31 使用者指定，見 _build_order_stocks），不在這一列。零股那半段
-        還沒接（下單表單的交易盤別要選哪個值還沒人看過，見 order_fill.TAB1_ODD），
-        所以「單位」目前只有整張選得到。
+        零股那半段還沒接（下單表單的交易盤別要選哪個值還沒人看過，見
+        order_fill.TAB1_ODD），所以「單位」目前只有整張選得到。
         """
         box = ttk.Frame(parent)
         self._build_order_unit(box, orders.JOB_TRADE)
@@ -1036,31 +1034,12 @@ class UiLayoutMixin:
         box = ttk.LabelFrame(paned, text="指定股票", padding=8)
         paned.add(box, weight=0)
 
-        # 這一列用 grid 不用 pack：最左邊那顆「執行 更新→自動計算」只有買賣股票
-        # 有，切到別的作業要收起來，而 grid_remove() 記得住格子位置、放回來會回到
-        # 原位（9.3 第 2 點，跟第二列整列互換同一條規矩）。
+        # 這一列原本最左邊還有一顆「執行 更新→自動計算」（只有買賣股票看得到，
+        # 靠 grid_remove() 收放，所以整列才用 grid 不用 pack）。2026/09/02 使用者
+        # 要求拿掉：那兩支巨集在 Excel 上自己按就好，不必再從程式按一次。grid
+        # 留著沒改回 pack——這一列由左到右就是操作順序，用哪一種排版都一樣。
         pick = ttk.Frame(box)
         pick.grid(row=0, column=0, sticky="ew")
-        # 觸發「更新股價」「自動計算」兩支巨集，把 M14:N18 重算一遍再讀回來
-        # （見 excel_io.run_update_price_macro／run_auto_calc_macro）。只有買賣
-        # 股票用得到那兩格，所以只有那個作業看得到這一顆（切換在
-        # ui_order._on_order_job_changed）。
-        #
-        # 位置換過四次，這是最新的一次（2026/09/01 使用者指定）：第二列 → 右下
-        # 動作列 → 第二列 → 「新增」右邊 → 這裡，整列最前面。理由是**它排在
-        # 選股票之前**：一輪的動作是「選帳戶 → 讀取 → 更新→自動計算 → 挑股票」，
-        # 按下去算出來的試算就是下面每一檔那句「試算 N 股」的來源，先算完再挑，
-        # 由左到右讀就是實際的操作順序。
-        #
-        # 間距掛在自己的右邊（padx=(0, 16)）而不是下一格的左邊：切到別的作業時
-        # 它整格 grid_remove 掉，那 16 像素要跟著一起消失——掛在下拉選單左邊的話,
-        # 按鈕不見了、選單卻還往右縮排 16 像素，看起來像沒對齊。
-        self.order_auto_calc_button = ttk.Button(pick, text="執行 更新→自動計算",
-                                                 command=self.run_auto_calc,
-                                                 bootstyle="primary-outline")
-        self.order_auto_calc_button.grid(row=0, column=0, sticky="w", padx=(0, 16))
-        if self.order_job.get() != orders.JOB_TRADE:
-            self.order_auto_calc_button.grid_remove()
 
         # 「讀取持股」：把選中那一位的持股（E/F）、股價（I）、下單試算（M14:N18）
         # 讀進來，也就是下面那個股票下拉的候選從哪來。2026/09/01 從左欄搬過來、
@@ -1068,21 +1047,21 @@ class UiLayoutMixin:
         # 開檔就自己進來了（見 ui_order.refresh_order_accounts），名字裡那一半
         # 不再是它的工作。
         #
-        # 排在「更新→自動計算」右邊、股票下拉左邊，還是由左到右就是操作順序：
-        # 點人 → 算試算 → 把它讀進來 → 挑股票。
+        # 排在整列最前面、股票下拉左邊，還是由左到右就是操作順序：點人 →
+        # （自己在 Excel 上按更新／自動計算）→ 把它讀進來 → 挑股票。
         self.order_refresh_button = ttk.Button(pick, text="讀取持股",
                                                command=self.refresh_order_data,
                                                bootstyle="primary-outline")
-        self.order_refresh_button.grid(row=0, column=1, sticky="w", padx=(0, 16))
+        self.order_refresh_button.grid(row=0, column=0, sticky="w", padx=(0, 16))
 
         self.order_stock_pick = ttk.Combobox(pick, width=15, font=(self.family, FONT_SIZE))
-        self.order_stock_pick.grid(row=0, column=2, sticky="w")
+        self.order_stock_pick.grid(row=0, column=1, sticky="w")
         # 存成屬性是因為它會跟「讀取持股」一起變灰：盤中模式按「新增」
         # 會附帶跑一次「更新股價」巨集（見 ui_order._refresh_added_stock_price），
         # 那是一條會動 COM 的路，不能在別人正在動同一份活頁簿的時候按下去。
         self.order_add_button = ttk.Button(pick, text="新增", command=self.add_order_stock,
                                            bootstyle="primary-outline")
-        self.order_add_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.order_add_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
 
         # 「查詢委買賣」：盤中模式限定，先把清單裡股票的即時委買賣一整批查
         # 回來，讓執行預覽直接顯示算好的價格（見 ui_order.fetch_order_quotes）。
@@ -1094,7 +1073,7 @@ class UiLayoutMixin:
         self.order_quotes_button = ttk.Button(pick, text="查詢委買賣",
                                               command=self.fetch_order_quotes,
                                               bootstyle="info-outline", state="disabled")
-        self.order_quotes_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
+        self.order_quotes_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
 
         # 加進來的股票用 Canvas＋Scrollbar 包起來（原本帳戶那一格也是這樣做的，
         # 理由）：這裡原本用 sticky="new" 的 Frame，加多了會把 LabelFrame

@@ -358,6 +358,11 @@ def run_auto_calc_macro(excel, sheet, on_stuck=None, stuck_after=MACRO_STUCK_AFT
     （`_excel_in_use()`）。也可能跳 MsgBox（見 AUTO_CALC_MACRO 上面的說明），
     卡住的話畫面會停在「跑巨集中」不動，要去 Excel 視窗把對話框按掉——
     `on_stuck` 是這件事的提醒（見 `_run_macro_watched`），不是防呆。
+
+    **2026/09/02 起沒有任何一條活路呼叫這支**：下單分頁那顆「執行 更新→自動計算」
+    拿掉了（使用者要求，Excel 上自己按就好，見 docs/介面規劃.md 9.2）。留著是因為
+    程式要跑這支的場合是**多輪執行時自己跑**（勾了才跑）與全持股交易的「跑自動計算」，
+    兩條都還沒接——手動按一顆按鈕那條路才是被否決的那一種。
     """
     sheet.Activate()
     _run_macro_watched(excel, AUTO_CALC_MACRO, on_stuck, stuck_after)

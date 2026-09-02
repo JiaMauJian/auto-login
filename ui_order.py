@@ -132,7 +132,7 @@ class UiOrderMixin:
         買賣股票作業再多讀下單試算 M14:N18。
 
         2026/09/01 之前這裡讀的是「每個已知名字的帳戶」，一次 20 個分頁——
-        使用者的操作本來就是一次處理一位（選帳戶 →「更新→自動計算」→ 加股票），
+        使用者的操作本來就是一次處理一位（選帳戶 → 讀取持股 → 加股票），
         另外 19 個分頁讀回來的數字這一輪一個都用不到。盤中模式更貴：那 19 個
         分頁每一頁都要各跑一次「更新股價」巨集，一頁 5 檔就是 5 次 Yahoo HTTP
         （todo.txt C2 記的那 100 次就是這麼來的）。
@@ -457,9 +457,8 @@ class UiOrderMixin:
         （ui_background._forget_round）都走這裡——兩邊要清的是同一份東西，
         列兩份遲早會有一邊漏掉一項。
 
-        清掉之後不自動重讀：讀 Excel 是使用者自己按的（「讀取持股」或
-        「更新→自動計算」），點一下名字就自動跑一趟 COM，等於在人還在挑人的
-        時候把 Excel 鎖起來。
+        清掉之後不自動重讀：讀 Excel 是使用者自己按「讀取持股」的，點一下名字
+        就自動跑一趟 COM，等於在人還在挑人的時候把 Excel 鎖起來。
         """
         self.order_holdings, self.order_names, self.order_prices = {}, {}, {}
         self.order_plans, self.order_quotes = {}, {}
@@ -549,14 +548,6 @@ class UiOrderMixin:
                 box.grid()
             else:
                 box.grid_remove()
-
-        # 「執行 更新→自動計算」住在「指定股票」那一格的「新增」右邊（見
-        # ui_layout._build_order_stocks），而那一格三個作業共用，所以它得自己
-        # 跟著作業收放——它算的是 M14:N18，只有買賣股票用得到那兩格。
-        if job == orders.JOB_TRADE:
-            self.order_auto_calc_button.grid()
-        else:
-            self.order_auto_calc_button.grid_remove()
 
         # 查到的即時報價跟著作廢，理由同切模式：清單都清空了，那份報價沒有
         # 任何一列在用。
@@ -694,13 +685,6 @@ class UiOrderMixin:
         # 「Excel 沒開著」的視窗；現在兩顆一起灰，那個視窗也跟著拿掉了（見
         # ui_background._require_excel）。
         self.order_refresh_button.configure(
-            state="normal" if self.excel_open and not busy else "disabled")
-        # 「更新→自動計算」跟上面那顆同一條規矩：它整個就是「開 Excel、跑兩支
-        # 巨集、把結果讀回來」，Excel 沒開著或別人正在動同一份活頁簿都無事可做
-        # （run_auto_calc 開頭那兩道 guard 擋的就是這兩件事）。2026/08/31 之前
-        # 它不在這份清單裡，所以那兩種情況下按鈕還亮著，按下去被 _require_excel
-        # 靜靜擋掉、什麼都不跳——就是這個述詞開頭講的「按了沒反應」。
-        self.order_auto_calc_button.configure(
             state="normal" if self.excel_open and not busy else "disabled")
         # 「新增」只有盤中那條路會附帶跑巨集（見 add_order_stock 的說明），盤前
         # 完全不碰 COM，沒有理由跟著變灰——讀取 20 組帳戶要跑好幾分鐘，那段時間
@@ -1099,112 +1083,6 @@ class UiOrderMixin:
             else:
                 text = f"試算 {show(qty)} 股"
             label.configure(text=text)
-
-    def run_auto_calc(self):
-        """
-        「更新→自動計算」：對**選中的那一位**依序觸發使用者既有的「更新股價」
-        （I4:I8）與「自動計算」（依 M4:M8 目標比重試算，寫進 M14:N18）兩支巨集，
-        跑完把試算重讀回來。取代原本的「初始化下單」（M ← O 欄加碼股數）——
-        使用者確認不需要那條路，一律用自動計算的比重試算結果（2026/08/31）。
-
-        **按下去直接跑，不跳確認**（2026/08/31 使用者要求拿掉）。原本會先跳一個
-        列出「會對哪幾個分頁跑、M14:N18 會被蓋掉」的確認框，理由是從程式按跟
-        自己在 Excel 上按不一樣——他看不到程式對哪幾個分頁按了幾次。現在那件事
-        改由底部常駐狀態列講（「更新→自動計算 執行中……」，跑完換成跑了幾個
-        分頁），從「事前擋一次」換成「事中、事後看得到」：這顆按鈕平常一輪要按
-        好幾次，每次都要按掉一個只是重述按鈕名字的視窗太吵。
-
-        巨集本身還是可能因為股價抓不到或輸入不完整跳出自己的訊息框（見
-        excel_io.run_auto_calc_macro：9.6 那套事前檢查刻意還沒做，真的卡住了
-        才回頭做）——那是 Excel 跳的，不是這裡跳的，拿掉確認框不影響它。
-        """
-        if self._excel_in_use() or not self._require_excel():
-            return
-        sheets = [account["sheet"] for account in self._order_execution_accounts()]
-        if not sheets:
-            show_info(self.root, "還沒選帳戶", self._order_no_account_text())
-            return
-
-        self.order_busy = True
-        self._apply_busy_state()
-        self.order_status.configure(text="更新／自動計算中…")
-        # 底部常駐狀態列：一個分頁跑兩支巨集、還要一檔一檔打 Yahoo，是會讓人等
-        # 的操作，而現在沒有確認框了，「按下去了、正在跑什麼」只剩這裡在講。
-        # 現在一次只有一位，分頁名字列得出來（以前最多 20 個名字會把這一列撐爆，
-        # 它是單行 Label，超出就直接切掉，所以那時只寫幾個分頁）。
-        #
-        # 刪節號用中文的「……」（兩個字、六個點）不是「…」：這句話是「還沒完，
-        # 還在等」，中文全形刪節號本來就是六點（2026/08/31 使用者要求）。
-        self._say(f"更新→自動計算 執行中……（{sheets[0]}）")
-        threading.Thread(target=self._order_auto_calc_worker,
-                         args=(self.path, sheets), daemon=True).start()
-
-    def _order_auto_calc_worker(self, path, sheets):
-        """
-        背景執行緒：一頁 Activate 一次，依序跑「更新股價」「自動計算」，
-        順手把新的試算讀回來（兩支巨集都只認 ActiveSheet，見 excel_io）。
-        """
-        import pythoncom
-
-        pythoncom.CoInitialize()
-        excel = workbook = sheet = None
-        payload = {}
-        try:
-            with excel_io.opened(path, True) as (excel, workbook, _attached):
-                plans, errors = {}, {}
-                with excel_io.keep_active_sheet(workbook):
-                    for name in sheets:
-                        sheet, error = excel_io.find_sheet(workbook, name)
-                        if sheet is None:
-                            errors[name] = error
-                            continue
-                        excel_io.run_update_price_macro(
-                            excel, sheet, on_stuck=self._macro_stuck_notifier("更新股價", name))
-                        excel_io.run_auto_calc_macro(
-                            excel, sheet, on_stuck=self._macro_stuck_notifier("自動計算", name))
-                        plans[name] = excel_io.read_order_plan(sheet)
-                # 兩支巨集都寫過格子（I4:I8、M14:N18），理由同 _order_read_worker。
-                workbook.Save()
-                payload = {"plans": plans, "errors": errors}
-        except Exception as exc:
-            payload = {"error": str(exc)}
-        finally:
-            sheet = excel = workbook = None
-            pythoncom.CoUninitialize()
-        self.queue.put(("order_auto_calc", payload))
-
-    def _on_order_auto_calc(self, payload):
-        """
-        「更新→自動計算」的背景回話：把重讀回來的試算換掉，重畫執行預覽。
-
-        底部狀態列也要收尾——按下去的時候把它設成「執行中……」（見 run_auto_calc），
-        沒人換掉的話它會一直停在那句話上，看起來像還在跑。
-        """
-        self.order_busy = False
-        self._apply_busy_state()
-
-        if "error" in payload:
-            self.order_status.configure(text="更新／自動計算失敗")
-            self._say("更新→自動計算 失敗。")
-            show_error(self.root, "更新／自動計算失敗", payload["error"])
-            return
-
-        for name, plan in payload["plans"].items():
-            for code, values in plan.items():
-                self.order_plans[(name, code)] = values
-
-        errors = payload["errors"]
-        note = f"　（找不到分頁：{'、'.join(errors)}）" if errors else ""
-        # 名字寫出來，不寫「N 個分頁」：一次只有一位，而這一趟是**會改 Excel**
-        # 的（M14:N18 被重算），改到誰身上要看得見（跟 _on_order_data 那句同一個
-        # 態度）。
-        if payload["plans"]:
-            done = f"已對 {'、'.join(payload['plans'])} 跑過「更新／自動計算」。{note}"
-        else:
-            done = f"沒有跑到任何分頁。{note}"
-        self.order_status.configure(text=done)
-        self._say(f"更新→自動計算：{done}")
-        self._recompute_order_preview()
 
     def _render_order_preview(self, preview, hints):
         """
