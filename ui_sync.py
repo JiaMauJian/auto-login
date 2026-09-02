@@ -602,8 +602,9 @@ class UiSyncMixin:
         # 「後面每一步都要 Excel」。那句話在只有更新分頁的時候是對的，掛單分頁
         # 長出來之後就不是了 —— ui_pending.py 一格 Excel 都不碰，卻因為交易人
         # 姓名只能靠登入拿到、而登入被 Excel 擋著，變成非先開 Excel 不可。拆掉
-        # 這道關卡不會開洞：真正要 Excel 的兩條路各自有守門員（start_fetch、
-        # ui_order.refresh_order_data 都自己叫 _require_excel()）。
+        # 這道關卡不會開洞：真正要 Excel 的幾條路各自有守門員（start_fetch、
+        # ui_order.refresh_order_stock_list／refresh_order_plans 都自己叫
+        # _require_excel()）。
         #
         # 留下來的 not self.busy 擋的不是 Excel 是 cookie：整個瀏覽器只有一組
         # cookie，下單那一輪借的就是這顆鎖（見 ui_order_exec.py 開頭那段「送錯

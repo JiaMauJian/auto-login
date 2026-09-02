@@ -7,7 +7,7 @@
 服務兩個模式：
     盤前  一次設定（股票、比重、價格）套用到好幾個帳戶，價格是人手動填的
           固定值，預覽階段就算得出完整的執行清單（見 plan_stock_orders）。
-    盤中  價格不是人填的，成交價來自 Excel I 欄（新增股票／讀取持股
+    盤中  價格不是人填的，成交價來自 Excel I 欄（新增股票／讀取試算
           時就讀進來，見 ui_order.order_prices／order_exec_prices，不再現查
           網頁），下單前那一刻只再跟對手方第一檔比大小算出最終委託價
           （見 chase_price）。plan_intraday_orders 是純函式，不自己查 Excel
@@ -111,10 +111,10 @@ REASON_NO_PLAN = "下單試算是空的，略過"
 # 根本不玩這檔，後者是這一輪不必動它。兩種都略過，但寫同一句的話，人看不出
 # 「是我選錯股票了嗎」還是「試算還沒跑」。
 REASON_NO_STOCK = "這一位沒有這檔，略過"
-# 勾了帳戶但還沒按「讀取持股」。這一位的持股與試算整份都還沒讀進來，看起來
+# 勾了帳戶但還沒按「讀取試算」。這一位的持股與試算整份都還沒讀進來，看起來
 # 會跟「試算是空的」一模一樣（都是讀不到數字）——不分開講的話，人會以為是
-# Excel 那頭沒算，跑去按自動計算，而其實只要按「讀取持股」。
-REASON_NOT_LOADED = "還沒讀取持股，略過"
+# Excel 那頭沒算，跑去按自動計算，而其實只要按「讀取試算」。
+REASON_NOT_LOADED = "還沒讀取試算，略過"
 REASON_ONLY_ODD_TEMPLATE = "試算只有零股 {odd} 股，整張是 0，略過"
 REASON_WITH_ODD_TEMPLATE = "另有零股 {odd} 股，這一輪不送"
 # 上面那句的鏡像：選零股的時候，沒送出去的是整張那一半。兩句都放備註欄，
@@ -244,7 +244,7 @@ def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down,
     共用、買賣共用同一條比重公式）也跟 plan_stock_orders 一樣，見那邊的說明。
 
     stock_settings 是 [{"code", "name", "weight_pct"}, ...]——沒有 "price"，
-    這是跟盤前最大的結構差異：盤中的成交價已經在新增股票／讀取持股時
+    這是跟盤前最大的結構差異：盤中的成交價已經在新增股票／讀取試算時
     讀進 Excel（見 ui_order.order_prices／order_exec_prices）。
 
     prices／quotes 都是可選的（預設 None，當空字典用），呼叫端（ui_order.py）
@@ -329,7 +329,7 @@ def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit, loaded_sh
     unit 是 UNIT_LOT／UNIT_ODD 決定這一輪送哪一段（見 split_lots）。
 
     loaded_sheets 是「這一輪真的去 Excel 讀過的分頁」（不給就當成全部都讀過）。
-    2026/09/02 起帳戶是勾選的、可以一次好幾位，勾了之後**還沒按「讀取持股」**
+    2026/09/02 起帳戶是勾選的、可以一次好幾位，勾了之後**還沒按「讀取試算」**
     的那幾位手上一格資料都沒有——不分開判的話，他們會跟「試算是空的」長得
     一模一樣（見 REASON_NOT_LOADED）。
 

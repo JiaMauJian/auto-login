@@ -90,6 +90,10 @@ class UiLayoutMixin:
         style.configure("Choice.TRadiobutton", font=(family, FONT_SIZE, "bold"))
         style.configure("Auto.TLabel", font=(family, HINT_SIZE), foreground=self.colors.success)
         style.configure("Manual.TLabel", font=(family, HINT_SIZE), foreground=self.colors.warning)
+        # 下單執行預覽下面那句提示（勾了帳戶但還沒讀到試算之類）用得到——
+        # 內容幾乎都是要人採取動作的警告，跟其他純資訊的 Hint.TLabel 分開，
+        # 用顏色而不是只靠文字開頭那個 ⚠ 符號撐存在感。
+        style.configure("Warn.TLabel", font=(family, HINT_SIZE), foreground=self.colors.warning)
         # 買賣方向的底色，跟網站本身「買紅賣綠」的既有配色一致（見 order/
         # orderConfirmRWD.html 的 text-red/text-green），下單分頁的股票列跟
         # 執行預覽都用同一組顏色，一眼認得出方向不必看文字。ttkbootstrap 的
@@ -773,9 +777,15 @@ class UiLayoutMixin:
 
         2026/09/01 帳戶那一格換過三種形狀，第三種是定案（每一種都是使用者指定）：
         checkbox 多選 → 第一列的單選下拉 → 左欄 radiobutton 清單 → **左欄的兩欄
-        Treeview（帳戶／今年報酬率），一次只能選一位**（見 9.3 第 5 點，元件為什麼
-        是 Treeview 見 _build_order_accounts）。「讀取持股」跟著搬進那一格
-        的最上面——它讀的就是表裡選中的那一位，兩件事擺在一起才看得出因果。
+        Treeview（帳戶／今年報酬率），可以勾好幾位**（見 9.3 第 5 點，元件為什麼
+        是 Treeview 見 _build_order_accounts）。
+
+        「讀取ＯＯ持股」擺在那一格最上面（2026/09/02 使用者要求）：它讀的是
+        **第一個分頁**的股票候選，跟「執行帳戶」清單一樣是開檔就有的答案，
+        跟勾了誰無關，兩顆「Excel 一開就問得到」的東西擺在一起才看得出因果。
+        勾選之後要各帳戶自己的持股／股價／下單試算，另有一顆「讀取試算」在
+        右邊「指定股票」那格（見 _build_order_stocks）——這兩顆以前是同一顆
+        按鈕，拆開的理由同上。
 
         目前只有「出清股票」與「買賣股票」的行為真的接上了
         （見 ui_order._order_job_ready）。
@@ -791,9 +801,9 @@ class UiLayoutMixin:
         # 兩列的層級不一樣——中間用一條橫線斷開，不要讓兩列看起來像同一組
         # 選項（跟原本盤前/盤中與賣/買之間那條直線同一個理由）。
         #
-        # 它排在「讀取持股」左邊，因為作業是上位選擇，不是跟讀取平行的
+        # 它排在「讀取試算」左邊，因為作業是上位選擇，不是跟讀取平行的
         # 另一個選項：切作業會把股票清單整批清空（ui_order._on_order_job_changed），
-        # 而且「讀取」要讀什麼是它決定的——只有買賣股票會順便讀下單試算
+        # 而且「讀取試算」要讀什麼是它決定的——只有買賣股票會順便讀下單試算
         # M19:N28、只有出清・盤中會順便跑「更新股價」巨集。反過來擺（2026/08/28
         # ～08/31 的版本）等於請人先讀一次、再選作業，只要作業跟預設值不同就得
         # 再讀第二次；出清・盤中那種更隱性，讀是讀到了，只是 I4:I13 停在上次
@@ -982,9 +992,13 @@ class UiLayoutMixin:
         去執行全部帳戶的下單試算」）。這兩顆只動勾選，不碰 Excel、不送任何
         委託，所以不跳確認框。
 
-        「讀取持股」不在這一格：它是對**勾起來的那幾位**做的事，擺在右邊
-        「指定股票」那一列（見 _build_order_stocks）——它讀回來的東西（持股、
-        股價、試算）也是給那一列的股票下拉用的。
+        「讀取ＯＯ持股」在這一格最上面（2026/09/02 使用者要求從右邊「指定
+        股票」搬過來）：它讀的是**第一個分頁**的 D4~D13，跟這張表一樣是
+        「Excel 那一頭的答案」，開檔就問得到、跟勾了誰無關，兩者擺在一起
+        才對。**真的要讀勾起來那幾位的持股／股價／試算，是另一顆「讀取
+        試算」**，擺在右邊「指定股票」那一列（見 _build_order_stocks）——
+        它讀回來的東西才是那一列股票下拉的候選之一（另一半是這裡讀到的
+        第一個分頁清單，見 ui_order._rebuild_order_names）。
 
         獨佔一整欄是量過的：20 組帳號一列疊一列大約 480 像素，剛好吃滿一欄，
         再多也不會（帳號數有上限）。寬度鎖 260（做法同指定股票欄：
@@ -997,8 +1011,17 @@ class UiLayoutMixin:
         box.grid_propagate(False)
         paned.add(box, weight=0)
 
+        # 「讀取ＯＯ持股」單獨一列、佔滿寬度：文字是動態的（見
+        # ui_order._update_order_stock_list_button），讀到的分頁名字長短不一，
+        # 跟「全選」「全不選」擠同一列容易把後面兩顆擠到換行。
+        self.order_stock_list_button = ttk.Button(
+            box, text="讀取持股", command=self.refresh_order_stock_list,
+            bootstyle="primary-outline")
+        self.order_stock_list_button.grid(row=0, column=0, columnspan=2, sticky="w",
+                                          pady=(0, 6))
+
         all_bar = ttk.Frame(box)
-        all_bar.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        all_bar.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
         ttk.Button(all_bar, text="全選", bootstyle="secondary-outline",
                    command=lambda: self._on_order_accounts_all(True)).pack(side="left")
         ttk.Button(all_bar, text="全不選", bootstyle="secondary-outline",
@@ -1021,13 +1044,13 @@ class UiLayoutMixin:
         self.order_accounts.heading("rate", text="今年報酬率")
         self.order_accounts.column("rate", width=wide(80), minwidth=wide(64),
                                    anchor="e", stretch=False)
-        self.order_accounts.grid(row=1, column=0, sticky="nsew")
+        self.order_accounts.grid(row=2, column=0, sticky="nsew")
         acc_bar = ttk.Scrollbar(box, orient="vertical", command=self.order_accounts.yview)
-        acc_bar.grid(row=1, column=1, sticky="ns")
+        acc_bar.grid(row=2, column=1, sticky="ns")
         self.order_accounts.configure(yscrollcommand=acc_bar.set)
         self.order_accounts.bind("<Button-1>", self._on_order_account_click)
 
-        box.rowconfigure(1, weight=1)
+        box.rowconfigure(2, weight=1)
         box.columnconfigure(0, weight=1)
 
     def _build_order_stocks(self, paned):
@@ -1065,22 +1088,24 @@ class UiLayoutMixin:
         pick = ttk.Frame(box)
         pick.grid(row=0, column=0, sticky="ew")
 
-        # 「讀取持股」：把選中那一位的持股（E/F）、股價（I）、下單試算（M19:N28）
-        # 讀進來，也就是下面那個股票下拉的候選從哪來。2026/09/01 從左欄搬過來、
-        # 順便改名——原本叫「讀取持股」擺在帳戶清單上面，而報酬率現在
-        # 開檔就自己進來了（見 ui_order.refresh_order_accounts），名字裡那一半
-        # 不再是它的工作。
+        # 「讀取試算」：把**勾起來的那幾位**的持股（E/F）、股價（I）、下單試算
+        # （M19:N28）讀進來。2026/09/01 從左欄搬過來、順便改名——原本叫「讀取
+        # 持股」擺在帳戶清單上面，而報酬率現在開檔就自己進來了（見
+        # ui_order.refresh_order_accounts），名字裡那一半不再是它的工作。
+        # 2026/09/02 這顆又拆成兩顆：純讀第一個分頁候選清單的「讀取ＯＯ持股」
+        # 搬回左欄「執行帳戶」最上面（見 _build_order_accounts），這裡留下的
+        # 是真正要讀勾選帳戶資料的那一半，改名「讀取試算」名副其實。
         #
         # 排在整列最前面、股票下拉左邊，還是由左到右就是操作順序：點人 →
         # （自己在 Excel 上按更新／自動計算）→ 把它讀進來 → 挑股票。
-        self.order_refresh_button = ttk.Button(pick, text="讀取持股",
-                                               command=self.refresh_order_data,
-                                               bootstyle="primary-outline")
-        self.order_refresh_button.grid(row=0, column=0, sticky="w", padx=(0, 16))
+        self.order_plan_button = ttk.Button(pick, text="讀取試算",
+                                            command=self.refresh_order_plans,
+                                            bootstyle="primary-outline")
+        self.order_plan_button.grid(row=0, column=0, sticky="w", padx=(0, 16))
 
         self.order_stock_pick = ttk.Combobox(pick, width=15, font=(self.family, FONT_SIZE))
         self.order_stock_pick.grid(row=0, column=1, sticky="w")
-        # 存成屬性是因為它會跟「讀取持股」一起變灰：盤中模式按「新增」
+        # 存成屬性是因為它會跟「讀取試算」一起變灰：盤中模式按「新增」
         # 會附帶跑一次「更新股價」巨集（見 ui_order._refresh_added_stock_price），
         # 那是一條會動 COM 的路，不能在別人正在動同一份活頁簿的時候按下去。
         self.order_add_button = ttk.Button(pick, text="新增", command=self.add_order_stock,
@@ -1179,8 +1204,8 @@ class UiLayoutMixin:
             "note": col_width(self.family, note_candidates, minimum=wide(160)),
             "price": col_width(self.family, price_candidates, minimum=wide(70)),
         }
-        # 「股票」「帳戶」欄的候選內容要等「讀取持股」讀到股票清單／
-        # 帳戶名單才知道，這裡先用預設寬度墊著，讀到資料後由 ui_order.py
+        # 「股票」「帳戶」欄的候選內容要等讀到股票清單／帳戶名單才知道，
+        # 這裡先用預設寬度墊著，讀到資料後由 ui_order.py
         # _resize_order_stock_column／_resize_order_sheet_column 重新量寬。
         self.order_preview = ttk.Treeview(preview, columns=columns, show="headings", height=10)
         for key in columns:
@@ -1204,7 +1229,7 @@ class UiLayoutMixin:
         self.order_preview.tag_configure("skip", foreground=self.colors.secondary)
         self.order_preview.tag_configure("buy", background="#FFDFDF")
         self.order_preview.tag_configure("sell", background="#DCF1EB")
-        self.order_preview_hint = ttk.Label(preview, text="", style="Hint.TLabel")
+        self.order_preview_hint = ttk.Label(preview, text="", style="Warn.TLabel")
         self.order_preview_hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # 依序執行：一顆按鈕身兼「開始下單」與「下一筆」（見 ui_order_exec.py

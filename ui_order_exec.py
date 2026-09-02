@@ -87,7 +87,7 @@ class UiOrderExecMixin:
         self.order_exec_accounts = []
         # 代號 -> Excel 讀回來的股價，盤中模式 _order_fill_job 算追價時一律
         # 拿這裡的值當 pricenow，不現查網頁成交價（2026/08/29 使用者確認：
-        # 成交價已經在新增股票／讀取持股時讀進 Excel，不必等下單前
+        # 成交價已經在新增股票／讀取試算時讀進 Excel，不必等下單前
         # 才查）。開始下單那一刻先用 self.order_prices（見那裡的說明）當第 1
         # 輪的起始值（start_order_execution），之後每輪重讀就整份換掉，不是
         # 累加（同一檔股票這一輪的價格只有一個版本）——order_exec_auto_price
@@ -274,7 +274,7 @@ class UiOrderExecMixin:
         self.order_exec_stock_settings = stock_settings
         self.order_exec_accounts = ordered
         # 第 1 輪（沒勾自動更新股價時就是唯一一輪）直接拿 self.order_prices
-        # 當起點——那是新增股票／上次「讀取持股」讀進來的 Excel
+        # 當起點——那是新增股票／上次「讀取試算」讀進來的 Excel
         # 成交價，不用再另外查一次。勾了自動更新股價的話，這份值一送進
         # _prepare_next_round 馬上就會被剛重讀（含觸發巨集）的結果整份蓋掉
         # （見 _on_order_price_refresh），不是兩份資料混用。
@@ -481,9 +481,9 @@ class UiOrderExecMixin:
         """
         背景執行緒：多輪出清用。run_macro 為真就先觸發使用者既有的「更新
         股價」巨集、等它跑完，再重讀這幾個分頁的持股（E/F 欄）跟股價
-        （I 欄）——巨集也好、重讀也好，都跟 refresh_order_data 一樣只在
+        （I 欄）——巨集也好、重讀也好，都跟 refresh_order_plans 一樣只在
         COM 層面動，不碰瀏覽器，所以不必透過 browser_cmd_queue，直接開一條
-        執行緒做（同 _order_read_worker 的做法）。
+        執行緒做（同 _order_plans_worker 的做法）。
         """
         import pythoncom
 
@@ -506,12 +506,12 @@ class UiOrderExecMixin:
                         if sheet is None:
                             errors[name] = error
                             continue
-                        # 一頁一次，理由同 _order_read_worker。
+                        # 一頁一次，理由同 _order_plans_worker。
                         if run_macro:
                             excel_io.run_update_price_macro(
                                 excel, sheet, on_stuck=self._macro_stuck_notifier("更新股價", name))
                         data[name] = excel_io.read_sheet(sheet)
-                # 巨集寫過 I4:I13 就要存檔，理由同 ui_order._order_read_worker。
+                # 巨集寫過 I4:I13 就要存檔，理由同 ui_order._order_plans_worker。
                 if run_macro:
                     workbook.Save()
                 payload = {"sheets": data, "errors": errors}
@@ -723,9 +723,9 @@ class UiOrderExecMixin:
         Excel I 欄讀回來的成交價，不現查網頁（2026/08/29 使用者確認：沒必要
         等下單前才另外查一次）。第 1 輪這份值是開始下單那一刻拿 self.
         order_prices 當快照（見 start_order_execution），也就是上一次
-        「讀取持股」讀到的數字——盤中模式的這顆按鈕會先觸發「更新股價」
-        巨集才讀（見 refresh_order_data），所以只要開始下單前有按過一次
-        「讀取持股」，這個基準價就是新的，不是放到過期的舊資料。
+        「讀取試算」讀到的數字——盤中模式的這顆按鈕會先觸發「更新股價」
+        巨集才讀（見 refresh_order_plans），所以只要開始下單前有按過一次
+        「讀取試算」，這個基準價就是新的，不是放到過期的舊資料。
         order_exec_auto_price 這個開關現在只決定多輪出清時，輪與輪之間重讀
         Excel 前要不要先觸發巨集，不再決定 pricenow 的資料來源。
         """
@@ -745,7 +745,7 @@ class UiOrderExecMixin:
             if pricenow is None:
                 raise RuntimeError(
                     f"沒有讀到 {row['code']} 的股價（Excel I 欄），這一筆沒辦法算追價。"
-                    f"請先按「讀取持股」讓 Excel 更新股價。")
+                    f"請先按「讀取試算」讓 Excel 更新股價。")
 
             # 對手方第一檔：借這個已登入的 page 開一個 FastQuote 彈出視窗，
             # 只為了這一檔股票訂閱、等一下、拿到就關掉（見 fastquote.py

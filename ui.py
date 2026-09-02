@@ -287,10 +287,11 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         elif not self.excel_open:
             # 開機這一次只在狀態列講一句，不彈視窗。每次開程式都彈一個，看兩天就
             # 變成閉著眼睛按掉的東西，真的有事要說的時候也會被一起按掉。
-            # 講的是「更新全部帳戶」跟下單的「讀取持股」，不是「登入」——
-            # 登入從 2026/08/30 起就不看 Excel 了（見 ui_sync._sync_buttons）。
+            # 講的是「更新全部帳戶」跟下單分頁那幾顆讀取按鈕（讀取ＯＯ持股／
+            # 讀取試算），不是「登入」——登入從 2026/08/30 起就不看 Excel 了
+            # （見 ui_sync._sync_buttons）。
             self._say("這份 Excel 還沒開著 —— 按左上角「開啟EXCEL」把它打開，"
-                      "「更新全部帳戶」跟下單的「讀取持股」才會亮起來。")
+                      "「更新全部帳戶」跟下單分頁的讀取按鈕才會亮起來。")
         else:
             self._say("按「登入」開瀏覽器並自動登入，之後要更新資料時再按「更新全部帳戶」。")
 

@@ -326,6 +326,19 @@ def list_account_sheets(book):
     return accounts
 
 
+def first_visible_sheet(book):
+    """
+    活頁簿由左到右第一個看得見的分頁（xlSheetVisible），藏起來的不算。找不到
+    （全部都藏起來）回 None。
+
+    獨立成一支是因為下單分頁「讀取ＯＯ持股」那顆按鈕要在畫面上講出這個分頁
+    的名字（見 ui_order.refresh_order_stock_list），不能只跟 read_stock_list
+    要一份沒有名字的股票清單。用 `for ... in book.Worksheets` 取，不用
+    `book.Worksheets(1)`——理由同 read_stock_list 那段說明。
+    """
+    return next((s for s in book.Worksheets if s.Visible == -1), None)
+
+
 def read_stock_list(book):
     """
     **第一個分頁**的 D4~D13 有哪幾檔股票，回傳 [(代號, D 欄原文), ...]。
@@ -337,17 +350,13 @@ def read_stock_list(book):
     多出來的那幾檔選不到。哪一位沒有選中的那一檔，執行預覽那一列會寫
     「這一位沒有這檔」並略過（見 orders.plan_trade_orders）。
 
-    「第一個分頁」＝**分頁列上由左到右第一個看得見的**。藏起來的不算：藏起來的
-    那一頁不是人講「第一個分頁」時指的東西。用 `for ... in book.Worksheets` 取，
-    不用 `book.Worksheets(1)`——這個檔案裡其他每一處都是用迭代的，跟著同一種寫法
-    走（這個 win32com 環境有過「看起來該行的 COM 寫法其實回傳怪東西」的前科：
-    `Cells().Resize()` 實測只回右下角那一格，不是整個矩形，2026/09/02 踩過）。
+    「第一個分頁」定義見 first_visible_sheet。
 
     只讀不寫，掃到什麼算什麼——這個分頁如果不是持股管理表（將來有人在最
     前面插一頁說明），D4~D13 就一個股號都對不出來，回空清單，畫面上的下拉
     是空的，不會拿一份猜出來的清單讓人選。
     """
-    sheet = next((s for s in book.Worksheets if s.Visible == -1), None)
+    sheet = first_visible_sheet(book)
     if sheet is None:
         return []
     stocks = []
@@ -448,7 +457,7 @@ def keep_active_sheet(book):
 
     跑「更新股價」巨集一定要一頁一頁 Activate（見 run_update_price_macro），
     但 Excel 通常就開在使用者眼前——20 個帳戶跑完把他丟在最後一個分頁上，
-    等於每按一次「讀取持股」畫面就被搬走一次。記一次、還一次，比每
+    等於每按一次「讀取試算」畫面就被搬走一次。記一次、還一次，比每
     跑一頁就來回切兩次少掉一半的 COM 往返與畫面重繪。
 
     記不住或還不回去都不是錯誤（分頁被刪了、活頁簿被關了、Excel 正忙），
@@ -585,8 +594,9 @@ def is_open_in_excel(path):
 # 同一份活頁簿一次只讓一條執行緒操作。
 #
 # 為什麼需要：程式接上的是使用者眼前那個 Excel 實例（見 _open_once 的 GetObject
-# 分支），不是各開各的一份。而「更新分頁寫入」「下單分頁的讀取持股／新增
-# 股票／多輪之間重讀」各有各的忙碌旗標、各跑各的執行緒，彼此不知道對方存在。
+# 分支），不是各開各的一份。而「更新分頁寫入」「下單分頁的讀取ＯＯ持股／讀取
+# 試算／新增股票／多輪之間重讀」各有各的忙碌旗標、各跑各的執行緒，彼此不知道
+# 對方存在。
 #
 # 程式自己的讀寫都是 sheet.Cells(...) 這種限定寫法，不受別人 Activate 影響；
 # 但巨集用的是無限定的 Range()，只認 ActiveSheet（見 run_update_price_macro）。

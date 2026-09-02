@@ -25,7 +25,8 @@ from ui_common import ask_cash_method, ask_confirm, show_error, show_warning
 
 # 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
 STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "logged_out": "登出",
-              "order_data": "下單資料讀取", "order_filled": "下單填單",
+              "order_stock_list": "讀取ＯＯ持股", "order_plans": "讀取試算",
+              "order_filled": "下單填單",
               "order_dialog_closed": "委託確認視窗關閉偵測",
               "order_price_refresh": "多輪出清重讀持股",
               "order_stock_price": "新增股票查價",
@@ -631,7 +632,8 @@ class UiBackgroundMixin:
         """
         handlers = {"logged_in": self._on_logged_in, "fetched": self._on_fetched,
                     "written": self._on_written, "logged_out": self._on_logged_out,
-                    "order_data": self._on_order_data, "order_filled": self._on_order_filled,
+                    "order_stock_list": self._on_order_stock_list,
+                    "order_plans": self._on_order_plans_data, "order_filled": self._on_order_filled,
                     "order_dialog_closed": self._on_order_dialog_closed,
                     "order_price_refresh": self._on_order_price_refresh,
                     "order_stock_price": self._on_order_stock_price,
@@ -1078,8 +1080,9 @@ class UiBackgroundMixin:
         """
         現在有沒有任何一條路正在用 COM 動那份活頁簿。
 
-        五個旗標各自誕生於不同的功能，本來各管各的：self.busy 是更新分頁的
-        登入／讀取／寫入，order_busy 是下單分頁的「讀取持股」，
+        六個旗標各自誕生於不同的功能，本來各管各的：self.busy 是更新分頁的
+        登入／讀取／寫入，order_busy 是下單分頁的「讀取試算」，
+        order_stock_list_busy 是「讀取ＯＯ持股」（只讀第一個分頁的候選清單），
         order_stock_price_busy 是盤中「新增」股票附帶的那次股價重讀，
         order_exec_price_busy 是多輪之間的重讀，order_rates_busy 是「執行帳戶」
         清單那趟只讀 B22 的補讀（見 ui_order.refresh_order_accounts）。問題是
@@ -1092,18 +1095,19 @@ class UiBackgroundMixin:
         自己這一頁從來沒更新過，而讀回來的是舊的 I4:I13，然後盤中追價就拿這個
         舊價當基準。不報錯、不缺欄位，只是靜靜地錯。
 
-        所以五個旗標從這裡開始當成一個看。CLAUDE.md 那條「自動計算執行期間
+        所以六個旗標從這裡開始當成一個看。CLAUDE.md 那條「自動計算執行期間
         更新分頁的讀取／寫入要鎖住，反之亦然」就是靠這個述詞（畫面層）加上
         excel_io._EXCEL_LOCK（執行緒層）兩層一起實作的。
         """
-        return bool(self.busy or self.order_busy or self.order_stock_price_busy
-                    or self.order_exec_price_busy or self.order_rates_busy)
+        return bool(self.busy or self.order_busy or self.order_stock_list_busy
+                    or self.order_stock_price_busy or self.order_exec_price_busy
+                    or self.order_rates_busy)
 
     def _apply_busy_state(self):
         """
-        把「現在能不能碰 Excel」套到所有相關按鈕上。**四個旗標、以及 excel_open，
-        任何一個變動都要叫一次**，不然畫面會停在上一個狀態：按鈕亮著、按下去卻
-        被 guard 擋掉，看起來就是「按了沒反應」。
+        把「現在能不能碰 Excel」套到所有相關按鈕上。**上面 _excel_in_use() 那些
+        旗標、以及 excel_open，任何一個變動都要叫一次**，不然畫面會停在上一個
+        狀態：按鈕亮著、按下去卻被 guard 擋掉，看起來就是「按了沒反應」。
         """
         # 寫到一半換檔沒有意義，這一輪要動哪個檔早就決定了。
         self.excel_button.configure(state="disabled" if self._excel_in_use() else "normal")
@@ -1326,9 +1330,9 @@ class UiBackgroundMixin:
             return
         self.excel_open = value
         self.path_label.configure(text=self._path_text())
-        # 走 _apply_busy_state() 而不是只叫 _sync_buttons()：下單分頁的「讀取持股」
-        # 也卡在 excel_open 上（見 ui_order._order_excel_buttons），只更新更新分頁
-        # 那幾顆的話，Excel 一關它會一直亮著。
+        # 走 _apply_busy_state() 而不是只叫 _sync_buttons()：下單分頁的「讀取ＯＯ
+        # 持股」「讀取試算」也卡在 excel_open 上（見 ui_order._order_excel_buttons），
+        # 只更新更新分頁那幾顆的話，Excel 一關它們會一直亮著。
         self._apply_busy_state()
         # 接上的那一刻才讀得到那份表裡有誰——下單分頁的「執行帳戶」整格都是
         # Excel 那一頭的答案（分頁名＋B22，見 refresh_order_accounts 與
@@ -1351,7 +1355,7 @@ class UiBackgroundMixin:
         2026/09/02 使用者要求。
 
         對不上就把 excel_open 扳回 False，等於整支程式的 Excel 功能都停在那裡
-        （更新、讀取持股、寫入的按鈕全跟著 excel_open 走）——這不是「提醒一下
+        （更新、讀取ＯＯ持股、讀取試算、寫入的按鈕全跟著 excel_open 走）——這不是「提醒一下
         還是可以用」的等級：版面對不上代表程式要寫的 E/F 欄、要讀的 M/N 欄
         全部落在別人的格子上，而且不會報錯。檔案本身不動（不會去關掉使用者的
         Excel 視窗），人自己去開對的那一份。
@@ -1454,11 +1458,11 @@ class UiBackgroundMixin:
 
     def _require_excel(self):
         """
-        讀取（更新分頁）與「讀取持股」（下單分頁）之前的最後一道關卡。
-        按鈕平常是灰的，這裡擋的是鍵盤觸發那種漏網。
+        讀取（更新分頁）與「讀取ＯＯ持股」「讀取試算」（下單分頁）之前的最後
+        一道關卡。按鈕平常是灰的，這裡擋的是鍵盤觸發那種漏網。
 
         「Excel 沒開著」那一種刻意不跳視窗，只是擋下來（2026/08/31 使用者要求）：
-        兩顆按鈕現在都跟著 excel_open 變灰（見 ui_sync._sync_buttons、
+        這三顆按鈕現在都跟著 excel_open 變灰（見 ui_sync._sync_buttons、
         ui_order._order_excel_buttons），常駐列上又寫著「EXCEL未開啟」、旁邊就是
         「開啟EXCEL」那顆按鈕——畫面已經把這件事講完了，再彈一個視窗要人按掉是
         在重複同一句話。剩下兩種（沒選檔、檔案不見了）還是要說：那是畫面上看不
