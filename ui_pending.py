@@ -18,6 +18,8 @@
 
 import datetime
 
+from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
+
 import fetch as fetch_mod
 import order_cancel
 import order_cancel_reservation
@@ -134,6 +136,15 @@ class UiPendingMixin:
 
         某一組失敗不中斷整批：查掛單是「看看現在外面有什麼」，20 個裡有 1 個
         登入逾時，另外 19 個的委託還是該看得到。失敗的收進 problems 一起回報。
+
+        這條保證涵蓋 `ensure_logged_in`（登入失敗，見 `_ensure_one` 內部已經
+        接住 PlaywrightError）**也涵蓋 `query_orders` 這一步**：查委託本身
+        也是在瀏覽器分頁上導頁＋打 AJAX（`recon.query` 的 `page.evaluate`），
+        一樣可能丟出 PlaywrightError／PlaywrightTimeoutError（分頁被導到別處、
+        execution context 被銷毀…），不是只有 RuntimeError。只接 RuntimeError
+        的話，20 個帳戶裡任何一個在查詢這一步踩到瀏覽器層的例外，就會讓整批
+        連同已經查到的前面幾組一起爆掉、整份改丟一串 traceback 給人看
+        （2026/09/02 使用者實測：取消掛單後自動重查就是死在這裡）。
         """
         rows, problems, names = [], [], {}
         for order, account in targets:
@@ -153,6 +164,8 @@ class UiPendingMixin:
                 rows.extend(order_query.query_orders(page, session, sheet))
             except RuntimeError as exc:
                 problems.append(str(exc))
+            except (PlaywrightError, PlaywrightTimeoutError) as exc:
+                problems.append(f"{name}：查詢委託時瀏覽器操作失敗　{exc}")
         return {"rows": rows, "problems": problems, "names": names}
 
     # ---------- 取消掛單（10.3） ----------
