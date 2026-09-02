@@ -856,6 +856,22 @@ class UiOrderMixin:
             price_text = f"Excel股價 {show(excel_price)} 元" if excel_price is not None else "Excel股價：讀不到"
             label.configure(text=price_text)
 
+    @staticmethod
+    def _order_weight_key_ok(value):
+        """
+        比重輸入框的按鍵驗證（Entry 的 validatecommand，value 是那一鍵按下去之後
+        會變成的完整字串）：放行空字串（打到一半、或刪光重打）跟 0～100 之間的
+        數字，其餘一律擋下，包含整段貼上——貼「150」這種一次到位的輸入也一樣會
+        被擋，不會先貼進去再讓後面的重算邏輯發現算出來的張數不合理。
+        """
+        if value == "":
+            return True
+        try:
+            num = float(value)
+        except ValueError:
+            return False
+        return 0 <= num <= 100
+
     def _build_order_stock_row(self, row):
         """
         一檔股票一列，**一行排完**：買賣別、股票、移除、比重、價格（或試算／
@@ -939,8 +955,14 @@ class UiOrderMixin:
         weight_box = ttk.Frame(block)
         weight_box.grid(row=0, column=3, sticky="w", padx=(12, 0))
         ttk.Label(weight_box, text="比重").pack(side="left")
+        # 比重是「持股 × 這個百分比」（orders.lots_from_weight），沒有上限的話
+        # 打錯一個 0（例如 150）會算出比實際持股還多的張數，出清股票時可能因此
+        # 送出一張比帳上還多的委託——按鍵層級擋掉範圍外的輸入，不是送出前才報錯。
+        if not hasattr(self, "_order_weight_vcmd"):
+            self._order_weight_vcmd = (self.root.register(self._order_weight_key_ok), "%P")
         ttk.Entry(weight_box, textvariable=row["weight"], width=6,
-                 font=(self.family, FONT_SIZE)).pack(side="left", padx=(4, 0))
+                 font=(self.family, FONT_SIZE),
+                 validate="key", validatecommand=self._order_weight_vcmd).pack(side="left", padx=(4, 0))
         ttk.Label(weight_box, text="%").pack(side="left", padx=(2, 0))
 
         price_box = ttk.Frame(block)

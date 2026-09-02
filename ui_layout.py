@@ -1084,6 +1084,18 @@ class UiLayoutMixin:
                                            bootstyle="primary-outline")
         self.order_add_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
 
+        # 「查詢委買賣」：盤中模式限定，先把清單裡股票的即時委買賣一整批查
+        # 回來，讓執行預覽直接顯示算好的價格（見 ui_order.fetch_order_quotes）。
+        # 原本擺在下面「開始下單」那一列，2026/09/02 使用者要求搬到「新增」
+        # 右邊——查詢不是只按一次：邊加股票邊查、查完再加一檔又想重查一次，
+        # 是常態操作（fetch_order_quotes 本來就允許重複按，見它的說明），跟
+        # 「新增」同一個操作節奏，不是「開始下單」前的最後一步。啟用/停用邏輯
+        # 沒變（見 ui_order._update_order_quotes_ui），只是換了位置。
+        self.order_quotes_button = ttk.Button(pick, text="查詢委買賣",
+                                              command=self.fetch_order_quotes,
+                                              bootstyle="info-outline", state="disabled")
+        self.order_quotes_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
+
         # 加進來的股票用 Canvas＋Scrollbar 包起來（原本帳戶那一格也是這樣做的，
         # 理由）：這裡原本用 sticky="new" 的 Frame，加多了會把 LabelFrame
         # 撐得比視窗還高，超出視窗底下的部分沒有任何辦法捲到——「按新增
@@ -1202,19 +1214,8 @@ class UiLayoutMixin:
                                             command=self.start_order_execution,
                                             bootstyle="danger")
         self.order_exec_button.pack(side="left")
-        # 「查詢委買賣」：盤中模式限定，先把清單裡股票的即時委買賣一整批查
-        # 回來，讓執行預覽直接顯示算好的價格（見 ui_order.fetch_order_quotes）
-        # ——2026/08/29 使用者要求，出清股票時想在按下「開始下單」之前就看到
-        # 實際會用的價位，不是等依序跑到那一筆才臨時查。跟 order_ticks_entry
-        # 同一個道理，盤前模式底下維持看得到但 disabled，不整個藏起來。
-        #
-        # 它留在這一列、不像兩顆巨集按鈕那樣擺到第二列去，是因為它查的是網站的
-        # 即時報價、算的是這一輪實際會送出去的價格——跟上面那張執行預覽是同一
-        # 件事的兩半，不是「這個作業的設定」。
-        self.order_quotes_button = ttk.Button(exec_bar, text="查詢委買賣",
-                                              command=self.fetch_order_quotes,
-                                              bootstyle="info-outline", state="disabled")
-        self.order_quotes_button.pack(side="left", padx=(8, 0))
+        # 「查詢委買賣」搬到「指定股票」那一格的「新增」右邊了（見
+        # _build_order_stocks），這裡不再放。
         self.order_exec_stop_button = ttk.Button(exec_bar, text="停止", command=self.stop_order_execution,
                                                  bootstyle="secondary-outline", state="disabled")
         self.order_exec_stop_button.pack(side="left", padx=(8, 0))
