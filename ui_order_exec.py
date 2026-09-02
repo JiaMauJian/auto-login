@@ -147,7 +147,8 @@ class UiOrderExecMixin:
             ticks = None
             preview = orders.plan_trade_orders(
                 [{"code": row["code"], "name": row["name"]} for row in self.order_rows],
-                ordered, self.order_plans, self.order_holdings, self.order_unit.get())
+                ordered, self.order_plans, self.order_holdings, self.order_unit.get(),
+                loaded_sheets=self.order_loaded)
             queue_rows = orders.executable_orders(preview)
         elif self._order_intraday():
             stock_settings = self._order_stock_settings()
@@ -168,7 +169,8 @@ class UiOrderExecMixin:
 
         if not queue_rows:
             if job == orders.JOB_TRADE:
-                reason = "下單試算是空的、只有零股，或沒填價格"
+                reason = ("勾選的帳戶都沒有這幾檔、下單試算是空的、只有零股，"
+                          "或沒填價格")
             elif self._order_intraday():
                 reason = "沒有持股，或比重不到 1 張"
             else:
@@ -218,11 +220,18 @@ class UiOrderExecMixin:
         else:
             head = f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託，用 ROD-當日有效。\n\n"
 
-        # 第一句先講是誰（2026/09/01 起一輪只服務一位）。以前是多帳戶，「這一輪
-        # 有誰」只有執行預覽那張表答得出來；現在人是從一個選單挑的，挑錯了整輪
-        # 都會掛到別人帳上，而畫面上唯一顯示他名字的地方就是那個選單本身——
-        # 這一句是委託送出去之前最後一次讓人看見名字的機會。
-        head = f"帳戶：{ordered[0]['sheet']}\n" + head
+        # 第一句先講是誰。2026/09/02 起一輪可以跑好幾位（勾選），所以這一句要
+        # 列出**真的會被送出委託的那幾位**——不是勾了誰，是 queue 裡真的有東西
+        # 的那幾位（勾了但沒這一檔、或試算是空的，整位都會被略過，寫進來只會
+        # 讓人以為那一位也要下單）。勾錯一位整輪都會掛到別人帳上，而這一句是
+        # 委託送出去之前最後一次讓人看見名字的機會。
+        #
+        # 超過 6 位就只報數字：這個框是要人看完再按的，一行 20 個名字沒有人會
+        # 真的讀，逐位確認的地方本來就是執行預覽那張表。
+        who = [account["sheet"] for account in ordered
+               if any(row["sheet"] == account["sheet"] for row in queue_rows)]
+        head = (f"帳戶：{'、'.join(who)}\n" if len(who) <= 6
+                else f"帳戶：{len(who)} 位（依報酬率由低到高）\n") + head
 
         if multi_round:
             if auto_price:
@@ -482,7 +491,7 @@ class UiOrderExecMixin:
         excel = workbook = sheet = None
         payload = {}
         try:
-            # write=run_macro：巨集要往 I4:I8 寫回股價，開檔如果是唯讀的話
+            # write=run_macro：巨集要往 I4:I13 寫回股價，開檔如果是唯讀的話
             # 巨集這一步可能直接被 Excel 擋下來或跑到一半出錯。實務上這裡
             # 幾乎一定會走「檔案已經開在使用者的 Excel 裡」那個接上既有
             # 視窗的分支（見 excel_io.open_workbook），write 參數對那個分支
@@ -502,7 +511,7 @@ class UiOrderExecMixin:
                             excel_io.run_update_price_macro(
                                 excel, sheet, on_stuck=self._macro_stuck_notifier("更新股價", name))
                         data[name] = excel_io.read_sheet(sheet)
-                # 巨集寫過 I4:I8 就要存檔，理由同 ui_order._order_read_worker。
+                # 巨集寫過 I4:I13 就要存檔，理由同 ui_order._order_read_worker。
                 if run_macro:
                     workbook.Save()
                 payload = {"sheets": data, "errors": errors}

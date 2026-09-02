@@ -251,6 +251,11 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         # 這份 Excel 現在有沒有真的開在 Excel 裡。登入與讀取都卡在這個旗標上，
         # 由 _poll_excel 每幾秒重新確認一次 —— 使用者中途把 Excel 關掉也算數。
         self.excel_open = False
+        # 錨點檢查（見 ui_background.check_excel_layout）：對不上的話這裡放那句
+        # 說明，excel_open 就一直是 False，等於整支程式的 Excel 功能都停住。
+        # 使用者下次按「開啟EXCEL」時清掉、重驗一次。
+        self.excel_layout_problem = None
+        self.excel_layout_busy = False
         if self.path is not None:
             try:
                 self.ledger = ledger_mod.Ledger(self.path)
@@ -310,7 +315,7 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
             self._refresh_pending_scope()
         elif name == "下單":
             # 同上，「執行帳戶」清單也跟著已知名字走。它還會順便把還不知道的
-            # 報酬率補讀回來（只讀 B17 一格，不跑巨集），因為清單是照報酬率
+            # 報酬率補讀回來（只讀 B22 一格，不跑巨集），因為清單是照報酬率
             # 由低到高排的——見 ui_order.refresh_order_accounts。
             self.refresh_order_accounts()
         elif name == "歷程":

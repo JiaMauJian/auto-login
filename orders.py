@@ -51,7 +51,7 @@ JOB_NAMES = {JOB_TRADE: "買賣股票", JOB_CLEAR: "出清股票", JOB_FULL: "�
 # 2026/08/30：買賣股票接上了（整張；零股還卡在下單表單的交易盤別要選哪個值）。
 JOBS_READY = (JOB_CLEAR, JOB_TRADE)
 
-# 單位：整張／零股。M14:M18 是股數不是張數，整張與零股是同一個數字拆兩段
+# 單位：整張／零股。M19:M28 是股數不是張數，整張與零股是同一個數字拆兩段
 # （見 9.4），「單位」決定這一輪送哪一段。
 UNIT_LOT = "lot"
 UNIT_ODD = "odd"
@@ -104,8 +104,17 @@ REASON_CHASE_TEMPLATE = "以 Excel 成交價±{ticks}檔為邊界，下單前查
 # 跟 REASON_CHASE_TEMPLATE 那句「下單前查」是兩種不同的狀態，不能共用同一句。
 REASON_CHASE_FROZEN_TEMPLATE = "已查{opposite} {value}，下單會直接用這個價格（不再重查）"
 
-# 買賣股票（張數與價格來自 Excel 的下單試算 M14:N18）用得到的幾句。
+# 買賣股票（張數與價格來自 Excel 的下單試算 M19:N28）用得到的幾句。
 REASON_NO_PLAN = "下單試算是空的，略過"
+# 「這一位的持股清單裡沒有這一檔」跟「有這一檔但試算是 0」是兩件事
+# （2026/09/02 使用者指定「其他帳戶沒找到這個股票就略過」）：前者是這一位
+# 根本不玩這檔，後者是這一輪不必動它。兩種都略過，但寫同一句的話，人看不出
+# 「是我選錯股票了嗎」還是「試算還沒跑」。
+REASON_NO_STOCK = "這一位沒有這檔，略過"
+# 勾了帳戶但還沒按「讀取持股」。這一位的持股與試算整份都還沒讀進來，看起來
+# 會跟「試算是空的」一模一樣（都是讀不到數字）——不分開講的話，人會以為是
+# Excel 那頭沒算，跑去按自動計算，而其實只要按「讀取持股」。
+REASON_NOT_LOADED = "還沒讀取持股，略過"
 REASON_ONLY_ODD_TEMPLATE = "試算只有零股 {odd} 股，整張是 0，略過"
 REASON_WITH_ODD_TEMPLATE = "另有零股 {odd} 股，這一輪不送"
 # 上面那句的鏡像：選零股的時候，沒送出去的是整張那一半。兩句都放備註欄，
@@ -116,7 +125,7 @@ REASON_WITH_LOT_TEMPLATE = "另有整張 {lots} 張，這一輪不送"
 def split_lots(shares):
     """
     把股數拆成「整張幾張」與「零股幾股」兩段，各自帶回原本的正負號（見
-    docs/介面規劃.md 9.4）。M14:M18 是**股數**不是張數，整張與零股不是兩份
+    docs/介面規劃.md 9.4）。M19:M28 是**股數**不是張數，整張與零股不是兩份
     資料，是同一個數字拆兩段：
 
         2350 股  ->  (2, 350)     整張 2 張 ＋ 零股 350 股
@@ -150,22 +159,23 @@ def lots_from_weight(held_qty, weight_pct):
 
 def order_accounts(accounts):
     """
-    依今年報酬率（Excel B17）由低到高排序。
+    依今年報酬率（Excel B22）由低到高排序。
 
     accounts 是 [{"sheet": 分頁名, "return_rate": 數字或 None}, ...]。
 
     回傳 (ordered, skipped)：ordered 是排好序、多一個 "order"（從 1 開始）
-    欄位的清單；skipped 是 B17 讀不到的那幾位，原樣列出來但不給順序——
+    欄位的清單；skipped 是 B22 讀不到的那幾位，原樣列出來但不給順序——
     讀不到就當成最低硬排進去，等於用猜的決定誰先執行，比漏掉一位還危險，
     這裡刻意跟 planner.bank_balance「讀不懂就回 None，絕對不要回 0」同一種
     態度。
 
-    2026/09/01 起這份順序排的是**「執行帳戶」選單**，不是一輪要跑的帳戶——
-    下單分頁改成一次只處理一位（使用者決定，見 docs/介面規劃.md 9.3 第 5 點），
-    規格那句「報酬率低的先執行」因此落在選單上：號碼小的排前面，人照號碼
-    由小到大一位一位處理（見 ui_order._fill_order_accounts）。
-    skipped 那幾位在選單上照樣選得到、排在最後，號碼寫「－」——這裡不給順序
-    的理由（用猜的決定誰先執行）在「一次只有一位」的情況下本來就不成立。
+    這份順序同時是「執行帳戶」清單的排法**與**這一輪真正的執行順序（2026/09/02
+    起一輪可以勾好幾位，見 docs/介面規劃.md 9.3 第 5 點）：號碼小的排前面、
+    先送。09/01～09/02 之間一次只跑一位，那段期間它只是「建議的處理順序」。
+
+    skipped 那幾位在清單上照樣勾得到、排在最後，號碼寫「－」，他們之間照活頁簿
+    裡分頁本來的順序。這裡不給他們號碼的理由（用猜的決定誰先執行）還在——差別
+    是「要不要跑他」現在由人一位一位勾，不是程式替他決定。
     """
     ready = [a for a in accounts if a.get("return_rate") is not None]
     skipped = [a for a in accounts if a.get("return_rate") is None]
@@ -298,10 +308,10 @@ def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down,
     return preview
 
 
-def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit):
+def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit, loaded_sheets=None):
     """
     買賣股票的執行預覽（規劃文件「一、買賣股票」）：**張數與價格都來自各帳戶
-    自己那一頁的下單試算 M14:N18**，人不必填任何數字；方向由試算股數的正負
+    自己那一頁的下單試算 M19:N28**，人不必填任何數字；方向由試算股數的正負
     逐檔決定（正數買、負數賣），不是整批共用一個方向。
 
     所以這裡沒有 side 參數，也沒有 holdings／weight——跟 plan_stock_orders
@@ -318,6 +328,11 @@ def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit):
     作業不拿它算任何東西），
     unit 是 UNIT_LOT／UNIT_ODD 決定這一輪送哪一段（見 split_lots）。
 
+    loaded_sheets 是「這一輪真的去 Excel 讀過的分頁」（不給就當成全部都讀過）。
+    2026/09/02 起帳戶是勾選的、可以一次好幾位，勾了之後**還沒按「讀取持股」**
+    的那幾位手上一格資料都沒有——不分開判的話，他們會跟「試算是空的」長得
+    一模一樣（見 REASON_NOT_LOADED）。
+
     委託別固定 ROD（規劃文件明講「用ROD下單」）：這個作業沒有盤前／盤中之分，
     不吃 BS_FLAG_INTRADAY 那條路。
     """
@@ -325,14 +340,26 @@ def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit):
     for account in ordered_accounts:
         for stock in stocks:
             code = stock["code"]
-            plan = plans.get((account["sheet"], code)) or {}
+            sheet = account["sheet"]
+            loaded = loaded_sheets is None or sheet in loaded_sheets
+            # 讀過了才有資格說「這一位沒有這檔」——沒讀過的話 plans 裡本來
+            # 就什麼都沒有，兩種情況在資料上分不出來，只有 loaded 分得出來。
+            plan = plans.get((sheet, code))
+            has_stock = plan is not None
+            plan = plan or {}
             shares = int(plan.get("qty") or 0)
             price = plan.get("price")
             lots, odd = split_lots(shares)
             send = lots if unit == UNIT_LOT else odd
 
             reasons = []
-            if shares == 0:
+            if not loaded:
+                reasons.append(REASON_NOT_LOADED)
+            elif not has_stock:
+                # 使用者指定的股票，這一位的持股清單（D 欄）裡沒有——略過，
+                # 不是錯誤：一次跑全部帳戶本來就會遇到有人沒這一檔。
+                reasons.append(REASON_NO_STOCK)
+            elif shares == 0:
                 reasons.append(REASON_NO_PLAN)
             elif unit == UNIT_LOT and lots == 0:
                 reasons.append(REASON_ONLY_ODD_TEMPLATE.format(odd=abs(odd)))
@@ -343,7 +370,10 @@ def plan_trade_orders(stocks, ordered_accounts, plans, holdings, unit):
             elif unit == UNIT_ODD and lots:
                 # 反過來那一半：選零股的時候沒送出去的是整張。
                 reasons.append(REASON_WITH_LOT_TEMPLATE.format(lots=abs(lots)))
-            if to_num(price, None) is None or to_num(price, 0) <= 0:
+            # 價格只在「這一列本來真的要送」的時候才挑剔——已經因為沒讀到、
+            # 沒這一檔、試算是空的而略過的列，再補一句「尚未設定價格」只是
+            # 讓備註欄變長，人還要多讀一次才知道那不是真正的原因。
+            if send and (to_num(price, None) is None or to_num(price, 0) <= 0):
                 reasons.append(REASON_NO_PRICE)
 
             preview.append({

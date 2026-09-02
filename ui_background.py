@@ -29,7 +29,7 @@ STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "
               "order_dialog_closed": "委託確認視窗關閉偵測",
               "order_price_refresh": "多輪出清重讀持股",
               "order_stock_price": "新增股票查價",
-              "order_rates": "帳戶報酬率補讀",
+              "order_rates": "帳戶報酬率補讀", "excel_layout": "Excel 版面錨點檢查",
               "order_quotes_fetched": "查詢委買賣", "pending_fetched": "查詢掛單",
               "pending_cancelled": "取消掛單"}
 
@@ -636,6 +636,7 @@ class UiBackgroundMixin:
                     "order_price_refresh": self._on_order_price_refresh,
                     "order_stock_price": self._on_order_stock_price,
                     "order_rates": self._on_order_rates,
+                    "excel_layout": self._on_excel_layout,
                     "order_quotes_fetched": self._on_order_quotes_fetched,
                     "pending_fetched": self._on_pending_fetched,
                     "pending_cancelled": self._on_pending_cancelled,
@@ -1081,14 +1082,14 @@ class UiBackgroundMixin:
         登入／讀取／寫入，order_busy 是下單分頁的「讀取持股」，
         order_stock_price_busy 是盤中「新增」股票附帶的那次股價重讀，
         order_exec_price_busy 是多輪之間的重讀，order_rates_busy 是「執行帳戶」
-        清單那趟只讀 B17 的補讀（見 ui_order.refresh_order_accounts）。問題是
+        清單那趟只讀 B22 的補讀（見 ui_order.refresh_order_accounts）。問題是
         它們動的是**同一個 Excel 實例**——程式接上的是使用者眼前開著的那個
         （見 excel_io._open_once 的 GetObject 分支），不是各開各的一份。
 
         程式自己的讀寫都是限定寫法（sheet.Cells(...)），不受別人 Activate
         影響；但巨集用的是無限定的 Range()，只認 ActiveSheet。兩條執行緒交錯
         Activate 的話，巨集會跑在別人剛切過去的那一頁上——那一頁被更新兩次、
-        自己這一頁從來沒更新過，而讀回來的是舊的 I4:I8，然後盤中追價就拿這個
+        自己這一頁從來沒更新過，而讀回來的是舊的 I4:I13，然後盤中追價就拿這個
         舊價當基準。不報錯、不缺欄位，只是靜靜地錯。
 
         所以五個旗標從這裡開始當成一個看。CLAUDE.md 那條「自動計算執行期間
@@ -1198,6 +1199,11 @@ class UiBackgroundMixin:
         if not chosen:
             return
 
+        # 上一次錨點檢查的結論作廢：使用者按這顆按鈕，可能就是去改對了那份表、
+        # 或改選另一份。留著的話，改對了也還是一直被擋住（見
+        # _on_excel_layout／_poll_excel）。
+        self.excel_layout_problem = None
+
         path = Path(chosen)
         # 選同一份檔不必重來一遍，但還是要確認它開著 —— 使用者按這顆按鈕，
         # 想要的就是「把它打開」，不是「什麼都沒發生」。
@@ -1295,7 +1301,10 @@ class UiBackgroundMixin:
             here = self.path is not None and self.path.is_file() and excel_io.is_open_in_excel(self.path)
         except OSError:
             here = self.excel_open        # 判斷不出來就沿用上次，不要亂閃
-        self._set_excel_open(here)
+        # 版面對不上的那一份，就算真的開在 Excel 裡也一律當成「不能用」——這道
+        # 旗標要在這裡看，不是只在 _on_excel_layout 設一次 excel_open：三秒後
+        # 這支就會照「檔案開著」把它扳回 True（見 _on_excel_layout 的說明）。
+        self._set_excel_open(here and not self.excel_layout_problem)
 
         # Excel 一關，畫面上那些數字就地作廢。它們是「這份 Excel 開著的時候，
         # 從它讀出來的現值跟網頁比出來」的結果 —— 檔一關就沒有東西替它們背書了：
@@ -1322,11 +1331,82 @@ class UiBackgroundMixin:
         # 那幾顆的話，Excel 一關它會一直亮著。
         self._apply_busy_state()
         # 接上的那一刻才讀得到那份表裡有誰——下單分頁的「執行帳戶」整格都是
-        # Excel 那一頭的答案（分頁名＋B17，見 refresh_order_accounts 與
+        # Excel 那一頭的答案（分頁名＋B22，見 refresh_order_accounts 與
         # _forget_round）。這裡是換檔那條路唯一「新路徑 ＋ 真的開著」同時成立
         # 的地方，也是「開啟EXCEL 之後帳戶就自己出現」靠的那一下。
         if value:
+            # 接上的那一刻先驗錨點（2026/09/02 使用者要求：「開啟EXCEL的時候
+            # 可以先檢查錨點」）。順序上它跟 refresh_order_accounts 是同時出發
+            # 的兩條背景執行緒，靠 excel_io.opened() 那把鎖排隊——版面對不上的
+            # 話，帳戶清單那一趟本來就會讀回空清單（沒有一個分頁的錨點對得上，
+            # 見 excel_io.list_account_sheets），不會有「清單有人但版面是錯的」
+            # 這種半調子狀態。
+            self.check_excel_layout()
             self.refresh_order_accounts()
+
+    def check_excel_layout(self):
+        """
+        開啟 EXCEL（或使用者自己把檔開起來）之後的**錨點檢查**：這份活頁簿是不是
+        程式認得的那一版持股管理表（A22 ＝「今年報酬率」，見 excel_io.layout_problem）。
+        2026/09/02 使用者要求。
+
+        對不上就把 excel_open 扳回 False，等於整支程式的 Excel 功能都停在那裡
+        （更新、讀取持股、寫入的按鈕全跟著 excel_open 走）——這不是「提醒一下
+        還是可以用」的等級：版面對不上代表程式要寫的 E/F 欄、要讀的 M/N 欄
+        全部落在別人的格子上，而且不會報錯。檔案本身不動（不會去關掉使用者的
+        Excel 視窗），人自己去開對的那一份。
+
+        不算進 `_excel_in_use()`：它只讀幾格、不 Activate、不跑巨集，跟別條
+        COM 路的互斥交給 `excel_io.opened()` 那把鎖就夠了。算進去反而會讓
+        「開啟EXCEL 之後那一兩秒」整排按鈕閃一下灰。
+        """
+        if self.path is None or self.excel_layout_busy:
+            return
+        self.excel_layout_busy = True
+        threading.Thread(target=self._excel_layout_worker,
+                         args=(self.path,), daemon=True).start()
+
+    def _excel_layout_worker(self, path):
+        """背景執行緒：接上活頁簿、問一次 layout_problem（見 check_excel_layout）。"""
+        import pythoncom
+
+        pythoncom.CoInitialize()
+        workbook = None
+        payload = {}
+        try:
+            with excel_io.opened(path, False) as (_excel, workbook, _attached):
+                payload = {"path": str(path), "problem": excel_io.layout_problem(workbook)}
+        except Exception as exc:
+            payload = {"error": str(exc)}
+        finally:
+            workbook = None
+            pythoncom.CoUninitialize()
+        self.queue.put(("excel_layout", payload))
+
+    def _on_excel_layout(self, payload):
+        """
+        錨點檢查的回話。
+
+        讀不到（"error"）**不擋**：那是別的問題——Excel 剛好又被關掉、正在被別的
+        程式鎖著之類，輪詢那條路自己會發現。這裡只處理「真的讀到了、而且對不上」
+        這一種，因為那是唯一「檔案開得好好的、看起來一切正常、寫下去卻會寫錯格」
+        的情況。
+
+        回來時路徑已經換掉的話整份丟掉：這一趟驗的是上一份檔。
+        """
+        self.excel_layout_busy = False
+        if "error" in payload or payload.get("path") != str(self.path):
+            return
+        problem = payload["problem"]
+        if problem is None:
+            return
+        # 記在旗標上而不是只把 excel_open 設 False：三秒一次的輪詢看到檔案還開著
+        # 就會把它扳回 True（見 _poll_excel），只設一次擋不住。旗標在使用者下次
+        # 按「開啟EXCEL」時清掉，那時會重驗一遍。
+        self.excel_layout_problem = problem
+        self._set_excel_open(False)
+        self._say("開到的持股管理表版面對不上，已經擋住——請開 10 家那一版。")
+        show_error(self.root, "開錯持股管理表", problem)
 
     def _has_round_data(self):
         """畫面上（左邊名單、右邊明細、訊息框）現在有沒有東西。"""
@@ -1360,16 +1440,17 @@ class UiBackgroundMixin:
         # 「執行帳戶」清單本身（有誰、排序、號碼），留著舊檔的名單會讓人對著
         # 另一份表裡的人下單。下一次 Excel 接上時會重讀（見 _set_excel_open）。
         self.order_return_rates = {}
-        # 只重畫選單，不在這裡去讀新檔的 B17：這支被呼叫的時候 Excel 一定是
+        # 只重畫選單，不在這裡去讀新檔的 B22：這支被呼叫的時候 Excel 一定是
         # 「還沒接上」的狀態（換檔那條路剛把 excel_open 設成 False，Excel 被關掉
         # 那條路更不用說）。補讀交給 _set_excel_open——接上的那一刻才是能讀的
         # 那一刻。
         self._fill_order_accounts()
-        # 持股、試算、股價、股票清單那幾份跟「換帳戶」要清的東西一模一樣，走同
-        # 一支，不在這裡再列一次（列兩份遲早會有一邊漏掉一項）。選中的那一位
-        # 不會被清掉——他是登入來的，跟開哪一份 Excel 無關（同 trader_of），
-        # 只是他手上的數字全部作廢，狀態列會退回「接著按『讀取持股』」。
-        self._clear_order_round()
+        # 持股、試算、股價那幾份跟「改勾選」要清的東西一模一樣，走同一支，不在
+        # 這裡再列一次（列兩份遲早會有一邊漏掉一項）。差別是這裡連「指定股票」
+        # 也要清掉（keep_stocks=False）：換了一份 Excel，候選清單本身就換了一份，
+        # 留著等於拿舊檔的股票去對新檔的分頁。勾選的那幾位由 _fill_order_accounts
+        # 順手清掉——名單都換了，舊名字不會出現在新清單上。
+        self._clear_order_round(keep_stocks=False)
 
     def _require_excel(self):
         """

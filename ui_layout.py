@@ -794,9 +794,9 @@ class UiLayoutMixin:
         # 它排在「讀取持股」左邊，因為作業是上位選擇，不是跟讀取平行的
         # 另一個選項：切作業會把股票清單整批清空（ui_order._on_order_job_changed），
         # 而且「讀取」要讀什麼是它決定的——只有買賣股票會順便讀下單試算
-        # M14:N18、只有出清・盤中會順便跑「更新股價」巨集。反過來擺（2026/08/28
+        # M19:N28、只有出清・盤中會順便跑「更新股價」巨集。反過來擺（2026/08/28
         # ～08/31 的版本）等於請人先讀一次、再選作業，只要作業跟預設值不同就得
-        # 再讀第二次；出清・盤中那種更隱性，讀是讀到了，只是 I4:I8 停在上次
+        # 再讀第二次；出清・盤中那種更隱性，讀是讀到了，只是 I4:I13 停在上次
         # 巨集留下的舊價，不會報錯。
         ttk.Label(top, text="作業").pack(side="left")
         for value in (orders.JOB_TRADE, orders.JOB_CLEAR, orders.JOB_FULL):
@@ -885,7 +885,7 @@ class UiLayoutMixin:
 
     def _build_order_job_trade(self, parent):
         """
-        買賣股票的第二列：張數與價格都來自 Excel 的下單試算 M14:N18，人不必填
+        買賣股票的第二列：張數與價格都來自 Excel 的下單試算 M19:N28，人不必填
         任何數字，所以這一列只剩「單位」一項設定。
 
         零股那半段還沒接（下單表單的交易盤別要選哪個值還沒人看過，見
@@ -928,7 +928,7 @@ class UiLayoutMixin:
     def _build_order_job_full(self, parent):
         """
         全持股交易的第二列：不必指定股票，整張與零股各自一個追價檔數，加上一顆
-        觸發 `自動計算` 巨集的按鈕——那支巨集算出來的 M14:N18 就是「這一輪打算
+        觸發 `自動計算` 巨集的按鈕——那支巨集算出來的 M19:N28 就是「這一輪打算
         做什麼」的完整計畫，人看過執行預覽才按下去（9.5：兩步，不是一顆按鈕
         直通下單）。位置跟買賣股票那顆對齊：設定在左、一條直線、動作在右。
 
@@ -953,27 +953,38 @@ class UiLayoutMixin:
         左欄：執行帳戶，一張兩欄的表（帳戶／今年報酬率），每一列一位。
 
         整格都是 Excel 那一頭的答案，**開檔就有，不必等登入**（2026/09/01 使用者
-        要求）：一份持股管理表的分頁本來就是一位交易人一頁，名字與 B17 一起讀回來
+        要求）：一份持股管理表的分頁本來就是一位交易人一頁，名字與 B22 一起讀回來
         （見 excel_io.list_account_sheets 與 ui_order.refresh_order_accounts）。
         列本身在 ui_order._fill_order_accounts 裡動態建。
 
-        **Treeview，`selectmode="browse"`（單選）**，跟更新分頁的交易人名單同一
-        個元件、同一個形狀（2026/09/01 使用者要求兩邊一致）。這一格 09/01 一天
-        之內換過三種：checkbox 多選 → 第一列的單選下拉 → 左欄 radiobutton 清單
-        → 這個。Treeview 在這個專案本來是「不得已才用」的元件（見設計原則第十三
-        節：畫不出格線、欄寬不會照內容自動調），這裡的不得已就是**一致性**：
-        兩份看起來像同一種東西的名單，用兩種不同元件會讓人以為它們的互動方式
-        不一樣。
+        **Treeview，列首自己畫 ☐／☑，可以勾好幾位**（2026/09/02 使用者決定，
+        推翻 09/01 那版「一次一位」）：買賣股票的操作是「勾帳戶 → 選股票 →
+        執行」，張數與價格全在各帳戶自己那一頁的下單試算裡，人不必逐位確認
+        任何數字，一位一位選反而跟手動下單一樣慢。
 
-        單選這件事因此改由「一次只有一列被選取」來表達，不再是 radiobutton 的
-        圓點——所以 ui_order 那邊要多做兩件事：`<<TreeviewSelect>>` 連程式自己
-        設定選取也會觸發（radiobutton 的 command 不會），重畫清單時得擋掉那次
-        假的「使用者換人了」；忙碌時也不能只把元件變灰，還要把選取扳回去
-        （見 _fill_order_accounts 與 _on_order_account_changed 的說明）。
+        元件還是 Treeview，跟更新分頁的交易人名單一致（09/01 使用者要求兩邊
+        用同一種元件）。這一格前後換過五種：checkbox 多選 → 第一列的單選下拉
+        → 左欄 radiobutton 清單 → 單選 Treeview → 這個。Treeview 在這個專案
+        本來是「不得已才用」的元件（見設計原則第十三節：畫不出格線、欄寬不會
+        照內容自動調），這裡的不得已就是**一致性**。
 
-        這一格**沒有按鈕**：清單自己會進來，而「讀取持股」是對選中那一位做的事，
-        擺在右邊「指定股票」那一列（見 _build_order_stocks）——它讀回來的東西
-        （持股、股價、試算）也是給那一列的股票下拉用的。
+        勾選狀態存在 `ui_order.order_checked`（一份分頁名的集合），**不是**
+        Treeview 的 selection：列首那個 ☐／☑ 只是 #0 欄文字的第一個字元。這樣
+        換來兩件事——重畫清單不會誤觸勾選（09/01 那版要擋
+        `<<TreeviewSelect>>`，因為程式自己 selection_set 也會送事件，跟使用者
+        點下去長得一模一樣），忙碌時也不必把選取扳回去，`_order_locked()` 在
+        點擊那一刻直接不理就好（見 ui_order._on_order_account_toggled）。
+        `selectmode="none"` 就是為了讓「被選取」這個狀態整個消失，畫面上只剩
+        勾選一種語意。
+
+        上面那一列兩顆「全選」「全不選」：20 組帳號一顆一顆點太慢，而「全部
+        帳戶都跑」正是買賣股票最常見的用法（使用者 2026/09/02 的原話是「程式
+        去執行全部帳戶的下單試算」）。這兩顆只動勾選，不碰 Excel、不送任何
+        委託，所以不跳確認框。
+
+        「讀取持股」不在這一格：它是對**勾起來的那幾位**做的事，擺在右邊
+        「指定股票」那一列（見 _build_order_stocks）——它讀回來的東西（持股、
+        股價、試算）也是給那一列的股票下拉用的。
 
         獨佔一整欄是量過的：20 組帳號一列疊一列大約 480 像素，剛好吃滿一欄，
         再多也不會（帳號數有上限）。寬度鎖 260（做法同指定股票欄：
@@ -986,24 +997,37 @@ class UiLayoutMixin:
         box.grid_propagate(False)
         paned.add(box, weight=0)
 
+        all_bar = ttk.Frame(box)
+        all_bar.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Button(all_bar, text="全選", bootstyle="secondary-outline",
+                   command=lambda: self._on_order_accounts_all(True)).pack(side="left")
+        ttk.Button(all_bar, text="全不選", bootstyle="secondary-outline",
+                   command=lambda: self._on_order_accounts_all(False)).pack(side="left", padx=(6, 0))
+
         # #0（樹狀那一欄）當「帳戶」，跟更新分頁的名單一樣——那一欄不必自己
-        # 建，而且是唯一能靠左對齊放名字的欄。show="tree headings" 才會同時
+        # 建，而且是唯一能靠左對齊放名字的欄，列首的 ☐／☑ 就寫在它的文字裡
+        # （見 ui_order._order_account_text）。show="tree headings" 才會同時
         # 畫出 #0 與表頭。
+        #
+        # selectmode="none"：這張表沒有「選取」這件事，只有勾選（見上面的
+        # 說明）。點哪一列都算勾那一列，所以綁的是 <Button-1> 而不是
+        # <<TreeviewSelect>>——identify_row 問的是「點在哪一列」，跟選取狀態
+        # 無關，Treeview 被 state(["disabled"]) 變灰時也照樣送得到，所以
+        # _on_order_account_toggled 自己還要再問一次 _order_locked()。
         self.order_accounts = ttk.Treeview(box, columns=("rate",), show="tree headings",
-                                           selectmode="browse")
+                                           selectmode="none")
         self.order_accounts.heading("#0", text="帳戶")
-        self.order_accounts.column("#0", width=wide(120), minwidth=wide(80), stretch=True)
+        self.order_accounts.column("#0", width=wide(130), minwidth=wide(90), stretch=True)
         self.order_accounts.heading("rate", text="今年報酬率")
         self.order_accounts.column("rate", width=wide(80), minwidth=wide(64),
                                    anchor="e", stretch=False)
-        self.order_accounts.grid(row=0, column=0, sticky="nsew")
+        self.order_accounts.grid(row=1, column=0, sticky="nsew")
         acc_bar = ttk.Scrollbar(box, orient="vertical", command=self.order_accounts.yview)
-        acc_bar.grid(row=0, column=1, sticky="ns")
+        acc_bar.grid(row=1, column=1, sticky="ns")
         self.order_accounts.configure(yscrollcommand=acc_bar.set)
-        self.order_accounts.bind("<<TreeviewSelect>>",
-                                 lambda _e: self._on_order_account_changed())
+        self.order_accounts.bind("<Button-1>", self._on_order_account_click)
 
-        box.rowconfigure(0, weight=1)
+        box.rowconfigure(1, weight=1)
         box.columnconfigure(0, weight=1)
 
     def _build_order_stocks(self, paned):
@@ -1041,7 +1065,7 @@ class UiLayoutMixin:
         pick = ttk.Frame(box)
         pick.grid(row=0, column=0, sticky="ew")
 
-        # 「讀取持股」：把選中那一位的持股（E/F）、股價（I）、下單試算（M14:N18）
+        # 「讀取持股」：把選中那一位的持股（E/F）、股價（I）、下單試算（M19:N28）
         # 讀進來，也就是下面那個股票下拉的候選從哪來。2026/09/01 從左欄搬過來、
         # 順便改名——原本叫「讀取持股」擺在帳戶清單上面，而報酬率現在
         # 開檔就自己進來了（見 ui_order.refresh_order_accounts），名字裡那一半

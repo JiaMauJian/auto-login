@@ -1,24 +1,28 @@
 """
 Excel 讀寫。只認得持股管理表的這幾格，其餘全是公式，一律不碰：
 
-    D4:D8  股票名稱(代號)   只讀，用來對出每一列是哪一檔
-    E4:E8  股數            <- 未實現損益的「成交股數」
-    F4:F8  成本            <- 未實現損益的「成交均價」
-    I4:I8  股價            只讀，跟 D4:D8 同一列對應同一檔股票；由使用者既有的
+認得的是 **`持股管理-台美股-10家.xls` 那一版**（一頁 10 檔，2026/09/02 使用者
+定案統一用它，見 STOCK_LIMIT）：
+
+    D4:D13  股票名稱(代號)  只讀，用來對出每一列是哪一檔
+    E4:E13  股數           <- 未實現損益的「成交股數」
+    F4:F13  成本           <- 未實現損益的「成交均價」
+    I4:I13  股價           只讀，跟 D 欄同一列對應同一檔股票；由使用者既有的
                            「更新股價」巨集（Module1.更新股價）填入，出清股票
                            多輪模式的「自動更新股價」用（見 orders.py 開頭說明）
-    B8     現金餘額         <- 由紀錄檔的現金流水算出來
-    今年報酬率              只讀，下單分頁的「執行帳戶」選單照它由低到高排序
-                           （＝建議的處理順序，見 orders.order_accounts）——這一
-                           格不同格式的持股管理表所在列不同（B17／B22／B32 都
-                           出現過），改成掃 A 欄找「今年報酬率」文字標籤，值在
-                           標籤同一列的 B 欄（見 read_return_rate）
-    D1     程式維護提醒      每次寫入順便刷新，關閉程式時清掉，見 marker_enabled
+    M19:N28 下單試算        只讀，加碼股數（正買負賣）與價格，由「自動計算」巨集
+                           寫入；買賣股票作業的張數與價格就是這裡來的
+    B8      現金餘額        <- 由紀錄檔的現金流水算出來
+    A22/B22 今年報酬率      只讀。A22 是**整份表的錨點**（開檔就檢查，見
+                           layout_problem），B22 是值——下單分頁的「執行帳戶」
+                           照它由低到高排執行順序（見 orders.order_accounts）
+    D1      程式維護提醒     每次寫入順便刷新，關閉程式時清掉，見 marker_enabled
 
-位置寫死是刻意的：這支程式只認得這個特定格式的持股管理表，
-認錯了就是把數字寫進別人的格子裡，寧可一開始就對不上而報錯。今年報酬率是
-唯一的例外——它只讀不寫，掃錯位置頂多是讀不到值（回 None），不會覆蓋任何人
-的資料，所以用文字標籤定位換取跨格式相容，不受這條硬寫死的原則約束。
+位置寫死是刻意的：這支程式只認得這個特定格式的持股管理表，認錯了就是把數字
+寫進別人的格子裡，寧可一開始就對不上而報錯——**「一開始就對不上而報錯」現在
+真的做出來了**：開檔時檢查 A22 是不是「今年報酬率」，不是就擋下來（09/02 使用者
+要求）。5 檔那一版的同一個標籤在 A17，而它的持股只到 D8、下單試算在 M14:N18，
+每一個程式會讀寫的位置都不一樣。
 
 版面完全維持原樣，沒有任何輔助欄位 —— 前日餘額、每日淨收付、最後更新日，
 全部記在 ledger.py 管理的紀錄檔裡。
@@ -38,31 +42,41 @@ from util import env_int, to_num
 ENV_FILE = ".env"
 ENV_KEY = "EXCEL_PATH"
 
-HOLDING_ROWS = range(4, 9)
+# 一張表最多幾檔持股，也就是巨集裡的 `Def_stock_limit`。**10**（2026/09/02
+# 使用者定案：統一用 `持股管理-台美股-10家.xls` 這一版，不再支援 5 檔那一版）。
+#
+# 這份表的每一個位置都是從它算出來的，所以這裡只留這一個數字，HOLDING_ROWS、
+# PLAN_ROWS、今年報酬率那一列全部由它推——以前是各寫死一次，改表的時候很容易
+# 只改到一邊，而那種錯不會報錯，只會把 M 欄某一列的試算值配到別檔股票身上
+# （見 PLAN_ROWS 的說明）。三個位置實測都對得上（2026/09/02 用那份表核過）：
+# 持股 D4:D13 ＝ 4 ～ 3+limit、下單試算 M19:N28 ＝ limit+9 ～ limit*2+8、
+# 今年報酬率 A22/B22 ＝ limit+12。
+STOCK_LIMIT = 10
+
+HOLDING_ROWS = range(4, 4 + STOCK_LIMIT)
 COL_NAME, COL_QTY, COL_COST = 4, 5, 6
 CELL_BALANCE = (8, 2)
 
-# I 欄「股價」，跟 D4:D8 同一列對應同一檔股票——這份表本來就只有這 5 列
-# 持股，跟股數/成本是同一個列配置，不是另外一套對應規則。只讀，程式從來
-# 不寫這一欄（見 read_sheet）。
+# I 欄「股價」，跟 D 欄同一列對應同一檔股票——跟股數/成本是同一個列配置，
+# 不是另外一套對應規則。只讀，程式從來不寫這一欄（見 read_sheet）。
 COL_PRICE = 9
 
 # 使用者既有的巨集（2026/08/28 使用者確認：Module1 的 Sub 更新股價()），
 # 平常手動點的「更新」按鈕背後就是呼叫這個——多輪出清模式的「自動更新股價」
 # 開關，就是每一輪開始前對「每一個要用到的分頁」各觸發一次這個巨集，等它
-# 跑完再讀那一頁的 I4:I8（見 run_update_price_macro／orders.py 開頭的模式
+# 跑完再讀那一頁的 I4:I13（見 run_update_price_macro／orders.py 開頭的模式
 # 說明）。2026/08/29 拿到巨集原始碼後確認它抓的是 Yahoo 的報價 API、而且
 # 只對 ActiveSheet 動作，所以「一頁一次」是硬性要求，不是保守做法。
 UPDATE_PRICE_MACRO = "Module1.更新股價"
 
 # 下單試算：M 欄是股數（正買負賣）、N 欄是價格，一列對一檔股票，跟上面 D/E/F
-# 那五列是**同一批股票的另一組列**（D4 對 M14、D5 對 M15…）。列號在巨集裡是算
-# 出來的（stock_limit + 9 ～ stock_limit * 2 + 8，stock_limit = 5），不是寫死
-# 的——那個數字改了這裡要跟著改，見 docs/介面規劃.md 9.1 那張表。
+# 那幾列是**同一批股票的另一組列**（10 檔版：D4 對 M19、D5 對 M20…）。列號在
+# 巨集裡是算出來的（stock_limit + 9 ～ stock_limit * 2 + 8），這裡照同一條式子
+# 從 STOCK_LIMIT 推，見 docs/介面規劃.md 9.1 那張表。
 #
 # 只讀，程式從來不寫這兩欄：要動它們是靠觸發使用者自己的「自動計算」巨集，
 # 跟 I 欄那個「巨集寫、程式讀」的分工一樣。
-PLAN_ROWS = range(14, 19)
+PLAN_ROWS = range(STOCK_LIMIT + 9, STOCK_LIMIT * 2 + 9)
 COL_PLAN_QTY, COL_PLAN_PRICE = 13, 14
 
 # 使用者既有的另一支巨集（Module1）。跟「更新股價」一樣，只認 ActiveSheet
@@ -76,11 +90,15 @@ AUTO_CALC_MACRO = "Module1.自動計算"
 # 今年報酬率，下單功能排執行順序用（報酬率低的先執行）。只讀，不寫——
 # 這一格本來就是 Excel 自己的公式算出來的，程式沒有理由覆蓋它。
 #
-# 位置不寫死：不同格式的持股管理表這格所在列不同（B17／B22／B32 都出現過，
-# 2026/09/02 使用者回報），改成掃 A 欄找這個文字標籤，值在標籤同一列的 B 欄
-# （見 read_return_rate）。掃描範圍抓寬一點，讓還沒見過的格式也有機會對上。
+# **這一格同時是整份表的錨點**（2026/09/02 使用者指定）：標籤在 A22、值在
+# B22，對不上就是開錯版本的持股管理表，開檔那一刻就擋下來（見 layout_problem）。
+# 09/02 早上曾經改成掃 A 欄找標籤，好讓 B17／B22／B32 三種格式都讀得到；同一天
+# 下午使用者定案「統一用 10 家那一版」，掃描就退場了——會掃是因為當時要相容
+# 多種格式，而相容多種格式本身正是危險的來源：其他兩種格式的下單試算根本不在
+# M19:N28，讀得到報酬率只會讓一份對不上的表看起來像可以用。
 RETURN_RATE_LABEL = "今年報酬率"
-RETURN_RATE_SCAN_ROWS = 60
+RETURN_RATE_ROW = STOCK_LIMIT + 12
+COL_LABEL, COL_RETURN_RATE = 1, 2
 
 # D1 沒被上面三處佔用，理論上可以安全借來提醒「這份檔案有程式在管」。
 # 語意是「這份檔案由程式維護」的持久標記，不是「程式現在正在跑」的即時燈號——
@@ -185,15 +203,21 @@ def stock_code_of(text):
     return found.group(1).strip().upper() if found else None
 
 
-def read_sheet(sheet):
+def read_sheet(sheet, rows=None):
     """
     把一個分頁讀成純 Python 資料，之後的計算都不必再碰 COM。
 
     這樣做不只是為了乾淨：COM 每讀一格都是一次跨行程呼叫，而且介面版之後
     要在背景執行緒跑，讓計算完全脫離 COM 物件會少掉很多麻煩。
+
+    `rows` 不給就是 HOLDING_ROWS（D4:D13，＝程式會寫回 E/F 的那幾列），
+    也是所有呼叫端目前用的值。留這個參數是因為 09/02 早上下單那條路曾經掃得比
+    寫得寬（那時候持股只認 5 列），統一成 10 檔版之後兩邊又是同一個範圍了。
+    每一列回傳的 "row" 是真正的 Excel 列號，寫回去的時候照它定位。
     """
+    scan = HOLDING_ROWS if rows is None else rows
     rows = []
-    for row in HOLDING_ROWS:
+    for row in scan:
         label = sheet.Cells(row, COL_NAME).Value
         code = stock_code_of(label)
         if not code:
@@ -213,44 +237,62 @@ def read_sheet(sheet):
     }
 
 
-def _find_return_rate_row(sheet):
+def anchor_ok(sheet):
     """
-    A 欄一次讀 RETURN_RATE_SCAN_ROWS 列（1 次 COM 往返），找「今年報酬率」
-    這個文字標籤在第幾列；找不到回 None。
+    這個分頁是不是「程式認得的那一版持股管理表」：**A22 要正好是「今年報酬率」**
+    （2026/09/02 使用者指定的錨點檢查）。
 
-    整欄一次讀完再在 Python 端找，不是一格一格 Cells() 問過去——後者對每一列
-    都是一次 COM 往返，20 位帳戶乘上 60 列會很有感；前者不管掃幾列都只有 1 次。
+    為什麼是這一格：整份表的兩個區塊都是照巨集的 `stock_limit` 算出來的，
+    10 檔那一版把它排在 `stock_limit + 12` ＝ 第 22 列。換成 5 檔那一版，同一個
+    標籤會落在 A17，而那一版的下單試算在 M14:N18、持股只有 D4:D8——**每一個
+    程式會讀寫的位置都不一樣**。一格對得上，其餘位置就都對得上；對不上就整份
+    表都不能用，不是只有報酬率讀不到。
 
-    用 Range(Cells, Cells) 而不是 Cells().Resize()：後者在這支程式的 win32com
-    環境下實測會回傳錯誤範圍（只有右下角那一格，不是整個矩形，2026/09/02 發現），
-    前者才是這個環境下讀得到整欄的寫法。
+    只讀一格（1 次 COM 往返），所以敢在開檔時對每一個分頁都問一次。
     """
-    values = sheet.Range(
-        sheet.Cells(1, 1), sheet.Cells(RETURN_RATE_SCAN_ROWS, 1)
-    ).Value
-    for i, row in enumerate(values):
-        text = row[0] if isinstance(row, tuple) else row
-        if isinstance(text, str) and text.strip() == RETURN_RATE_LABEL:
-            return i + 1
-    return None
+    label = sheet.Cells(RETURN_RATE_ROW, COL_LABEL).Value
+    return isinstance(label, str) and label.strip() == RETURN_RATE_LABEL
+
+
+def layout_problem(book):
+    """
+    開檔時的錨點檢查（2026/09/02 使用者要求）：這份活頁簿有沒有任何一個看得見的
+    分頁長得像程式認得的那一版。沒有就回一句話說明，有就回 None。
+
+    **一個都對不上才算問題**，不是「有一個對不上就擋」：一份活頁簿裡可以有說明頁、
+    工作用的空白頁，那些本來就不是交易人分頁（見 list_account_sheets）。全部都對
+    不上才代表「開錯檔案／開到別的版本」——那時候不能讓程式繼續，它接下來要寫的
+    E/F 欄、要讀的 M/N 欄全部會落在別人的格子上，而且不會報錯。
+    """
+    visible = [s for s in book.Worksheets if s.Visible == -1]
+    if any(anchor_ok(sheet) for sheet in visible):
+        return None
+    names = "、".join(s.Name.strip() for s in visible[:5]) or "（沒有看得見的分頁）"
+    return (f"這份活頁簿裡沒有一個分頁的 A{RETURN_RATE_ROW} 是「{RETURN_RATE_LABEL}」，"
+            f"跟程式認得的持股管理表（{STOCK_LIMIT} 檔那一版：持股 D4:D"
+            f"{3 + STOCK_LIMIT}、下單試算 M{PLAN_ROWS[0]}:N{PLAN_ROWS[-1]}、"
+            f"今年報酬率 B{RETURN_RATE_ROW}）對不上。\n\n"
+            f"看到的分頁：{names}\n\n"
+            f"多半是開到別的版本（5 檔那一版的今年報酬率在 A17，"
+            f"每一個位置都不一樣）。請改開 10 家那一版。")
 
 
 def read_return_rate(sheet):
     """
-    今年報酬率，只給下單功能排執行順序用。
+    今年報酬率（B22），只給下單功能排執行順序用。
 
-    位置不寫死：先掃 A 欄找「今年報酬率」文字標籤（見 _find_return_rate_row），
-    再讀標籤同一列的 B 欄——不同格式的持股管理表這格所在列不一樣（B17／B22／
-    B32 都出現過），寫死單一列號會在別的格式上讀錯格。
+    位置寫死，而且**先驗錨點**（見 anchor_ok）：A22 不是「今年報酬率」就回 None，
+    不去猜它搬到哪裡了。09/02 早上那版會掃 A 欄找標籤，好相容 B17／B22／B32 三種
+    格式；同一天下午使用者定案統一用 10 家那一版之後，那種相容反而有害——別的
+    格式讀得到報酬率，只會讓一份每個位置都對不上的表看起來像可以用。
 
-    讀不到（掃不到標籤、空格、公式錯誤值那類）就回 None，不要回 0——0 在這裡
+    讀不到（錨點不對、空格、公式錯誤值那類）就回 None，不要回 0——0 在這裡
     看起來像一個真正的答案（今年打平），會被誤判成「報酬率最低，第一個執行」，
     跟 planner.bank_balance 讀不懂銀行餘額時的態度一樣。
     """
-    row = _find_return_rate_row(sheet)
-    if row is None:
+    if not anchor_ok(sheet):
         return None
-    return to_num(sheet.Cells(row, 2).Value, None)
+    return to_num(sheet.Cells(RETURN_RATE_ROW, COL_RETURN_RATE).Value, None)
 
 
 def list_account_sheets(book):
@@ -262,33 +304,64 @@ def list_account_sheets(book):
     長得出來，但一份持股管理表的分頁**本來就是一位交易人一頁**，開檔當下就
     知道有誰了，不必等登入。登入只跟「送得出委託」有關，跟「這份表裡有誰」無關。
 
-    只讀今年報酬率（見 read_return_rate）與 D4:D8，不跑巨集、不碰 E/F/I/M——一位
-    一到七次 COM 往返，20 位也只是幾十毫秒，這也是它敢在開檔／切分頁時自動跑
-    的原因（見 ui_order.refresh_order_accounts）。
+    只讀 A22／B22（錨點與今年報酬率），不跑巨集、不碰 D/E/F/I/M——一位兩次 COM
+    往返，20 位也只是幾十毫秒，這也是它敢在開檔／切分頁時自動跑的原因
+    （見 ui_order.refresh_order_accounts）。
 
-    **哪些分頁算數**：看得見的、而且「今年報酬率讀得到數字」或「D4:D8 至少有一個
-    股票代號」——那兩樣是持股管理表分頁的特徵（見這個檔案開頭的格子地圖）。純說明頁、
-    工作用的空白頁兩樣都沒有，就不會混進交易人清單裡。不用分頁名稱去猜（名字就是
-    人名，猜不出規則），也不預設「所有分頁都是交易人」——2026/09/01 當下這份表
-    確實只有一頁而且就是交易人，但那不是可以靠的前提。
+    **哪些分頁算數**：看得見的、而且**錨點對得上**（A22 是「今年報酬率」，見
+    anchor_ok）。2026/09/02 之前是「報酬率讀得到 或 D 欄至少有一個股票代號」那種
+    兩選一的特徵判斷；改用錨點之後，判斷的是「這一頁是不是程式認得的那一版持股
+    管理表」——那才是真正該問的問題，而且順便把「一頁全空的新交易人」也收進來了
+    （他一格股票都還沒填，舊的判斷會把他整個漏掉，人在畫面上找不到他）。
+
+    不用分頁名稱去猜（名字就是人名，猜不出規則），也不預設「所有分頁都是交易人」。
     """
     accounts = []
     for sheet in book.Worksheets:
         # -1 是 xlSheetVisible；0 隱藏、2 是「非常隱藏」（只能用 VBA 叫回來）。
-        if sheet.Visible != -1:
+        if sheet.Visible != -1 or not anchor_ok(sheet):
             continue
-        rate = read_return_rate(sheet)
-        has_stock = any(stock_code_of(sheet.Cells(row, COL_NAME).Value)
-                        for row in HOLDING_ROWS)
-        if rate is None and not has_stock:
-            continue
-        accounts.append((sheet.Name.strip(), rate))
+        accounts.append((sheet.Name.strip(),
+                         to_num(sheet.Cells(RETURN_RATE_ROW, COL_RETURN_RATE).Value, None)))
     return accounts
+
+
+def read_stock_list(book):
+    """
+    **第一個分頁**的 D4~D13 有哪幾檔股票，回傳 [(代號, D 欄原文), ...]。
+    下單分頁「指定股票」那個下拉的候選就是這一份（2026/09/02 使用者指定）。
+
+    為什麼是第一個分頁而不是各帳戶自己那一頁：下單分頁改成「勾好幾個帳戶、
+    一次跑完」之後，要選的是**這一輪要動哪幾檔股票**，不是「某一位手上有
+    什麼」——每位手上的檔數本來就不一樣，拿其中一位的清單當候選會讓別人
+    多出來的那幾檔選不到。哪一位沒有選中的那一檔，執行預覽那一列會寫
+    「這一位沒有這檔」並略過（見 orders.plan_trade_orders）。
+
+    「第一個分頁」＝**分頁列上由左到右第一個看得見的**。藏起來的不算：藏起來的
+    那一頁不是人講「第一個分頁」時指的東西。用 `for ... in book.Worksheets` 取，
+    不用 `book.Worksheets(1)`——這個檔案裡其他每一處都是用迭代的，跟著同一種寫法
+    走（這個 win32com 環境有過「看起來該行的 COM 寫法其實回傳怪東西」的前科：
+    `Cells().Resize()` 實測只回右下角那一格，不是整個矩形，2026/09/02 踩過）。
+
+    只讀不寫，掃到什麼算什麼——這個分頁如果不是持股管理表（將來有人在最
+    前面插一頁說明），D4~D13 就一個股號都對不出來，回空清單，畫面上的下拉
+    是空的，不會拿一份猜出來的清單讓人選。
+    """
+    sheet = next((s for s in book.Worksheets if s.Visible == -1), None)
+    if sheet is None:
+        return []
+    stocks = []
+    for row in HOLDING_ROWS:
+        label = sheet.Cells(row, COL_NAME).Value
+        code = stock_code_of(label)
+        if code:
+            stocks.append((code, str(label).strip()))
+    return stocks
 
 
 def read_order_plan(sheet):
     """
-    讀這一頁的下單試算：M14:N18，配上 D4:D8 的股票代號。
+    讀這一頁的下單試算：M19:N28，配上 D4:D13 的股票代號。
     回傳 {股票代號: {"name", "qty", "price"}}，只讀不寫。
 
     照 read_return_rate 的樣子獨立一支，不塞進 read_sheet——那支是更新分頁在
@@ -347,13 +420,13 @@ def _run_macro_watched(excel, macro, on_stuck, stuck_after):
 
 def run_auto_calc_macro(excel, sheet, on_stuck=None, stuck_after=MACRO_STUCK_AFTER):
     """
-    對 sheet 這一個分頁觸發「自動計算」巨集：依 M4:M8 目標比重反覆試算，
-    結果寫進 M14:N18。
+    對 sheet 這一個分頁觸發「自動計算」巨集：依 M4:M13 目標比重反覆試算，
+    結果寫進 M19:N28。
 
     跟 run_update_price_macro 同一條規矩：**一定要傳分頁進來、一頁跑一次**，
     只認 ActiveSheet；呼叫端一樣要自己包 keep_active_sheet()。
 
-    過程中會**暫時改寫 E4:E8／F4:F8／B8 再還原**（docs/介面規劃.md 9.6 第 3
+    過程中會**暫時改寫 E4:E13／F4:F13／B8 再還原**（docs/介面規劃.md 9.6 第 3
     點），跟更新分頁「E/F/B8 一律覆蓋」正面衝突，呼叫端要確保跟那邊互斥
     （`_excel_in_use()`）。也可能跳 MsgBox（見 AUTO_CALC_MACRO 上面的說明），
     卡住的話畫面會停在「跑巨集中」不動，要去 Excel 視窗把對話框按掉——
@@ -407,7 +480,7 @@ def run_update_price_macro(excel, sheet, on_stuck=None, stuck_after=MACRO_STUCK_
     `Range("D" & i)`／`Range("I" & i)`，VBA 把這種寫法解析成 ActiveSheet，
     所以它只更新「當下作用中的那一頁」。2026/08/29 之前這裡整批只呼叫一次，
     20 個帳戶裡只有使用者上次剛好停在的那一頁拿到新價格，其餘讀回來的是
-    上一次的舊 I4:I8——不會報錯、不會少一欄、看起來完全正常，而盤中追價的
+    上一次的舊 I4:I13——不會報錯、不會少一欄、看起來完全正常，而盤中追價的
     基準價就建立在這上面。呼叫端要自己包 keep_active_sheet()，跑完把畫面
     還給使用者。
 
@@ -417,7 +490,7 @@ def run_update_price_macro(excel, sheet, on_stuck=None, stuck_after=MACRO_STUCK_
 
     巨集內部是 MSXML2.XMLHTTP 對 Yahoo 報價 API 打**同步** GET
     （`.Open "GET", url, False` 第三個參數 False 就是同步），所以
-    Application.Run 回來的時候 I4:I8 確實已經是這一次抓到的值，不必再等、
+    Application.Run 回來的時候 I4:I13 確實已經是這一次抓到的值，不必再等、
     也不必懷疑讀到舊數字。代價是「一檔股票一次 HTTP 往返」：5 檔 × N 個
     分頁的請求會逐一發出去，分頁多的時候這一步本來就慢，那是慢不是卡住。
 
@@ -518,7 +591,7 @@ def is_open_in_excel(path):
 # 程式自己的讀寫都是 sheet.Cells(...) 這種限定寫法，不受別人 Activate 影響；
 # 但巨集用的是無限定的 Range()，只認 ActiveSheet（見 run_update_price_macro）。
 # 兩條執行緒交錯 Activate 的話，巨集會跑在別人剛切過去的那一頁上——那一頁被更新
-# 兩次、自己這一頁從來沒更新過，而接著讀回來的是舊的 I4:I8。不報錯、不缺欄位，
+# 兩次、自己這一頁從來沒更新過，而接著讀回來的是舊的 I4:I13。不報錯、不缺欄位，
 # 只是靜靜地拿舊價格當盤中追價的基準，跟 2026/08/29 修掉的那個 ActiveSheet
 # bug 是同一種失敗，只是成因換成並行。
 #
