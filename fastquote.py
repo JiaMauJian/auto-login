@@ -78,6 +78,30 @@ channel 42 的推播裡，一支股票拆成好幾段子紀錄，每段開頭都
     0x02  委買一／委賣一／成交價，各 4 bytes little-endian、值 ÷100 才是價格。
           兩檔不同股票的真實封包交叉驗證過，數字跟畫面顯示一致（見記憶
           fastquote-ws-binary-decoded）
+
+## expect_page() 有時候真的等不到「page」事件，但視窗其實開出來了
+
+2026/09/02 真帳號盤中實測踩到：`_order_quotes_job` 丟出 `TimeoutError`，30 秒內
+沒等到 `context.expect_page()` 的「page」事件；但事後去看 Chrome，那個彈出視窗
+其實真的開出來了（標題列有「Chrome 目前受到自動測試軟體控制」，確認是同一個
+自動化 context 開的，不是使用者自己手動點開），而且已經在正常收報價。也就是說
+`openWinURL()` 那次呼叫**沒有失敗**，只是 Playwright 這次沒能在 timeout 內把
+新視窗跟 `context.expect_page()` attach 起來——原因不明（懷疑跟 `window.open()`
+帶 width/height 開成獨立視窗、不是同一個瀏覽器視窗裡的分頁有關，CDP 的
+auto-attach 偶爾比較慢），只確認了現象，沒查到根因。
+
+沒接住的那個視窗會變孤兒：例外發生在 `__init__` 裡面、`self._page` 還沒被
+指派，呼叫端包的 `try/finally: stream.close()` 救不了它（那個 finally 包的是
+`stream = FastQuoteStream(page)` 這一整行執行完之後）。孤兒視窗留著不會馬上壞
+事，但 `openWinURL()` 開窗用固定視窗名稱，下一次呼叫如果只是抓到同一個名稱的
+舊視窗（不是真的開一個新的），Playwright 又會等不到「page」事件、重演同一個
+逾時。
+
+`__init__` 因此改成兩段防呆：進來就先找一次 `context.pages` 裡有沒有 FastQuote
+的孤兒分頁、有就關掉，保證每次都是從乾淨狀態開新視窗；`expect_page()` 逾時之後
+不當場放棄，改成用同一招（`page.wait_for_timeout` 分段等，理由同 `wait_for()`）
+在 `context.pages` 裡多等一段時間看視窗會不會自己冒出來——冒出來就照用，真的
+沒有才是這次真的失敗，把原本的 `TimeoutError` 丟出去給呼叫端。
 """
 
 import re
@@ -85,6 +109,7 @@ import threading
 import time
 
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 # 開彈出視窗要用網站自己的 fastQuoteUtil.openWinURL()，不是 page.goto 這個
 # 絕對網址——見模組說明「另開分頁不是一律不行」，直接 goto 過去就沒有 opener
@@ -158,6 +183,39 @@ def _decode_records(data):
     return out
 
 
+_FASTQUOTE_URL_PART = "FastQuote/index.jsp"
+
+
+def _find_fastquote_page(context):
+    """context 現有分頁裡找 FastQuote 彈出視窗（URL 含 FastQuote/index.jsp）。找不到回 None。"""
+    for pg in context.pages:
+        try:
+            if not pg.is_closed() and _FASTQUOTE_URL_PART in pg.url:
+                return pg
+        except PlaywrightError:
+            continue
+    return None
+
+
+def _wait_for_fastquote_page(page, context, timeout_ms, poll_ms=500):
+    """
+    見模組說明「expect_page() 有時候真的等不到 page 事件」：expect_page() 逾時
+    之後用這個補救，在 context.pages 裡多等一段時間看視窗是不是其實已經開出來
+    了。用 page.wait_for_timeout 分段等、不是 time.sleep——跟 wait_for() 同一個
+    理由，plain sleep 不會讓 Playwright 同步 API 去處理「新分頁出現」這種協定
+    訊息，事件會卡住收不到。
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        found = _find_fastquote_page(context)
+        if found is not None:
+            return found
+        remaining_ms = (deadline - time.monotonic()) * 1000
+        if remaining_ms <= 0:
+            return None
+        page.wait_for_timeout(min(poll_ms, remaining_ms))
+
+
 class FastQuoteStream:
     """
     訂閱幾檔股票的即時委買一／委賣一／成交價，背景持續更新，只能在建立這個物件的
@@ -191,9 +249,30 @@ class FastQuoteStream:
         # 一層無害的 wrapper，不需要特別防止。
         context = page.context
         context.add_init_script(_PATCH_WEBSOCKET_JS)
-        with context.expect_page() as popup_info:
-            page.evaluate(_OPEN_POPUP_JS)
-        self._page = popup_info.value
+
+        # 上一個 FastQuoteStream 萬一在這段 __init__ 裡例外過（見模組說明），
+        # 會留下一個孤兒彈出視窗——openWinURL() 開窗用固定視窗名稱，留著不清
+        # 掉的話，這次呼叫可能只是抓到那個舊視窗，不會觸發新的「page」事件，
+        # expect_page() 就會白等到逾時。先清乾淨再開，保證這次一定是新視窗。
+        stray = _find_fastquote_page(context)
+        if stray is not None:
+            try:
+                stray.close()
+            except PlaywrightError:
+                pass
+
+        try:
+            with context.expect_page() as popup_info:
+                page.evaluate(_OPEN_POPUP_JS)
+            self._page = popup_info.value
+        except PlaywrightTimeoutError:
+            # 見模組說明「expect_page() 有時候真的等不到 page 事件」：視窗可能
+            # 其實開出來了，只是沒等到通知。多等一段時間找一次，找不到才是這
+            # 次真的失敗。
+            self._page = _wait_for_fastquote_page(page, context, timeout_ms=15000)
+            if self._page is None:
+                raise
+
         self._page.wait_for_load_state("domcontentloaded")
 
         self._page.on("websocket", self._on_websocket)
