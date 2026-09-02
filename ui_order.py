@@ -200,6 +200,10 @@ class UiOrderMixin:
                         if read_plan:
                             data["plan"] = excel_io.read_order_plan(sheet)
                         sheets[name] = data
+                # 巨集寫過 I4:I8 就要存檔，不然沒接上使用者既有視窗時
+                # close_workbook 會 Close(False) 把這次更新的股價丟掉。
+                if run_macro:
+                    workbook.Save()
                 payload = {"sheets": sheets, "errors": errors}
         except Exception as exc:
             payload = {"error": str(exc)}
@@ -818,6 +822,8 @@ class UiOrderMixin:
                             # 一頁一次，理由同 _order_read_worker。
                             excel_io.run_update_price_macro(excel, sheet)
                             sheets[name] = excel_io.read_sheet(sheet)
+                # 巨集寫過 I4:I8，理由同 _order_read_worker。
+                workbook.Save()
                 payload = {"sheets": sheets}
         except Exception as exc:
             payload = {"error": str(exc)}
@@ -1131,6 +1137,8 @@ class UiOrderMixin:
                         excel_io.run_update_price_macro(excel, sheet)
                         excel_io.run_auto_calc_macro(excel, sheet)
                         plans[name] = excel_io.read_order_plan(sheet)
+                # 兩支巨集都寫過格子（I4:I8、M14:N18），理由同 _order_read_worker。
+                workbook.Save()
                 payload = {"plans": plans, "errors": errors}
         except Exception as exc:
             payload = {"error": str(exc)}

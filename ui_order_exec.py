@@ -501,6 +501,9 @@ class UiOrderExecMixin:
                         if run_macro:
                             excel_io.run_update_price_macro(excel, sheet)
                         data[name] = excel_io.read_sheet(sheet)
+                # 巨集寫過 I4:I8 就要存檔，理由同 ui_order._order_read_worker。
+                if run_macro:
+                    workbook.Save()
                 payload = {"sheets": data, "errors": errors}
         except Exception as exc:
             payload = {"error": str(exc)}
