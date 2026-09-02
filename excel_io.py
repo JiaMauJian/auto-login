@@ -276,7 +276,37 @@ def read_order_plan(sheet):
     return plan
 
 
-def run_auto_calc_macro(excel, sheet):
+# 看門狗預設等幾秒才喊「可能卡住了」。巨集內部是逐檔同步 HTTP（見
+# run_update_price_macro 的說明），5 檔正常也就 1~2 秒上下；抓寬一點是因為
+# 網路本來就會抖，抓太緊只會在正常變慢的時候也喊，喊多了等於沒喊。
+MACRO_STUCK_AFTER = 10
+
+
+def _run_macro_watched(excel, macro, on_stuck, stuck_after):
+    """
+    真的呼叫 `excel.Run(macro)`，`on_stuck` 給的話另外起一顆
+    `threading.Timer` 在旁邊倒數：超過 `stuck_after` 秒 `Run` 還沒回來就
+    呼叫一次 `on_stuck`（多半是巨集跳了 9.6 那幾個 MsgBox，`Application.Run`
+    卡在那裡等人按確定）。
+
+    這顆計時器**擋不住、也不會去按掉**那個對話框——`DisplayAlerts` 管不到
+    VBA 自己叫的 MsgBox（見 docs/介面規劃.md 9.6），Python 這邊沒有辦法主動
+    打斷一個正在跑的 `Application.Run`。它純粹是「去 Excel 看一眼」的提醒：
+    `Run` 正常跑完就在 `finally` 把計時器取消掉，`on_stuck` 不會被叫到。
+    """
+    if on_stuck is None:
+        excel.Run(macro)
+        return
+    timer = threading.Timer(stuck_after, on_stuck)
+    timer.daemon = True
+    timer.start()
+    try:
+        excel.Run(macro)
+    finally:
+        timer.cancel()
+
+
+def run_auto_calc_macro(excel, sheet, on_stuck=None, stuck_after=MACRO_STUCK_AFTER):
     """
     對 sheet 這一個分頁觸發「自動計算」巨集：依 M4:M8 目標比重反覆試算，
     結果寫進 M14:N18。
@@ -287,10 +317,11 @@ def run_auto_calc_macro(excel, sheet):
     過程中會**暫時改寫 E4:E8／F4:F8／B8 再還原**（docs/介面規劃.md 9.6 第 3
     點），跟更新分頁「E/F/B8 一律覆蓋」正面衝突，呼叫端要確保跟那邊互斥
     （`_excel_in_use()`）。也可能跳 MsgBox（見 AUTO_CALC_MACRO 上面的說明），
-    卡住的話畫面會停在「跑巨集中」不動，要去 Excel 視窗把對話框按掉。
+    卡住的話畫面會停在「跑巨集中」不動，要去 Excel 視窗把對話框按掉——
+    `on_stuck` 是這件事的提醒（見 `_run_macro_watched`），不是防呆。
     """
     sheet.Activate()
-    excel.Run(AUTO_CALC_MACRO)
+    _run_macro_watched(excel, AUTO_CALC_MACRO, on_stuck, stuck_after)
 
 
 @contextlib.contextmanager
@@ -324,7 +355,7 @@ def keep_active_sheet(book):
                 pass
 
 
-def run_update_price_macro(excel, sheet):
+def run_update_price_macro(excel, sheet, on_stuck=None, stuck_after=MACRO_STUCK_AFTER):
     """
     對 sheet 這一個分頁觸發「更新股價」巨集（見 UPDATE_PRICE_MACRO 的說明）。
 
@@ -349,10 +380,12 @@ def run_update_price_macro(excel, sheet):
     **抓不到價格時巨集會跳 `MsgBox "xxxx 股價更新失敗"`**，那是 VBA 的
     modal 對話框，Application.Run 會停在那裡等人按確定——背景執行緒就這樣
     無聲掛住，畫面停在「更新股價、讀取中…」。Excel 的 DisplayAlerts 管不到
-    VBA 自己叫的 MsgBox，Python 這邊擋不掉，只能改巨集本身。
+    VBA 自己叫的 MsgBox，Python 這邊擋不掉，只能改巨集本身。`on_stuck` 給的
+    話會在卡住 `stuck_after` 秒後喊一聲（見 `_run_macro_watched`），把無聲
+    掛住換成一句看得懂的提示，不是真的解決掉這個坑。
     """
     sheet.Activate()
-    excel.Run(UPDATE_PRICE_MACRO)
+    _run_macro_watched(excel, UPDATE_PRICE_MACRO, on_stuck, stuck_after)
 
 
 def write_cells(sheet, writes):

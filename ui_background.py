@@ -639,7 +639,8 @@ class UiBackgroundMixin:
                     "order_rates": self._on_order_rates,
                     "order_quotes_fetched": self._on_order_quotes_fetched,
                     "pending_fetched": self._on_pending_fetched,
-                    "pending_cancelled": self._on_pending_cancelled}
+                    "pending_cancelled": self._on_pending_cancelled,
+                    "macro_stuck": self._on_macro_stuck}
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
@@ -1129,6 +1130,27 @@ class UiBackgroundMixin:
 
     def _say(self, message):
         self.status.configure(text=message)
+
+    def _macro_stuck_notifier(self, macro, sheet_name):
+        """
+        給背景執行緒觸發巨集時當 `on_stuck` 傳（見 excel_io._run_macro_watched）。
+        回傳的是一個不吃參數的 callable——真正呼叫它的是 `threading.Timer`
+        自己的執行緒，那條執行緒不能碰 Tk widget，所以一樣繞 `self.queue`，
+        跟其他背景結果收尾同一條路（見 `_drain`）。
+        """
+        return lambda: self.queue.put(("macro_stuck", {"macro": macro, "sheet": sheet_name}))
+
+    def _on_macro_stuck(self, payload):
+        """
+        excel_io._run_macro_watched 的看門狗喊的：巨集卡在《payload['sheet']》
+        跳出的對話框超過門檻秒數還沒回來（見 docs/介面規劃.md 9.6 第 2 點）。
+
+        只是喊一聲，不做任何事——沒有辦法從這裡打斷還在跑的 Application.Run，
+        真正卡住的話這句提示會一直留在常駐列上，直到那條背景執行緒自己
+        因為使用者去 Excel 按了確定而回來，覆蓋掉這句話。
+        """
+        self._say(f"「{payload['macro']}」可能卡在《{payload['sheet']}》跳出的對話框，"
+                   f"去 Excel 看一下。")
 
     def _path_text(self):
         """

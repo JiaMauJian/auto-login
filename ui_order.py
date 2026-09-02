@@ -194,7 +194,8 @@ class UiOrderMixin:
                         # 同一個理由，這一整段也不能跟別條執行緒同時跑——
                         # excel_io.opened 那把鎖擋的就是這件事。
                         if run_macro:
-                            excel_io.run_update_price_macro(excel, sheet)
+                            excel_io.run_update_price_macro(
+                                excel, sheet, on_stuck=self._macro_stuck_notifier("更新股價", name))
                         data = excel_io.read_sheet(sheet)
                         data["return_rate"] = excel_io.read_return_rate(sheet)
                         if read_plan:
@@ -820,7 +821,8 @@ class UiOrderMixin:
                         sheet, error = excel_io.find_sheet(workbook, name)
                         if sheet is not None:
                             # 一頁一次，理由同 _order_read_worker。
-                            excel_io.run_update_price_macro(excel, sheet)
+                            excel_io.run_update_price_macro(
+                                excel, sheet, on_stuck=self._macro_stuck_notifier("更新股價", name))
                             sheets[name] = excel_io.read_sheet(sheet)
                 # 巨集寫過 I4:I8，理由同 _order_read_worker。
                 workbook.Save()
@@ -1134,8 +1136,10 @@ class UiOrderMixin:
                         if sheet is None:
                             errors[name] = error
                             continue
-                        excel_io.run_update_price_macro(excel, sheet)
-                        excel_io.run_auto_calc_macro(excel, sheet)
+                        excel_io.run_update_price_macro(
+                            excel, sheet, on_stuck=self._macro_stuck_notifier("更新股價", name))
+                        excel_io.run_auto_calc_macro(
+                            excel, sheet, on_stuck=self._macro_stuck_notifier("自動計算", name))
                         plans[name] = excel_io.read_order_plan(sheet)
                 # 兩支巨集都寫過格子（I4:I8、M14:N18），理由同 _order_read_worker。
                 workbook.Save()

@@ -499,7 +499,8 @@ class UiOrderExecMixin:
                             continue
                         # 一頁一次，理由同 _order_read_worker。
                         if run_macro:
-                            excel_io.run_update_price_macro(excel, sheet)
+                            excel_io.run_update_price_macro(
+                                excel, sheet, on_stuck=self._macro_stuck_notifier("更新股價", name))
                         data[name] = excel_io.read_sheet(sheet)
                 # 巨集寫過 I4:I8 就要存檔，理由同 ui_order._order_read_worker。
                 if run_macro:
