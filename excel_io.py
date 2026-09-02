@@ -100,6 +100,10 @@ RETURN_RATE_LABEL = "今年報酬率"
 RETURN_RATE_ROW = STOCK_LIMIT + 12
 COL_LABEL, COL_RETURN_RATE = 1, 2
 
+# 分頁名稱就算錨點對得上，也不當交易人帳戶——目前只有這一個名字
+# （2026/09/02 使用者要求：Excel 裡的「虛擬帳戶」分頁不要出現在下單的執行帳戶清單）。
+EXCLUDED_ACCOUNT_SHEET_NAMES = {"虛擬帳戶"}
+
 # D1 沒被上面三處佔用，理論上可以安全借來提醒「這份檔案有程式在管」。
 # 語意是「這份檔案由程式維護」的持久標記，不是「程式現在正在跑」的即時燈號——
 # _write_worker 每次同步只是短暫用 COM 開檔、寫入、存檔、關檔，平常大部分時間
@@ -314,14 +318,18 @@ def list_account_sheets(book):
     管理表」——那才是真正該問的問題，而且順便把「一頁全空的新交易人」也收進來了
     （他一格股票都還沒填，舊的判斷會把他整個漏掉，人在畫面上找不到他）。
 
-    不用分頁名稱去猜（名字就是人名，猜不出規則），也不預設「所有分頁都是交易人」。
+    不用分頁名稱去猜是誰（名字就是人名，猜不出規則），也不預設「所有分頁都是交易人」——
+    唯一的例外是名字剛好等於 EXCLUDED_ACCOUNT_SHEET_NAMES 裡列的那幾個（目前只有
+    「虛擬帳戶」）：那種分頁是特地留著當範本／測試用的，錨點會對得上但不該被當成
+    可以下單的真帳戶，2026/09/02 使用者要求排除。
     """
     accounts = []
     for sheet in book.Worksheets:
         # -1 是 xlSheetVisible；0 隱藏、2 是「非常隱藏」（只能用 VBA 叫回來）。
-        if sheet.Visible != -1 or not anchor_ok(sheet):
+        name = sheet.Name.strip()
+        if sheet.Visible != -1 or name in EXCLUDED_ACCOUNT_SHEET_NAMES or not anchor_ok(sheet):
             continue
-        accounts.append((sheet.Name.strip(),
+        accounts.append((name,
                          to_num(sheet.Cells(RETURN_RATE_ROW, COL_RETURN_RATE).Value, None)))
     return accounts
 
