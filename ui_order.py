@@ -35,12 +35,12 @@ from util import show
 
 
 # 「指定股票」每一列的欄位起點（照 10 級字的像素，實際用 wide() 換算）。
-# 每一列各自是一個 Frame，但欄的 minsize 全部用這同一組，所以三檔的「移除」
-# 「比重」「價格」會上下對齊成一張小表——不是靠股票名稱剛好一樣長。
+# 每一列各自是一個 Frame，但欄的 minsize 全部用這同一組，所以三檔的「比重」
+# 「價格」「移除」會上下對齊成一張小表——不是靠股票名稱剛好一樣長。
 #
 # 股票那一欄 110 夠放「2330 台積電」這種四碼＋三到五個中文；真的更長也不會被
 # 切掉（minsize 是下限不是上限），只是那一列的後面幾欄會往右推、跟別列對不齊。
-ORDER_STOCK_COL_W = (26, 110, 60, 130)
+ORDER_STOCK_COL_W = (26, 110, 130, 140, 60)
 
 
 class UiOrderMixin:
@@ -167,13 +167,10 @@ class UiOrderMixin:
 
     def _update_order_stock_list_button(self):
         """
-        左欄那顆按鈕的文字：還沒讀過是「讀取持股」，讀過之後改成「讀取ＯＯ持股」
-        （ＯＯ＝實際讀到的那個分頁名，見 refresh_order_stock_list）——不用猜
-        是誰，讀到什麼就講什麼。
+        左欄那顆按鈕的文字固定是「讀取持股」，不再依讀到的分頁名動態改字
+        （2026/09/02 使用者要求改回固定文字）。
         """
-        name = self.order_stock_list_sheet
-        self.order_stock_list_button.configure(
-            text=f"讀取{name}持股" if name else "讀取持股")
+        self.order_stock_list_button.configure(text="讀取持股")
 
     # ---------- 讀取ＯＯ持股（第一個分頁的股票候選，跟勾了誰無關） ----------
 
@@ -528,11 +525,15 @@ class UiOrderMixin:
 
     def _order_account_text(self, sheet, name_text):
         """
-        帳戶那一列的文字：`☑ 1　交易人A`。勾選記號直接寫在 #0 那一欄的文字裡，
+        帳戶那一列的文字：`✅ 1　交易人A`。勾選記號直接寫在 #0 那一欄的文字裡，
         不另外開一欄——這一格只有 260 像素寬，已經放了名字與報酬率兩欄，再切
         一欄出來給一個字元的記號，名字那一欄就會開始被切掉。
+
+        用 ✅／⬜ 而不是 ☑／☐：Treeview 一格文字只有一種字級，符號沒辦法只放大
+        自己、名字維持原大小——換成 Windows 上會走彩色 emoji 字型畫的符號，
+        同樣字級視覺上就大顆很多，不必真的調整字型大小（2026/09/02 使用者確認）。
         """
-        return f"{'☑' if sheet in self.order_checked else '☐'} {name_text}"
+        return f"{'✅' if sheet in self.order_checked else '⬜'} {name_text}"
 
     def _order_sheets(self):
         """
@@ -605,7 +606,10 @@ class UiOrderMixin:
     def _after_order_accounts_changed(self):
         """
         勾選變了之後要做的事，兩個入口（單列、全選）共用：把每一列的 ☐／☑
-        重畫，再把上一批讀進來的資料清掉。
+        重畫，把上一批讀進來的資料清掉，勾了人的話再自動按一次「讀取試算」
+        （2026/09/02 使用者要求，含「全選」）——比起等人自己再按一次，
+        少一個步驟；`refresh_order_plans` 本身還是會被 `_excel_in_use()`／
+        `_order_locked()` 擋住，所以不會跟其他還在跑的 COM 操作打架。
 
         重畫是逐列改文字，不是整份 _fill_order_accounts()——後者會連帶重算欄寬、
         重新排序，而勾選這件事一格報酬率都沒動，清單的內容與順序完全一樣。
@@ -613,6 +617,8 @@ class UiOrderMixin:
         for sheet, label in self.order_account_label.items():
             self.order_accounts.item(sheet, text=self._order_account_text(sheet, label))
         self._clear_order_round()
+        if self._order_sheets():
+            self.refresh_order_plans()
 
     def _clear_order_round(self, keep_stocks=True):
         """
@@ -629,8 +635,10 @@ class UiOrderMixin:
         - 換 Excel 檔：連候選清單本身都換了一份，留著等於拿舊檔的股票去對新檔
           的分頁。
 
-        清掉之後不自動重讀：讀 Excel 是使用者自己按「讀取試算」的，勾一下名字
-        就自動跑一趟 COM，等於在人還在挑人的時候把 Excel 鎖起來。
+        這裡本身不重讀——重讀是呼叫端（_after_order_accounts_changed）勾了人之後
+        才補的那一步（2026/09/02 改成自動，之前是使用者自己按「讀取試算」）；
+        換 Excel 檔（_forget_round）走同一個函式但不會接著自動讀，那時候
+        Excel 才剛開，沒有勾選可言。
         """
         self.order_holdings, self.order_plans, self.order_quotes = {}, {}, {}
         self.order_holding_labels = {}
@@ -648,13 +656,16 @@ class UiOrderMixin:
                 row["frame"].destroy()
             self.order_rows = []
 
+        # 這句只是個過場：勾了人的話 _after_order_accounts_changed 緊接著就會
+        # 呼叫 refresh_order_plans，狀態列馬上被它的「讀取中…」蓋掉，這裡不用
+        # 再講「接著按讀取試算」（2026/09/02 拿掉按鈕後那句話已經不成立）。
         sheets = self._order_sheets()
         if not sheets:
             text = ""
         elif len(sheets) > 3:
-            text = f"已勾 {len(sheets)} 位，接著按「讀取試算」。"
+            text = f"已勾 {len(sheets)} 位。"
         else:
-            text = f"已勾 {'、'.join(sheets)}，接著按「讀取試算」。"
+            text = f"已勾 {'、'.join(sheets)}。"
         self.order_status.configure(text=text)
         self._resize_order_stock_column()
         self._update_order_quotes_ui()
@@ -854,25 +865,24 @@ class UiOrderMixin:
         活頁簿（或那份活頁簿根本沒開著）就變灰（見 ui_background._apply_busy_state，
         它負責在 _excel_in_use() 那些旗標或 excel_open 變動時呼叫這裡）。
 
-        原本「讀取持股」（現拆成「讀取ＯＯ持股」與「讀取試算」兩顆）與「新增」
-        各自只看自己那一個旗標——前者跑著的時候後者還是亮的，而兩條路都會
-        一頁一頁 Activate 再跑巨集，交錯之後巨集會跑在別人剛切過去的那一頁上
-        （見 excel_io._EXCEL_LOCK 的說明）。
+        原本「讀取持股」（現拆成「讀取ＯＯ持股」與勾帳戶自動觸發的「讀取試算」）
+        與「新增」各自只看自己那一個旗標——前者跑著的時候後者還是亮的，而兩條
+        路都會一頁一頁 Activate 再跑巨集，交錯之後巨集會跑在別人剛切過去的那
+        一頁上（見 excel_io._EXCEL_LOCK 的說明）。
 
         擋住而不是排隊：跟 _refresh_added_stock_price 對自己重複點擊的態度一致
-        （那裡的註解有寫理由——下一次「新增」或「讀取試算」還會再有
-        機會補上）。
+        （那裡的註解有寫理由——下一次「新增」或勾帳戶還會再有機會補上）。
         """
         busy = self._excel_in_use()
-        # 「讀取ＯＯ持股」「讀取試算」都還要 Excel 真的開著才亮：這兩顆做的事
-        # 整個就是讀那份活頁簿，沒開著根本無事可做——跟更新分頁的「更新全部
-        # 帳戶」同一個規矩（見 ui_sync._sync_buttons）。2026/08/31 之前這裡只看
-        # 忙碌旗標，所以 Excel 沒開的時候「更新」那顆是灰的、這顆卻亮著，按
-        # 下去換來一個「Excel 沒開著」的視窗；現在兩顆一起灰，那個視窗也跟著
-        # 拿掉了（見 ui_background._require_excel）。
+        # 「讀取ＯＯ持股」還要 Excel 真的開著才亮：這顆做的事整個就是讀那份
+        # 活頁簿，沒開著根本無事可做——跟更新分頁的「更新全部帳戶」同一個規矩
+        # （見 ui_sync._sync_buttons）。2026/08/31 之前這裡只看忙碌旗標，所以
+        # Excel 沒開的時候「更新」那顆是灰的、這顆卻亮著，按下去換來一個
+        # 「Excel 沒開著」的視窗；現在一起灰，那個視窗也跟著拿掉了（見
+        # ui_background._require_excel）。「讀取試算」2026/09/02 拿掉按鈕之後
+        # 不必再管它的灰／亮，勾帳戶那條路自己會被 _order_locked() 擋住。
         state = "normal" if self.excel_open and not busy else "disabled"
         self.order_stock_list_button.configure(state=state)
-        self.order_plan_button.configure(state=state)
         # 「新增」只有盤中那條路會附帶跑巨集（見 add_order_stock 的說明），盤前
         # 完全不碰 COM，沒有理由跟著變灰——讀取 20 組帳戶要跑好幾分鐘，那段時間
         # 還是該能把股票加進清單。所以這一顆多看一個模式。它也不跟著 excel_open
@@ -1049,8 +1059,8 @@ class UiOrderMixin:
 
     def _build_order_stock_row(self, row):
         """
-        一檔股票一列，**一行排完**：買賣別、股票、移除、比重、價格（或試算／
-        Excel 股價）。
+        一檔股票一列，**一行排完**：買賣別、股票、比重、價格（或試算／
+        Excel 股價）、移除。
 
         2026/08/31 之前是分兩行的，那是為了「指定股票」還在 300 像素寬的左欄時
         設計的——一行塞不下「名稱＋比重＋價格＋移除」，價格輸入框會被擠到剩沒
@@ -1062,7 +1072,7 @@ class UiOrderMixin:
         每一列自己是一個 Frame（用 pack 疊起來，不是整個清單一張大 grid）：
         移除中間一列時不會留下空位，不必自己重新排列剩下的列。列**內部**才用
         grid，而且每一列的欄 minsize 都用同一組 ORDER_STOCK_COL_W，所以三檔的
-        「移除」「比重」「價格」會上下對齊成一張小表——不是靠股票名稱剛好一樣長。
+        「比重」「價格」「移除」會上下對齊成一張小表——不是靠股票名稱剛好一樣長。
 
         買賣別跟著這一輪的方向走（見 _order_init_state 的 order_side：9.3 之後
         方向是作業算出來的，不是人選的），一整批
@@ -1107,29 +1117,23 @@ class UiOrderMixin:
                      anchor="center").grid(row=0, column=0, sticky="w")
         ttk.Label(block, text=f" {row['code']} {row['name']} ", style=side_style).grid(
             row=0, column=1, sticky="w")
-        ttk.Button(block, text="移除", bootstyle="danger-outline",
-                  command=lambda: self.remove_order_stock(row)).grid(
-            row=0, column=2, sticky="w", padx=(6, 0))
 
         if trade:
-            # 這一格顯示勾選帳戶的試算股數（9.3：左邊那格顯示 M19:N28 試算值，
-            # 唯讀）。試算是逐帳戶的，所以只有全部一致時才報一個數字，不一致就
-            # 講範圍、叫人看右邊——報一個數字卻其實每個帳戶不同，比不報還糟。
-            # 由 _update_trade_row_labels 在每次重算預覽時更新（勾的人會變）。
-            #
-            # 不設 wraplength：一列就是一行，換行會讓這一列比別列高、整張表的
-            # 對齊就散了。「試算各帳戶不同（… ～ … 股），見右邊」那句最長，在
-            # 這一格一千多像素的寬度下一行放得完。
-            label = ttk.Label(block, text="", style="Hint.TLabel")
-            label.grid(row=0, column=3, columnspan=2, sticky="w", padx=(12, 0))
-            row["plan_label"] = label
+            # 逐帳戶的試算股數不在這一格重複講了（2026/09/02 拿掉「N 位有
+            # 試算」那句）：一位一列才看得到真正的買賣與股數，右邊執行預覽
+            # 那張表已經是唯一的答案，這裡再摘要一次只是同一件事講兩次。
+            # 這個模式沒有比重／價格，「移除」緊接在股票後面就好，不必為了
+            # 對齊硬跳到最後一欄。
+            ttk.Button(block, text="移除", bootstyle="danger-outline",
+                      command=lambda: self.remove_order_stock(row)).grid(
+                row=0, column=2, sticky="w", padx=(6, 0))
             row["frame"] = block
             return
 
         # 比重、價格各自包一個小 Frame 再放進格子裡：label＋entry＋單位是一組
         # 三件套，讓它們在組內用 pack 貼在一起，組跟組之間才靠 grid 的欄對齊。
         weight_box = ttk.Frame(block)
-        weight_box.grid(row=0, column=3, sticky="w", padx=(12, 0))
+        weight_box.grid(row=0, column=2, sticky="w", padx=(12, 0))
         ttk.Label(weight_box, text="比重").pack(side="left")
         # 比重是「持股 × 這個百分比」（orders.lots_from_weight），沒有上限的話
         # 打錯一個 0（例如 150）會算出比實際持股還多的張數，出清股票時可能因此
@@ -1142,7 +1146,7 @@ class UiOrderMixin:
         ttk.Label(weight_box, text="%").pack(side="left", padx=(2, 0))
 
         price_box = ttk.Frame(block)
-        price_box.grid(row=0, column=4, sticky="w", padx=(12, 0))
+        price_box.grid(row=0, column=3, sticky="w", padx=(12, 0))
         if "price" in row:
             ttk.Label(price_box, text="價格").pack(side="left")
             ttk.Entry(price_box, textvariable=row["price"], width=8,
@@ -1154,6 +1158,10 @@ class UiOrderMixin:
             label = ttk.Label(price_box, text=price_text, style="Hint.TLabel")
             label.pack(side="left")
             row["price_label"] = label
+
+        ttk.Button(block, text="移除", bootstyle="danger-outline",
+                  command=lambda: self.remove_order_stock(row)).grid(
+            row=0, column=4, sticky="w", padx=(12, 0))
         row["frame"] = block
 
     def remove_order_stock(self, row):
@@ -1235,15 +1243,16 @@ class UiOrderMixin:
                 [{"code": row["code"], "name": row["name"]} for row in self.order_rows],
                 ordered, self.order_plans, self.order_holdings, self.order_unit.get(),
                 loaded_sheets=self.order_loaded)
-            self._update_trade_row_labels([account["sheet"] for account in ordered])
             # 勾了但還沒讀的那幾位：他們的每一列都會寫「還沒讀取試算，略過」，
             # 但那是一列一列講的，整批漏讀（最常見的情況：勾完就直接看預覽）
-            # 要在這裡講一次，人才知道該去按哪一顆按鈕。
+            # 要在這裡講一次。讀取試算 2026/09/02 起勾帳戶就自動觸發（見
+            # ui_order._after_order_accounts_changed），這裡通常只是短暫出現、
+            # 讀完就消失，不用再叫人去按哪顆按鈕。
             missing = [account["sheet"] for account in ordered
                        if account["sheet"] not in self.order_loaded]
             if codes and missing:
                 who = "、".join(missing) if len(missing) <= 3 else f"{len(missing)} 位"
-                hints.append(f"⚠ {who}還沒讀到下單試算，先按「讀取試算」。")
+                hints.append(f"⚠ {who}還沒讀到下單試算，讀取中或請重新勾選。")
         elif self._order_intraday():
             stock_settings = self._order_stock_settings()
             ticks = self._order_ticks_setting()
@@ -1260,34 +1269,6 @@ class UiOrderMixin:
                                                self.order_holdings, self.order_side.get())
 
         self._render_order_preview(preview, hints)
-
-    def _update_trade_row_labels(self, sheets):
-        """
-        買賣股票：左邊每一列那句「幾位有試算」跟著勾選的帳戶更新。
-
-        試算是**逐帳戶**的（同一檔股票，甲要買 2 張、乙可能一張都不動、丙根本
-        沒有這一檔），2026/09/02 起一輪又可以跑好幾位，所以這一格報的是**這一檔
-        在這一輪有幾位真的要動**，不是一個會騙人的單一數字。合計股數不在這裡
-        講（2026/09/02 使用者要求拿掉），逐位的數字在右邊執行預覽那張表，一位
-        一列才看得到真正的買賣與股數。
-        """
-        for row in self.order_rows:
-            label = row.get("plan_label")
-            if label is None:
-                continue
-            quantities = [int((self.order_plans.get((sheet, row["code"])) or {}).get("qty") or 0)
-                          for sheet in sheets
-                          if (sheet, row["code"]) in self.order_plans]
-            active = [qty for qty in quantities if qty]
-            if not sheets:
-                text = "還沒勾帳戶"
-            elif not quantities:
-                text = "勾選的帳戶都沒有這一檔"
-            elif not active:
-                text = f"{len(quantities)} 位有這一檔，都沒有試算"
-            else:
-                text = f"{len(active)} 位有試算"
-            label.configure(text=text)
 
     def _render_order_preview(self, preview, hints):
         """

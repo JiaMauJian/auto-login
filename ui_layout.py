@@ -1011,19 +1011,16 @@ class UiLayoutMixin:
         box.grid_propagate(False)
         paned.add(box, weight=0)
 
-        # 「讀取ＯＯ持股」單獨一列、佔滿寬度：文字是動態的（見
-        # ui_order._update_order_stock_list_button），讀到的分頁名字長短不一，
-        # 跟「全選」「全不選」擠同一列容易把後面兩顆擠到換行。
-        self.order_stock_list_button = ttk.Button(
-            box, text="讀取持股", command=self.refresh_order_stock_list,
-            bootstyle="primary-outline")
-        self.order_stock_list_button.grid(row=0, column=0, columnspan=2, sticky="w",
-                                          pady=(0, 6))
-
+        # 「讀取持股」「全選」「全不選」同一列：文字固定不再動態變長
+        # （見 ui_order._update_order_stock_list_button），不必再獨佔一列。
         all_bar = ttk.Frame(box)
-        all_bar.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        all_bar.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.order_stock_list_button = ttk.Button(
+            all_bar, text="讀取持股", command=self.refresh_order_stock_list,
+            bootstyle="primary-outline")
+        self.order_stock_list_button.pack(side="left")
         ttk.Button(all_bar, text="全選", bootstyle="secondary-outline",
-                   command=lambda: self._on_order_accounts_all(True)).pack(side="left")
+                   command=lambda: self._on_order_accounts_all(True)).pack(side="left", padx=(6, 0))
         ttk.Button(all_bar, text="全不選", bootstyle="secondary-outline",
                    command=lambda: self._on_order_accounts_all(False)).pack(side="left", padx=(6, 0))
 
@@ -1088,29 +1085,18 @@ class UiLayoutMixin:
         pick = ttk.Frame(box)
         pick.grid(row=0, column=0, sticky="ew")
 
-        # 「讀取試算」：把**勾起來的那幾位**的持股（E/F）、股價（I）、下單試算
-        # （M19:N28）讀進來。2026/09/01 從左欄搬過來、順便改名——原本叫「讀取
-        # 持股」擺在帳戶清單上面，而報酬率現在開檔就自己進來了（見
-        # ui_order.refresh_order_accounts），名字裡那一半不再是它的工作。
-        # 2026/09/02 這顆又拆成兩顆：純讀第一個分頁候選清單的「讀取ＯＯ持股」
-        # 搬回左欄「執行帳戶」最上面（見 _build_order_accounts），這裡留下的
-        # 是真正要讀勾選帳戶資料的那一半，改名「讀取試算」名副其實。
-        #
-        # 排在整列最前面、股票下拉左邊，還是由左到右就是操作順序：點人 →
-        # （自己在 Excel 上按更新／自動計算）→ 把它讀進來 → 挑股票。
-        self.order_plan_button = ttk.Button(pick, text="讀取試算",
-                                            command=self.refresh_order_plans,
-                                            bootstyle="primary-outline")
-        self.order_plan_button.grid(row=0, column=0, sticky="w", padx=(0, 16))
-
+        # 「讀取試算」按鈕 2026/09/02 拿掉了：勾帳戶（含「全選」）現在會自動
+        # 觸發同一件事（見 ui_order._after_order_accounts_changed），不必再讓
+        # 人多按一次。`refresh_order_plans` 這個方法留著，換帳戶勾選時還是靠
+        # 它讀 Excel，只是入口從按鈕改成勾選事件。
         self.order_stock_pick = ttk.Combobox(pick, width=15, font=(self.family, FONT_SIZE))
-        self.order_stock_pick.grid(row=0, column=1, sticky="w")
-        # 存成屬性是因為它會跟「讀取試算」一起變灰：盤中模式按「新增」
+        self.order_stock_pick.grid(row=0, column=0, sticky="w")
+        # 存成屬性是因為它會跟著 Excel 忙碌狀態一起變灰：盤中模式按「新增」
         # 會附帶跑一次「更新股價」巨集（見 ui_order._refresh_added_stock_price），
         # 那是一條會動 COM 的路，不能在別人正在動同一份活頁簿的時候按下去。
         self.order_add_button = ttk.Button(pick, text="新增", command=self.add_order_stock,
                                            bootstyle="primary-outline")
-        self.order_add_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.order_add_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
 
         # 「查詢委買賣」：盤中模式限定，先把清單裡股票的即時委買賣一整批查
         # 回來，讓執行預覽直接顯示算好的價格（見 ui_order.fetch_order_quotes）。
@@ -1122,7 +1108,7 @@ class UiLayoutMixin:
         self.order_quotes_button = ttk.Button(pick, text="查詢委買賣",
                                               command=self.fetch_order_quotes,
                                               bootstyle="info-outline", state="disabled")
-        self.order_quotes_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.order_quotes_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
 
         # 加進來的股票用 Canvas＋Scrollbar 包起來（原本帳戶那一格也是這樣做的，
         # 理由）：這裡原本用 sticky="new" 的 Frame，加多了會把 LabelFrame
