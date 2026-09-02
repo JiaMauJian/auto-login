@@ -35,7 +35,7 @@ docs/自動下單與半自動下單規劃.pptx.txt 81-85 行，原始規劃沒�
 
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
-from order_cancel import close_dialog
+from order_cancel import ConfirmDebugLog, close_dialog
 from order_fill import CONFIRM_IFRAME_SELECTOR, OrderMaybeSubmitted
 from order_query import PAGE_READY_JS
 from order_recon import RESERVE_PAGE
@@ -169,27 +169,28 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
             locked.append(ordno)
             continue
 
-        page.locator(f"#{row['bar']} .delRow").click()
-        page.locator(".layui-layer-title", has_text="刪單確認").wait_for(state="visible", timeout=10000)
+        with ConfirmDebugLog(page, sheet, [ordno]):
+            page.locator(f"#{row['bar']} .delRow").click()
+            page.locator(".layui-layer-title", has_text="刪單確認").wait_for(state="visible", timeout=10000)
 
-        try:
-            sent = _verify_dialog(page, ordno, sheet, session)
-        except RuntimeError:
-            close_dialog(page)   # 這一筆沒送，把視窗收乾淨再把例外丟出去
-            raise
+            try:
+                sent = _verify_dialog(page, ordno, sheet, session)
+            except RuntimeError:
+                close_dialog(page)   # 這一筆沒送，把視窗收乾淨再把例外丟出去
+                raise
 
-        frame = page.frame_locator(CONFIRM_IFRAME_SELECTOR)
-        frame.locator(SUBMIT_BUTTON).click()
-        # ↑ 過了這一行就沒有回頭路了：以下任何失敗都是 OrderMaybeSubmitted。
+            frame = page.frame_locator(CONFIRM_IFRAME_SELECTOR)
+            frame.locator(SUBMIT_BUTTON).click()
+            # ↑ 過了這一行就沒有回頭路了：以下任何失敗都是 OrderMaybeSubmitted。
 
-        text = _read_result0(page, timeout_ms)
-        close_dialog(page)
+            text = _read_result0(page, timeout_ms)
+            close_dialog(page)
 
-        if not text:
-            raise OrderMaybeSubmitted(
-                f"{sheet}：已經按下刪單確認視窗的「確認」（預約書號 {sent}），"
-                f"但畫面上沒出現結果。這一筆可能已經送出去了，不要再按一次——"
-                f"請重查掛單，用查回來的結果為準。")
+            if not text:
+                raise OrderMaybeSubmitted(
+                    f"{sheet}：已經按下刪單確認視窗的「確認」（預約書號 {sent}），"
+                    f"但畫面上沒出現結果。這一筆可能已經送出去了，不要再按一次——"
+                    f"請重查掛單，用查回來的結果為準。")
 
         results.append({
             "ordno": ordno,

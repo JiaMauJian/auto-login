@@ -26,8 +26,12 @@
   也是頁面寫死的 `'2'`。
 """
 
+import datetime
+import time
+
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
+from login import app_dir
 from order_fill import CONFIRM_IFRAME_SELECTOR, OrderMaybeSubmitted
 from order_query import PAGE_READY_JS
 from order_recon import ORDER_PAGE
@@ -35,6 +39,87 @@ from order_recon import ORDER_PAGE
 # 刪單確認視窗裡那顆真的會送出去的按鈕。整支檔案只有 confirm_cancel() 會點它，
 # 而且點之前一定先跑完 _verify_dialog()——改這支的人請維持這條界線。
 SUBMIT_BUTTON = "#submit"
+
+# 除錯記錄跟其他偵察輸出放同一個資料夾（已加進 .gitignore）。
+DEBUG_LOG_DIR = "偵察資料"
+
+
+class ConfirmDebugLog:
+    """
+    按下刪單確認鍵前後，把瀏覽器 console 訊息與 MainController 的網路回應另外
+    存成一份檔案（`order_cancel_reservation.py` 共用同一份）。
+
+    **為什麼要有這個**：2026/09/02 使用者遇到「已按下確認，但沒等到結果」
+    （畫面上同時跳出券商憑證元件 VerifyAdaptor 的「Login timed out」訊息）——
+    `#result0` 沒寫出字只代表「畫面沒告訴我們結果」，不代表 `modifyOrder`
+    真的沒送到伺服器。這份記錄補上一個跟畫面完全獨立的第二個答案：網路回應
+    才是「到底送出去了沒、券商怎麼回」的第一手證據，console 訊息則補上
+    `submitFunction`／`getCert` 自己一路印出來的執行過程（簽章成功與否、
+    伺服器回應物件 `rtn` 本身）。純觀察、不影響任何判斷邏輯——`cancel_orders`
+    的回傳值與例外照舊，這份檔案只是留給人事後對答案用的。
+
+    只在按下確認前後才掛，離開這個 `with` 區塊（不管成功、逾時還是例外）就拆
+    掉監聽器——分頁接下來要換下一組帳號的 cookie 繼續用，監聽器留著只會錄到
+    別人的資料。
+    """
+
+    def __init__(self, page, sheet, wanted):
+        self.page = page
+        self.sheet = sheet
+        self.wanted = wanted
+        self.lines = [f"帳戶: {sheet}　要取消的委託/預約書號: {'、'.join(wanted)}"]
+        self._t0 = None
+
+    def __enter__(self):
+        self._t0 = time.monotonic()
+        self.page.on("console", self._on_console)
+        self.page.on("pageerror", self._on_pageerror)
+        self.page.on("response", self._on_response)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.page.remove_listener("console", self._on_console)
+        self.page.remove_listener("pageerror", self._on_pageerror)
+        self.page.remove_listener("response", self._on_response)
+        if exc is not None:
+            self.lines.append(f"[{self._stamp()}] 例外: {exc_type.__name__}: {exc}")
+        self._flush()
+        return False
+
+    def _stamp(self):
+        return f"{time.monotonic() - self._t0:6.2f}s"
+
+    def _on_console(self, msg):
+        try:
+            self.lines.append(f"[{self._stamp()}] console.{msg.type}: {msg.text}")
+        except Exception:
+            pass
+
+    def _on_pageerror(self, exc):
+        self.lines.append(f"[{self._stamp()}] pageerror: {exc}")
+
+    def _on_response(self, resp):
+        # 只看 MainController：這是唯一真正決定「有沒有送出去」的請求，
+        # 其餘（圖片、Google 分析…）跟這次刪單無關，錄了只是雜訊。
+        if "MainController" not in resp.url:
+            return
+        try:
+            body = resp.text()
+        except Exception as exc:
+            body = f"（讀不到回應內容：{exc}）"
+        self.lines.append(
+            f"[{self._stamp()}] response {resp.status} {resp.url}\n{body[:2000]}")
+
+    def _flush(self):
+        out_dir = app_dir() / DEBUG_LOG_DIR
+        out_dir.mkdir(exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_sheet = "".join(c if c not in '\\/:*?"<>|' else "_" for c in self.sheet)
+        path = out_dir / f"{stamp}_{safe_sheet}_取消掛單除錯.txt"
+        try:
+            path.write_text("\n".join(self.lines), encoding="utf-8")
+        except OSError:
+            pass
 
 # 頁面自己那張表：一個 <tbody id="bar<i>"> 一筆委託。欄位位置抄自頁面
 # `#openConfirm` 的 handler（td:eq(3) 委託書號、td:eq(4) 股票、td:eq(6) 買賣別、
@@ -207,30 +292,31 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
     if page.locator("#openConfirm").count() == 0:
         raise RuntimeError(f"{sheet}：頁面上沒有「終止委託單」這顆按鈕，這個帳戶沒有刪得掉的委託。")
 
-    page.click("#openConfirm")
-    # 等的是 layer 自己畫的標題列，不是 iframe 裡的 <h3>——理由跟
-    # order_fill.fill_order 那段一樣（同樣四個字在兩個地方各出現一次）。
-    page.locator(".layui-layer-title", has_text="刪單確認").wait_for(state="visible", timeout=10000)
-
     expected = [row["ordno"] for row in targets]
-    try:
-        sent = _verify_dialog(page, expected, sheet, session)
-    except RuntimeError:
-        close_dialog(page)   # 一筆都沒送，把視窗收乾淨再把例外丟出去
-        raise
+    with ConfirmDebugLog(page, sheet, expected):
+        page.click("#openConfirm")
+        # 等的是 layer 自己畫的標題列，不是 iframe 裡的 <h3>——理由跟
+        # order_fill.fill_order 那段一樣（同樣四個字在兩個地方各出現一次）。
+        page.locator(".layui-layer-title", has_text="刪單確認").wait_for(state="visible", timeout=10000)
 
-    frame = page.frame_locator(CONFIRM_IFRAME_SELECTOR)
-    frame.locator(SUBMIT_BUTTON).click()
-    # ↑ 過了這一行就沒有回頭路了：以下任何失敗都是 OrderMaybeSubmitted。
+        try:
+            sent = _verify_dialog(page, expected, sheet, session)
+        except RuntimeError:
+            close_dialog(page)   # 一筆都沒送，把視窗收乾淨再把例外丟出去
+            raise
 
-    texts = _read_results(page, len(sent), timeout_ms)
-    close_dialog(page)
+        frame = page.frame_locator(CONFIRM_IFRAME_SELECTOR)
+        frame.locator(SUBMIT_BUTTON).click()
+        # ↑ 過了這一行就沒有回頭路了：以下任何失敗都是 OrderMaybeSubmitted。
 
-    if not any(texts):
-        raise OrderMaybeSubmitted(
-            f"{sheet}：已經按下刪單確認視窗的「確認」（{len(sent)} 筆：{'、'.join(sent)}），"
-            f"但畫面上一格結果都沒出現。這幾筆可能已經送出去了，不要再按一次——"
-            f"請重查掛單，用查回來的結果為準。")
+        texts = _read_results(page, len(sent), timeout_ms)
+        close_dialog(page)
+
+        if not any(texts):
+            raise OrderMaybeSubmitted(
+                f"{sheet}：已經按下刪單確認視窗的「確認」（{len(sent)} 筆：{'、'.join(sent)}），"
+                f"但畫面上一格結果都沒出現。這幾筆可能已經送出去了，不要再按一次——"
+                f"請重查掛單，用查回來的結果為準。")
 
     results = []
     for row, ordno, text in zip(targets, sent, texts):
