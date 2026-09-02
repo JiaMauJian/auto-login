@@ -83,12 +83,25 @@ def normalize(row, sheet):
     > 0」**——那個算式目前結論一樣，但它是推的，`celable` 是網站給的答案，而
     取消掛單那三顆按鈕就是照這個旗標挑要送哪幾筆（10.3 第一點）。順便擋掉
     errcode 失敗的那幾列：那種列本來就沒有勾選框。
+
+    這個旗標不分委託單／預約單，兩種都可能是 `True`——「取消全部買/賣/掛單」
+    三顆按鈕本來就該兩種都能取消（見 docs/自動下單與半自動下單規劃.pptx.txt
+    81-85 行，2026/09/02 使用者確認不是分開兩顆），差別只在 `ordstatus` 決定
+    要走哪一支取消函式（`order_cancel.py` 或 `order_cancel_reservation.py`），
+    不是要不要讓它出現在清單上。
     """
     org, mat, cel = _int(row.get("orgqty")), _int(row.get("matqty")), _int(row.get("celqty"))
     left = max(org - mat - cel, 0)
     ok = str(row.get("errcode") or "") == "00000000"
     cancellable = str(row.get("celable") or "").strip() == "1"
     side = (row.get("buysell") or "").strip()
+    ordstatus = str(row.get("ordstatus") or "").strip()
+    # 預約單（ordstatus=='1'）在這支 CMD 的回應裡 ordno 是空的，真正的識別
+    # 欄位是 preordno（預約書號，網站「預約查詢」頁「委託書號」欄印的就是這個）
+    # ——兩個欄位一直都在，只是依 ordstatus 條件性地一個有值一個是空字串
+    # （2026/09/02 對照真實回應 偵察資料\20260828_1055_..._委託查詢.json
+    # 與預約查詢頁原始碼確認）。取消掛單認的就是這個欄位，不分型態都要對得上。
+    ordno = (row.get("preordno") if ordstatus == "1" else row.get("ordno")) or ""
     # 市價／漲跌停單的 odprice 是 0，那一欄直接印 0 會看起來像「委託價 0 元」，
     # 所以非限價的改印價格種類（網站自己也是這樣分的，見 PRICE_FLAG_NAMES）。
     price_flag = str(row.get("priceflag") or "0")
@@ -97,7 +110,8 @@ def normalize(row, sheet):
         "sheet": sheet,
         "ordered_at": f"{_date(row.get('orddate'))} {_time(row.get('ordtime'))}".strip(),
         "work_date": _date(row.get("workdate")),
-        "ordno": (row.get("ordno") or "").strip(),
+        "ordno": ordno.strip(),
+        "ordstatus": ordstatus,
         "code": (row.get("stockno") or "").strip(),
         "trade_text": describe_trade(row),
         "side": side,

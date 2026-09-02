@@ -20,6 +20,7 @@ import datetime
 
 import fetch as fetch_mod
 import order_cancel
+import order_cancel_reservation
 import order_query
 from ui_common import ask_confirm, col_width, show_error, show_info, show_warning, wide
 from util import show
@@ -37,6 +38,12 @@ CANCEL_SIDES = {kind: side for kind, _text, side in CANCEL_KINDS}
 CANCEL_TEXTS = {kind: text for kind, text, _side in CANCEL_KINDS}
 
 
+def _kind_text(row):
+    """委託單／預約單哪一種——兩者取消走的機制不一樣（order_cancel.py／
+    order_cancel_reservation.py），表上跟確認視窗都要標出來，別讓人猜。"""
+    return "預約單" if row.get("ordstatus") == "1" else "委託單"
+
+
 class UiPendingMixin:
     # ---------- 掛單分頁 ----------
 
@@ -49,7 +56,8 @@ class UiPendingMixin:
         # 取消掛單（10.3）。跟下單的依序執行同一個形狀：這一輪要跑的帳戶凍結成
         # 一張 queue，一個帳戶一則指令，跑完一則才派下一則。
         self.pending_cancel_active = False   # 整批還在跑（停止鈕看的就是它）
-        self.pending_cancel_queue = []       # [(第幾組帳號, 帳號設定, 帳戶名, [委託書號])]
+        # [(第幾組帳號, 帳號設定, 帳戶名, [委託單委託書號], [預約單預約書號])]
+        self.pending_cancel_queue = []
         self.pending_cancel_pos = 0
         self.pending_cancel_label = ""       # 「取消全部買單」之類，說話用
         self.pending_cancel_results = []     # 每一筆的結果（order_cancel 的形狀）
@@ -178,7 +186,10 @@ class UiPendingMixin:
         for sheet, items in groups.items():
             lines.append(f"　{sheet}（{len(items)} 筆）")
             for row in items:
-                lines.append(f"　　{row['code']} {row['side_text']} {show(row['left'])}"
+                # 委託單／預約單混在同一批送的時候，兩者走的取消機制完全不同
+                # （見 order_cancel.py／order_cancel_reservation.py），標出來
+                # 讓人看得出這一筆是哪一種。
+                lines.append(f"　　[{_kind_text(row)}] {row['code']} {row['side_text']} {show(row['left'])}"
                              f"　{row['price_text']}　委託書號 {row['ordno']}")
         # 不是只問「確定嗎」：會動到真實委託，要列出這一次會取消幾筆、哪幾檔（10.1）。
         if not ask_confirm(
@@ -194,8 +205,13 @@ class UiPendingMixin:
             if order_number is None:
                 show_error(self.root, "找不到帳戶", f"{sheet} 對不到任何一組帳號，這一次不做。")
                 return
+            # 委託單走 order_cancel.py（委託查詢頁），預約單走
+            # order_cancel_reservation.py（預約查詢頁）——兩套機制不一樣，
+            # 但同一個帳戶登入一次就順便兩邊都做，見 _pending_cancel_job。
+            committed = [row["ordno"] for row in items if row.get("ordstatus") != "1"]
+            reservation = [row["ordno"] for row in items if row.get("ordstatus") == "1"]
             queue.append((order_number, self.accounts[order_number - 1], sheet,
-                          [row["ordno"] for row in items]))
+                          committed, reservation))
 
         self.pending_cancel_active = True
         self.pending_cancel_queue = queue
@@ -216,26 +232,46 @@ class UiPendingMixin:
             self._finish_pending_cancel()
             return
 
-        order_number, account, sheet, ordnos = self.pending_cancel_queue[self.pending_cancel_pos]
+        order_number, account, sheet, committed, reservation = \
+            self.pending_cancel_queue[self.pending_cancel_pos]
+        total = len(committed) + len(reservation)
         self._say(f"{self.pending_cancel_label}：第 {self.pending_cancel_pos + 1}/"
-                  f"{len(self.pending_cancel_queue)} 個帳戶（{sheet}，{len(ordnos)} 筆）…")
+                  f"{len(self.pending_cancel_queue)} 個帳戶（{sheet}，{total} 筆）…")
         self._ensure_browser_thread()
         self.browser_waiting += 1
-        self.browser_cmd_queue.put(("pending_cancel", (order_number, account, sheet, ordnos)))
+        self.browser_cmd_queue.put(
+            ("pending_cancel", (order_number, account, sheet, committed, reservation)))
 
-    def _pending_cancel_job(self, context, store, order_number, account, sheet, ordnos):
+    def _pending_cancel_job(self, context, store, order_number, account, sheet,
+                            committed_ordnos, reservation_ordnos):
         """
         背景執行緒用（只能在 ui_background._browser_worker 裡呼叫）。
 
-        一次一個帳戶：ensure_logged_in 換到這一組的 cookie，然後在頁面上把那幾筆
-        刪掉。刪單確認視窗一定在 order_cancel.cancel_orders 裡收乾淨才回來——視窗
-        還開著就換下一個帳戶的 cookie，那個視窗後來送出去的會是新身分（10.3 第六點）。
+        一次一個帳戶：ensure_logged_in 換到這一組的 cookie，委託單跟預約單各自
+        對應不同的頁面／取消機制（order_cancel.py／order_cancel_reservation.py），
+        但同一個帳戶只登入這一次，兩邊都做完才換下一個帳戶——不是因為機制一樣，
+        是因為換 cookie 的成本要一起省。任何一段丟出 RuntimeError／
+        OrderMaybeSubmitted 都直接讓它往上傳，不在這裡攔：ui_background.py 對
+        "pending_cancel" 這個 cmd 已經處理過這兩種例外（見那邊的註解），這裡
+        攔了只會攔出第二套邏輯。刪單確認視窗一定在各自的 cancel_orders 裡收
+        乾淨才回來——視窗還開著就換下一個帳戶的 cookie，那個視窗後來送出去的
+        會是新身分（10.3 第六點）。
         """
         page, session, probs = fetch_mod.ensure_logged_in(
             context, [(order_number, account)], store)[order_number]
         if probs:
             raise RuntimeError(f"{sheet}：{'；'.join(probs)}")
-        return order_cancel.cancel_orders(page, session, sheet, ordnos)
+
+        combined = {"results": [], "missing": [], "locked": []}
+        if committed_ordnos:
+            part = order_cancel.cancel_orders(page, session, sheet, committed_ordnos)
+            for key in combined:
+                combined[key].extend(part[key])
+        if reservation_ordnos:
+            part = order_cancel_reservation.cancel_orders(page, session, sheet, reservation_ordnos)
+            for key in combined:
+                combined[key].extend(part[key])
+        return combined
 
     def _on_pending_cancelled(self, payload):
         """一個帳戶回話。"""
@@ -365,9 +401,11 @@ class UiPendingMixin:
             # 的事」，不該看起來跟還能取消的那幾筆一樣醒目。
             tag = {"B": "buy", "S": "sell"}.get(row["side"], "") if row["open"] else "done"
             # 順序跟 ui_layout._build_pending_tab 的 columns 一模一樣，那邊是照
-            # 網站「委託查詢」那張表排的（帳戶那一欄是程式多的）。
+            # 網站「委託查詢」那張表排的（帳戶、單別這兩欄是程式多的——「單別」
+            # 是 2026/09/02 加的，預約單開始跟委託單混在同一張表之後，不標出來
+            # 人分不出「委託書號」那一欄印的到底是 ordno 還是 preordno）。
             self.pending_tree.insert("", "end", values=(
-                row["sheet"], row["ordered_at"], row["work_date"], row["ordno"],
+                row["sheet"], _kind_text(row), row["ordered_at"], row["work_date"], row["ordno"],
                 row["code"], row["trade_text"], row["side_text"], row["price_text"],
                 show(row["qty"]), show(row["cancelled"]), show(row["matched"]),
                 row["flag_text"], row["status"], show(row["left"]),

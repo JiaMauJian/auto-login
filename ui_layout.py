@@ -563,11 +563,14 @@ class UiLayoutMixin:
 
         # 欄位跟網站「委託查詢」那張表一欄一欄對齊，連名字都照抄（2026/08/31
         # 使用者要求）：這一頁存在的意義就是拿來跟網頁互相核對，欄位名不一樣、
-        # 少一欄多一欄，核對的人就得先在腦子裡做一次對照表。多出來的只有最前面
-        # 的「帳戶」——網站一次只看得到登入的那一個人，這裡是所有帳戶攤在一起。
-        columns = ("sheet", "ordered", "workdate", "ordno", "stock", "trade", "side",
+        # 少一欄多一欄，核對的人就得先在腦子裡做一次對照表。多出來的是最前面
+        # 的「帳戶」跟「單別」——網站一次只看得到登入的那一個人，這裡是所有
+        # 帳戶攤在一起；「單別」是 2026/09/02 加的，委託單、預約單開始混在
+        # 同一張表之後（見 docs/介面規劃.md 10.3 第十二點），不標出來的話
+        # 「委託書號」那一欄印的到底是 ordno 還是 preordno，光看數字看不出來。
+        columns = ("sheet", "kind", "ordered", "workdate", "ordno", "stock", "trade", "side",
                    "price", "qty", "cancelled", "matched", "flag", "status", "left")
-        titles = {"sheet": "帳戶", "ordered": "委託日期", "workdate": "有效交易日",
+        titles = {"sheet": "帳戶", "kind": "單別", "ordered": "委託日期", "workdate": "有效交易日",
                   "ordno": "委託書號", "stock": "股票代號", "trade": "交易別",
                   "side": "買賣別", "price": "委託價格", "qty": "原委託數量",
                   "cancelled": "已取消數量", "matched": "已成交數量",
@@ -577,7 +580,7 @@ class UiLayoutMixin:
         # （2026/08/31 實際切到過：委託日期只剩「09:00:4.」）。所以這幾個數字刻意
         # 給得小：它們只管「還沒查過、表格是空的」那一刻不要有欄位窄得莫名其妙，
         # 給大了反而是在替沒出現的內容先佔位，整張表白白變寬、多一段捲軸。
-        self.pending_widths = {"sheet": 90, "ordered": 120, "workdate": 85, "ordno": 70,
+        self.pending_widths = {"sheet": 90, "kind": 60, "ordered": 120, "workdate": 85, "ordno": 70,
                                "stock": 70, "trade": 70, "side": 55, "price": 70,
                                "qty": 80, "cancelled": 80, "matched": 80, "flag": 70,
                                "status": 90, "left": 75}

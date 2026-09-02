@@ -476,12 +476,12 @@ class UiBackgroundMixin:
                     # 那張表是「一則指令跑完整批就結束」，而取消要一個帳戶一則
                     # 才停得下來（10.3 第六點），而且它跟下單一樣有
                     # OrderMaybeSubmitted 要分開處理。
-                    order_number, account, sheet, ordnos = arg
+                    order_number, account, sheet, committed, reservation = arg
                     payload = {"sheet": sheet}
                     try:
                         ensure_browser()
                         payload.update(self._pending_cancel_job(
-                            context, store, order_number, account, sheet, ordnos))
+                            context, store, order_number, account, sheet, committed, reservation))
                     except order_fill.OrderMaybeSubmitted as exc:
                         # 「確認」已經按下去了：那一批多半已經送到券商，絕對不能
                         # 被當成「這一則沒做，再按一次就好」。旗標讓
@@ -489,10 +489,10 @@ class UiBackgroundMixin:
                         payload["error"] = str(exc)
                         payload["maybe_submitted"] = True
                     except RuntimeError as exc:
-                        # order_cancel 與 fetch.ensure_logged_in 丟的 RuntimeError
-                        # 訊息本來就是寫給人看的（核對不過、登入失敗、按鈕不見
-                        # 了…），而且都發生在按下確認之前，不需要連 traceback
-                        # 一起丟到畫面上。
+                        # order_cancel／order_cancel_reservation 與
+                        # fetch.ensure_logged_in 丟的 RuntimeError 訊息本來就是
+                        # 寫給人看的（核對不過、登入失敗、按鈕不見了…），而且都
+                        # 發生在按下確認之前，不需要連 traceback 一起丟到畫面上。
                         payload["error"] = str(exc)
                     except Exception:
                         payload["error"] = traceback.format_exc()

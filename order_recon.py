@@ -34,6 +34,11 @@ from recon import OUTPUT_DIR_NAME, check_account, pick_accounts, query
 # common.js（B64_XOR_Encode 在裡面），而且是這支 CMD 原本的來源頁。
 ORDER_PAGE = "https://www.tbbstock.com.tw/tbb/order/layoutRWD.jsp?type=2"
 
+# 預約查詢頁——**不要跟 recon.ACCOUNT_PAGE（account/layoutRWD.jsp?type=4，
+# 未實現損益）搞混**，兩個都是 type=4，但目錄不一樣（order/ vs account/）、
+# 內容完全無關，純粹是網站自己的頁碼剛好撞了。
+RESERVE_PAGE = "https://www.tbbstock.com.tw/tbb/order/layoutRWD.jsp?type=4"
+
 SESSION_JS = """
 () => ({
     branch_id: sessionStorage.getItem('branch_id'),
