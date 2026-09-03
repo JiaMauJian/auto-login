@@ -222,6 +222,37 @@ def _check_qty(qty, *, odd):
     return value
 
 
+def _check_bs_radio(page, side, timeout_ms=8000):
+    """
+    選買進/賣出。2026/09/03 多輪測試撞過 page.check() 卡滿 30 秒逾時，
+    debug log 顯示先是「element is not stable」（版面還在位移），最後變成
+    「element was detached from the DOM」——推測是選完股票後頁面自己還有
+    別的 AJAX 在重畫這附近的區塊（跟 select_stock() 裡 select2 資料同步
+    要等一輪的成因類似），但這裡抓不到一個像 #stkName 那樣明確的「查完
+    了」訊號可以等。做法比照 select2：優先讓 Playwright 走一般的 click
+    （讓頁面自己可能綁的 click handler 正常跑一次），真的卡住逾時才退回
+    直接用 JS 設值＋補發事件，不用管視覺穩不穩定、也不管節點被整個換掉
+    幾次，因為 JS 是重新查一次目前的 DOM，不是抱著舊的節點參考硬打。
+    """
+    try:
+        page.check(f"#order{side}", timeout=timeout_ms)
+        return
+    except PlaywrightTimeoutError:
+        print(f"[fill_order] #order{side} 一般 click 逾時（頁面可能還在重畫），改用 JS 直接設值。")
+
+    page.evaluate(
+        """(side) => {
+            const el = document.getElementById('order' + side);
+            if (!el) throw new Error('#order' + side + ' 不存在');
+            el.checked = true;
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            el.dispatchEvent(new Event('click', {bubbles: true}));
+        }""",
+        side,
+    )
+
+
 def fill_order(page, *, side, qty, price, bs_flag="I", odd=False):
     """
     填好限價單的其餘欄位、按「確認下單」開出委託確認視窗，不按裡面的
@@ -243,7 +274,7 @@ def fill_order(page, *, side, qty, price, bs_flag="I", odd=False):
             f"零股的委託別只有 R（ROD-當日有效），收到 {bs_flag!r}——IOC／FOK 是"
             f"整股才有的。這一筆不送。")
 
-    page.check(f"#order{side}")             # 買進/賣出
+    _check_bs_radio(page, side)             # 買進/賣出
     page.fill("#qty", str(qty))
     page.select_option("#priceRadio", "0")  # 限價
     page.fill("#price", str(price))
