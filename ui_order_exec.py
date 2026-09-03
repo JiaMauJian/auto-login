@@ -264,12 +264,16 @@ class UiOrderExecMixin:
         auto = self.order_auto_confirm.get()
         side_word = "買進" if side == orders.SIDE_BUY else "賣出"
 
+        # 標題行三個作業統一格式：「{作業} {單位}{ 盤前／盤中}（委託別）」，四種
+        # 情境（買賣股票；出清・整張・盤前／盤中；出清・零股）共用同一套排法，
+        # 2026/09/03 使用者要求別讓人自己比對四句長得不一樣的話（見同一天
+        # ui_order.py 那則 KeyError 修復旁邊的討論）。
+        unit_word = orders.UNIT_NAMES[self.order_unit.get()]
         if job == orders.JOB_TRADE:
             # 買賣股票的方向是逐筆的（試算正數買、負數賣），不能像出清那樣用一句
             # 「即將賣出 N 筆」帶過——那會讓人以為整批同一個方向。買賣確實可能
             # 混在同一輪裡（不同股票試算正負不同），所以買、賣兩個數字都要列。
             buys = sum(1 for row in queue_rows if row["side"] == orders.SIDE_BUY)
-            unit_word = orders.UNIT_NAMES[self.order_unit.get()]
             head = (
                 f"買賣股票 {unit_word}（ROD-當日有效）\n"
                 f"即將依序處理 {len(queue_rows)} 筆委託\n"
@@ -278,23 +282,25 @@ class UiOrderExecMixin:
         elif self._order_clear_odd():
             # 零股跟整張最大的差別要寫在最前面：它不是 IOC，是「掛了再撤」，
             # 而那個撤是程式 20 秒後自己做的（規劃文件流程第 1、2 步）。人按下
-            # 去之前要知道「這批單會真的掛在市場上一段時間」。
+            # 去之前要知道「這批單會真的掛在市場上一段時間」。追價價格是凍結還是
+            # 即時算那段說明 2026/09/03 拿掉了（使用者指定），跟取消掛單確認視窗
+            # 同一個簡化方向。
             seconds = ODD_CANCEL_WAIT_MS // 1000
             head = (
-                f"即將依序處理 {len(queue_rows)} 筆零股「賣出」委託，用 ROD-當日有效"
-                f"（零股那一場沒有 IOC 可用）。\n\n"
-                f"{self._order_chase_price_note(queue_rows, ticks)}"
-                f"全部掛完之後會等 {seconds} 秒，再自動撤掉這幾檔還沒成交的零股賣單"
-                f"——ROD 不會自己取消，這一步是程式做的。\n"
+                f"出清股票 零股 盤中（ROD-當日有效）\n"
+                f"即將依序處理 {len(queue_rows)} 筆零股「賣出」委託。\n\n"
+                f"全部掛完之後會等 {seconds} 秒，再取消掛單。\n"
             )
         elif self._order_intraday():
             head = (
-                f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託，用 IOC。\n\n"
-                f"{self._order_chase_price_note(queue_rows, ticks)}"
-                f"沒成交的部位 IOC 會自動取消，不會掛著。\n"
+                f"出清股票 整張 盤中（IOC-立即成交否則取消）\n"
+                f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託。\n\n"
             )
         else:
-            head = f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託，用 ROD-當日有效。\n\n"
+            head = (
+                f"出清股票 整張 盤前（ROD-當日有效）\n"
+                f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託。\n\n"
+            )
 
         if multi_round:
             if auto_price:
@@ -361,27 +367,6 @@ class UiOrderExecMixin:
             self.order_exec_pos = 0
             self.order_exec_round = 1
             self._dispatch_next_order()
-
-    def _order_chase_price_note(self, queue_rows, ticks):
-        """
-        確認框裡「這幾筆的價格是哪來的」那一段，出清整張・盤中與出清零股共用。
-
-        按過「查詢委買賣」的那幾筆 row["price"] 已經是算好的數字（見
-        orders.plan_intraday_orders／plan_clear_odd_orders），開始下單時會直接
-        照用、不再重查（2026/08/29 使用者要求）；沒查過的那幾筆還是老路，下單前
-        才臨時查一次。**三種措辭分開講**，不能讓人以為全部都是「現在看到的數字
-        不會變」或全部都是「還會再變」——兩種情況可能同時存在。
-        """
-        frozen = sum(1 for row in queue_rows if row["price"] is not None)
-        if frozen == len(queue_rows):
-            return ("每一筆的價格都已經用「查詢委買賣」查到的即時報價算好，"
-                    "下單就是直接用執行預覽上看到的數字，不會再重查。\n")
-        if frozen == 0:
-            return (f"每一筆的價格以 Excel 讀到的成交價為基準，下單前再追 {ticks} 檔、"
-                    f"跟對手方第一檔比價算出來，不是現在看到的數字。\n")
-        return (f"其中 {frozen} 筆已經用「查詢委買賣」查到的即時報價算好，"
-                f"直接用執行預覽上看到的數字；其餘 {len(queue_rows) - frozen} 筆"
-                f"還沒查過，下單前才會即時查一次算出來。\n")
 
     def _order_round_sync_ready(self):
         """
@@ -604,7 +589,7 @@ class UiOrderExecMixin:
         還是會在 20 秒後醒來，對著一個已經停掉的作業派出一整輪撤單。
         """
         seconds = ODD_CANCEL_WAIT_MS // 1000
-        self._say(f"下單：零股已經全部掛出去，{seconds} 秒後自動撤掉沒成交的部分…")
+        self._say(f"下單：零股已經全部掛出去，{seconds} 秒後自動取消沒成交的部分…")
         self._update_order_exec_ui()
         self.order_exec_cancel_timer = self.root.after(
             ODD_CANCEL_WAIT_MS, self._start_odd_cancel)
@@ -646,7 +631,7 @@ class UiOrderExecMixin:
 
         order_number, account, sheet, codes = \
             self.order_exec_cancel_queue[self.order_exec_cancel_pos]
-        self._say(f"下單：撤零股單，第 {self.order_exec_cancel_pos + 1}/"
+        self._say(f"下單：取消零股單，第 {self.order_exec_cancel_pos + 1}/"
                   f"{len(self.order_exec_cancel_queue)} 個帳戶（{sheet}）…")
         self._update_order_exec_ui()
         self._ensure_browser_thread()
@@ -698,15 +683,15 @@ class UiOrderExecMixin:
         problems = self.order_exec_cancel_problems
 
         if found == 0 and not problems:
-            summary = "這一輪掛出去的零股都成交了，沒有需要撤的單。"
+            summary = "這一輪掛出去的零股都成交了，沒有需要取消的單。"
         else:
-            parts = [f"撤零股單完成，查到 {found} 筆還掛著，撤掉 {done} 筆"]
+            parts = [f"取消零股單完成，查到 {found} 筆還掛著，取消 {done} 筆"]
             if failed:
-                parts.append(f"、{failed} 筆撤不掉（去掛單分頁看原因）")
+                parts.append(f"、{failed} 筆取消不了（去掛單分頁看原因）")
             parts.append("。")
             summary = "".join(parts)
         if problems:
-            summary += f"　有 {len(problems)} 個帳戶沒撤成功。"
+            summary += f"　有 {len(problems)} 個帳戶沒取消成功。"
         # 存起來給 _after_round_actions 接著講：單輪的話它下一句就是「這一輪已經
         # 跑完」，直接 _say 會把這段結論整句蓋掉——而這是唯一講得出「掛出去的單
         # 後來怎麼了」的地方，蓋掉等於沒撤單報告可看。
@@ -715,8 +700,8 @@ class UiOrderExecMixin:
 
         if problems:
             show_warning(self.root,
-                "撤零股單沒有全部成功",
-                "這幾個帳戶的零股單沒有撤掉，請自己到「掛單」分頁查一次、"
+                "取消零股單沒有全部成功",
+                "這幾個帳戶的零股單沒有取消，請自己到「掛單」分頁查一次、"
                 "必要時手動取消：\n\n" + "\n\n".join(problems[:5]))
 
         if maybe_submitted:
@@ -1069,9 +1054,9 @@ class UiOrderExecMixin:
         cancelling = (self.order_exec_cancel_queue
                       and self.order_exec_cancel_pos < len(self.order_exec_cancel_queue))
         if self.order_exec_cancel_timer is not None:
-            waiting = f"零股已全部掛出，{seconds} 秒後自動撤掉沒成交的部分…"
+            waiting = f"零股已全部掛出，{seconds} 秒後自動取消沒成交的部分…"
         elif cancelling:
-            waiting = (f"撤零股單：第 {self.order_exec_cancel_pos + 1}/"
+            waiting = (f"取消零股單：第 {self.order_exec_cancel_pos + 1}/"
                        f"{len(self.order_exec_cancel_queue)} 個帳戶…")
         elif self.order_exec_sync_busy:
             waiting = f"第 {self.order_exec_round} 輪已跑完，正在更新持股管理檔（現金、股數、成本）…"
