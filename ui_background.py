@@ -30,7 +30,6 @@ STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "
               "order_dialog_closed": "委託確認視窗關閉偵測",
               "order_price_refresh": "多輪出清重讀持股",
               "order_odd_cancelled": "出清零股自動撤單",
-              "order_stock_price": "新增股票查價",
               "order_rates": "帳戶報酬率補讀", "excel_layout": "Excel 版面錨點檢查",
               "order_quotes_fetched": "查詢委買賣", "pending_fetched": "查詢掛單",
               "pending_cancelled": "取消掛單"}
@@ -667,7 +666,6 @@ class UiBackgroundMixin:
                     "order_dialog_closed": self._on_order_dialog_closed,
                     "order_price_refresh": self._on_order_price_refresh,
                     "order_odd_cancelled": self._on_order_odd_cancelled,
-                    "order_stock_price": self._on_order_stock_price,
                     "order_rates": self._on_order_rates,
                     "excel_layout": self._on_excel_layout,
                     "order_quotes_fetched": self._on_order_quotes_fetched,
@@ -1129,10 +1127,10 @@ class UiBackgroundMixin:
         """
         現在有沒有任何一條路正在用 COM 動那份活頁簿。
 
-        六個旗標各自誕生於不同的功能，本來各管各的：self.busy 是更新分頁的
-        登入／讀取／寫入，order_busy 是下單分頁的「讀取試算」，
+        五個旗標各自誕生於不同的功能，本來各管各的：self.busy 是更新分頁的
+        登入／讀取／寫入，order_busy 是下單分頁的「讀取試算」（2026/09/03 起
+        觸發點是「新增」股票，見 ui_order.add_order_stock，這個旗標本身沒變），
         order_stock_list_busy 是「讀取ＯＯ持股」（只讀第一個分頁的候選清單），
-        order_stock_price_busy 是盤中「新增」股票附帶的那次股價重讀，
         order_exec_price_busy 是多輪之間的重讀，order_rates_busy 是「執行帳戶」
         清單那趟只讀 B22 的補讀（見 ui_order.refresh_order_accounts）。問題是
         它們動的是**同一個 Excel 實例**——程式接上的是使用者眼前開著的那個
@@ -1144,13 +1142,12 @@ class UiBackgroundMixin:
         自己這一頁從來沒更新過，而讀回來的是舊的 I4:I13，然後盤中追價就拿這個
         舊價當基準。不報錯、不缺欄位，只是靜靜地錯。
 
-        所以六個旗標從這裡開始當成一個看。CLAUDE.md 那條「自動計算執行期間
+        所以五個旗標從這裡開始當成一個看。CLAUDE.md 那條「自動計算執行期間
         更新分頁的讀取／寫入要鎖住，反之亦然」就是靠這個述詞（畫面層）加上
         excel_io._EXCEL_LOCK（執行緒層）兩層一起實作的。
         """
         return bool(self.busy or self.order_busy or self.order_stock_list_busy
-                    or self.order_stock_price_busy or self.order_exec_price_busy
-                    or self.order_rates_busy)
+                    or self.order_exec_price_busy or self.order_rates_busy)
 
     def _apply_busy_state(self):
         """

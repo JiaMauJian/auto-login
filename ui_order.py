@@ -100,7 +100,6 @@ class UiOrderMixin:
         self.order_quotes = {}
         self.order_quotes_busy = False
         self._order_quotes_requested = []  # 上一次按「查詢委買賣」實際問了哪幾檔，回話時算漏了誰用
-        self.order_stock_price_busy = False  # 盤中「新增」股票附帶觸發的股價重讀還在跑（見 _refresh_added_stock_price）
 
         # 「盤前」／「盤中」模式（見 ui_layout._build_order_tab）。追價檔數
         # 是盤中模式整批共用的一個值（使用者 2026/08/28 確認過，不是像比重
@@ -374,6 +373,20 @@ class UiOrderMixin:
         self._rebuild_order_names()
         self._fill_order_accounts()
 
+        # 盤中模式的股票列不畫價格輸入框，改顯示 order_prices（見
+        # _build_order_stock_row 的說明）——這一趟讀完要就地把畫面上已加入
+        # 股票的價格文字補上，不然新增股票時附帶的這次重讀只更新了
+        # self.order_prices，畫面還停在加入那一刻的舊快照（2026/09/03 起
+        # add_order_stock 改成每次都呼叫這裡，取代原本專職做這件事的
+        # _refresh_added_stock_price）。
+        for row in self.order_rows:
+            label = row.get("price_label")
+            if label is None:
+                continue
+            excel_price = self.order_prices.get(row["code"])
+            price_text = f"Excel股價 {show(excel_price)} 元" if excel_price is not None else "Excel股價：讀不到"
+            label.configure(text=price_text)
+
         # 「版面對不對得上」不在這裡問：那件事在**開檔那一刻**就驗過了（A22
         # 錨點，見 ui_background.check_excel_layout），對不上的話 excel_open
         # 是 False，「讀取試算」這顆按鈕根本按不下去，走不到這裡。
@@ -613,10 +626,13 @@ class UiOrderMixin:
     def _after_order_accounts_changed(self):
         """
         勾選變了之後要做的事，兩個入口（單列、全選）共用：把每一列的 ☐／☑
-        重畫，把上一批讀進來的資料清掉，勾了人的話再自動按一次「讀取試算」
-        （2026/09/02 使用者要求，含「全選」）——比起等人自己再按一次，
-        少一個步驟；`refresh_order_plans` 本身還是會被 `_excel_in_use()`／
-        `_order_locked()` 擋住，所以不會跟其他還在跑的 COM 操作打架。
+        重畫，把上一批讀進來的資料清掉。
+
+        **不在這裡觸發「讀取試算」**（2026/09/03 推翻 2026/09/02 那版「勾了就
+        自動讀」）：勾帳戶當下往往還沒決定要動哪幾檔股票，這裡就先去讀
+        Excel（尤其追價那兩種作業還會順便跑「更新股價」巨集）等於在使用者
+        還沒做完設定時就先付一次代價。讀取試算的時機改到 add_order_stock——
+        「指定股票」按下「新增」那一刻，見那邊的說明。
 
         重畫是逐列改文字，不是整份 _fill_order_accounts()——後者會連帶重算欄寬、
         重新排序，而勾選這件事一格報酬率都沒動，清單的內容與順序完全一樣。
@@ -624,8 +640,6 @@ class UiOrderMixin:
         for sheet, label in self.order_account_label.items():
             self.order_accounts.item(sheet, text=self._order_account_text(sheet, label))
         self._clear_order_round()
-        if self._order_sheets():
-            self.refresh_order_plans()
 
     def _clear_order_round(self, keep_stocks=True):
         """
@@ -642,10 +656,10 @@ class UiOrderMixin:
         - 換 Excel 檔：連候選清單本身都換了一份，留著等於拿舊檔的股票去對新檔
           的分頁。
 
-        這裡本身不重讀——重讀是呼叫端（_after_order_accounts_changed）勾了人之後
-        才補的那一步（2026/09/02 改成自動，之前是使用者自己按「讀取試算」）；
-        換 Excel 檔（_forget_round）走同一個函式但不會接著自動讀，那時候
-        Excel 才剛開，沒有勾選可言。
+        這裡本身不重讀——重讀的時機是 add_order_stock 按「新增」那一刻
+        （2026/09/03 起改成這裡，之前是勾帳戶就自動讀，見
+        _after_order_accounts_changed 的說明）；換 Excel 檔（_forget_round）
+        走同一個函式，那時候 Excel 才剛開，也沒有勾選可言。
         """
         self.order_holdings, self.order_plans, self.order_quotes = {}, {}, {}
         self.order_holding_labels = {}
@@ -955,13 +969,15 @@ class UiOrderMixin:
         活頁簿（或那份活頁簿根本沒開著）就變灰（見 ui_background._apply_busy_state，
         它負責在 _excel_in_use() 那些旗標或 excel_open 變動時呼叫這裡）。
 
-        原本「讀取持股」（現拆成「讀取ＯＯ持股」與勾帳戶自動觸發的「讀取試算」）
-        與「新增」各自只看自己那一個旗標——前者跑著的時候後者還是亮的，而兩條
-        路都會一頁一頁 Activate 再跑巨集，交錯之後巨集會跑在別人剛切過去的那
-        一頁上（見 excel_io._EXCEL_LOCK 的說明）。
+        原本「讀取持股」（現拆成「讀取ＯＯ持股」與按「新增」時觸發的「讀取
+        試算」，2026/09/03 起入口從勾帳戶改成「新增」）與「新增」各自只看自己
+        那一個旗標——前者跑著的時候後者還是亮的，而兩條路都會一頁一頁 Activate
+        再跑巨集，交錯之後巨集會跑在別人剛切過去的那一頁上（見
+        excel_io._EXCEL_LOCK 的說明）。
 
-        擋住而不是排隊：跟 _refresh_added_stock_price 對自己重複點擊的態度一致
-        （那裡的註解有寫理由——下一次「新增」或勾帳戶還會再有機會補上）。
+        擋住而不是排隊：跟 refresh_order_plans 開頭那道 `_excel_in_use()` guard
+        同一個態度——按下去卻剛好撞上忙碌就默默不做事，不是排進佇列，下一次
+        「新增」還會再有機會補上。
         """
         busy = self._excel_in_use()
         # 「讀取ＯＯ持股」還要 Excel 真的開著才亮：這顆做的事整個就是讀那份
@@ -973,12 +989,15 @@ class UiOrderMixin:
         # 不必再管它的灰／亮，勾帳戶那條路自己會被 _order_locked() 擋住。
         state = "normal" if self.excel_open and not busy else "disabled"
         self.order_stock_list_button.configure(state=state)
-        # 「新增」只有盤中那條路會附帶跑巨集（見 add_order_stock 的說明），盤前
-        # 完全不碰 COM，沒有理由跟著變灰——讀取 20 組帳戶要跑好幾分鐘，那段時間
-        # 還是該能把股票加進清單。所以這一顆多看一個模式。它也不跟著 excel_open
-        # 走：這顆真正在做的是「把這一檔加進清單」，那是純畫面的事，Excel 沒開
-        # 只是附帶那次股價重讀會跳過（見 _refresh_added_stock_price 的守門）。
-        add_busy = busy and self._order_uses_excel_price()
+        # 「新增」是否要跟著變灰，現在看**有沒有勾帳戶**而不是看作業種類：
+        # 2026/09/03 起不管哪種作業，「新增」都會在勾了帳戶時附帶呼叫
+        # refresh_order_plans（見 add_order_stock 的說明），所以只要 Excel
+        # 忙著、而且這一按會真的去讀，才需要擋。沒勾帳戶的話 add_order_stock
+        # 根本不會碰 COM，跟以前「盤前完全不碰 COM，沒有理由跟著變灰」是同一個
+        # 判斷，只是條件換成勾選狀態。它也不跟著 excel_open 走：Excel 沒開的話
+        # refresh_order_plans 自己會被 _require_excel() 擋下，不必特地在這裡
+        # 先擋一次。
+        add_busy = busy and bool(self._order_sheets())
         self.order_add_button.configure(state="disabled" if add_busy else "normal")
         # 「執行帳戶」在有事情在跑的時候鎖住。改勾選會把持股、試算整批清掉
         # （見 _on_order_account_toggled），而背景那一趟讀回來的是**改之前**
@@ -1015,15 +1034,28 @@ class UiOrderMixin:
         通常不一樣，共用一個值沒意義）；盤中模式只有比重，價格由整批共用
         的「追價檔數」在下單當下算出來，這一列不需要 price 這個欄位。
 
-        盤中模式額外觸發一次背景的「更新股價」（見 _refresh_added_stock_price）
-        ——這裡顯示的 Excel 股價是加進清單那一刻的快照（見 _build_order_stock_row
-        的說明），剛加的這一檔如果原本沒被最近一次「讀取試算」涵蓋到
-        （例如本來沒持股），不補這一步就會一直停在讀不到／舊的數字。
+        按下「新增」之後，勾了帳戶的話就重讀一次「試算」（見
+        refresh_order_plans）——2026/09/03 起這裡才是唯一的觸發點，勾帳戶
+        本身不再自動讀（見 _after_order_accounts_changed 的說明）。每按一次
+        「新增」都重讀，不管這一批帳戶是不是已經讀過：買賣股票只讀
+        D~F／B22／M19:N28，成本很低；出清整張・盤中與出清零股會多跑一次
+        「更新股價」巨集，但那本來就是追價要用的成交價基準，加了新股票就該
+        用最新的（使用者 2026/09/03 確認接受這個代價，不必只在「還沒讀過」時
+        才讀）。剛加的這一檔如果原本沒被最近一次試算涵蓋到（例如本來沒
+        持股），這一步會補上。
+
+        這次重讀特意放在「已經加過了」那個重複檢查**之前**：勾帳戶不會自動
+        讀之後，「重按一次新增」是使用者唯一能自己觸發重讀的方式——如果
+        因為股票已經在清單裡就整段跳過，剛勾的新帳戶會一直卡在讀不到試算，
+        而使用者手上所有能按的動作都只換來一句「已經加過了」，沒有任何
+        辦法補救。
         """
         raw = self.order_stock_pick.get().strip()
         if not raw:
             return
         code = raw.split(" ")[0].strip().upper()
+        if self._order_sheets():
+            self.refresh_order_plans()
         if any(row["code"] == code for row in self.order_rows):
             show_info(self.root, "已經加過了", f"{code} 已經在清單裡了。")
             return
@@ -1048,95 +1080,6 @@ class UiOrderMixin:
         self.order_stock_pick.set("")
         self._resize_order_stock_column()
         self._recompute_order_preview()
-        if self._order_uses_excel_price():
-            self._refresh_added_stock_price()
-
-    def _refresh_added_stock_price(self):
-        """
-        追價的那兩條路（出清整張・盤中、出清零股）「新增」股票時附帶觸發一次
-        「更新股價」巨集、重讀 Excel I 欄（2026/08/29 使用者要求）——剛加進來
-        的這一檔如果沒被最近一次「讀取試算」涵蓋到（例如本來沒持股），不補這
-        一步，它的追價基準價就會一直停在讀不到／很舊的數字上。
-
-        刻意不共用 refresh_order_plans／_on_order_plans_data 那條路——那邊會
-        整個重建帳戶勾選框（見 _fill_order_accounts 的說明：「目前只有『重新
-        整理』會呼叫這裡，一輪通常只按一次」），如果「新增」一檔股票也走
-        同一條路，使用者每加一檔股票，已經勾好的帳戶就會被清空重建一次。
-        這裡只更新 self.order_prices、刷新畫面上已加入股票的價格文字，不碰
-        帳戶勾選、持股、報酬率。
-
-        order_stock_price_busy 是這條路自己的忙碌旗標，跟 order_busy（讀取
-        試算）分開——短時間連續按好幾次「新增」，這裡選擇跳過而不是排隊，
-        反正下一次「新增」或「讀取試算」還會再有機會補上。
-        """
-        # 這裡改看 _excel_in_use()：原本只看自己那一個旗標，所以那顆「讀取試算」
-        # 正在跑（5 檔 × N 個分頁的 HTTP，很慢）的時候按「新增」就會
-        # 起第二條執行緒，兩邊都在 Activate → 跑巨集 → Activate → 跑巨集。
-        if self._excel_in_use() or not self.excel_open:
-            return
-        # 只跑勾起來的那幾位。2026/09/02 之前這裡是 trader_of 的全部（＝登入過
-        # 的所有人），那是「一次一位」時代留下來的寬鬆做法：沒勾的人這一輪一格
-        # 都用不到，卻要陪跑一次「更新股價」巨集（一頁 5 檔＝5 次 Yahoo HTTP）。
-        names = self._order_sheets()
-        if not names:
-            return
-        self.order_stock_price_busy = True
-        self._apply_busy_state()
-        threading.Thread(target=self._order_stock_price_worker, args=(self.path, names), daemon=True).start()
-
-    def _order_stock_price_worker(self, path, names):
-        """
-        背景執行緒：每個分頁各觸發一次「更新股價」巨集、重讀 I 欄，跟
-        _order_price_refresh_worker 同一個做法（一頁一次的理由見
-        excel_io.run_update_price_macro）。
-        """
-        import pythoncom
-
-        pythoncom.CoInitialize()
-        excel = workbook = sheet = None
-        payload = {}
-        try:
-            with excel_io.opened(path, True) as (excel, workbook, _attached):
-                sheets = {}
-                with excel_io.keep_active_sheet(workbook):
-                    for name in names:
-                        sheet, error = excel_io.find_sheet(workbook, name)
-                        if sheet is not None:
-                            # 一頁一次，理由同 _order_plans_worker。
-                            excel_io.run_update_price_macro(
-                                excel, sheet, on_stuck=self._macro_stuck_notifier("更新股價", name))
-                            sheets[name] = excel_io.read_sheet(sheet)
-                # 巨集寫過 I4:I13，理由同 _order_plans_worker。
-                workbook.Save()
-                payload = {"sheets": sheets}
-        except Exception as exc:
-            payload = {"error": str(exc)}
-        finally:
-            sheet = excel = workbook = None
-            pythoncom.CoUninitialize()
-        self.queue.put(("order_stock_price", payload))
-
-    def _on_order_stock_price(self, payload):
-        """
-        _refresh_added_stock_price 的背景回話。讀不到／出錯就默默放棄、維持
-        畫面上原本的股價——這只是「新增」附帶的加值，不是使用者當下在等的
-        主要操作，不值得為了它彈錯誤視窗（真的要查，「讀取試算」還在）。
-        """
-        self.order_stock_price_busy = False
-        self._apply_busy_state()
-        if "error" in payload:
-            return
-        for data in payload["sheets"].values():
-            for row in data["rows"]:
-                if row["price"] is not None:
-                    self.order_prices[row["code"]] = row["price"]
-        for row in self.order_rows:
-            label = row.get("price_label")
-            if label is None:
-                continue
-            excel_price = self.order_prices.get(row["code"])
-            price_text = f"Excel股價 {show(excel_price)} 元" if excel_price is not None else "Excel股價：讀不到"
-            label.configure(text=price_text)
 
     @staticmethod
     def _order_weight_key_ok(value):
@@ -1205,11 +1148,10 @@ class UiOrderMixin:
         要在下單前用這個基準再算一次邊界、查一次對手方第一檔（見
         orders.chase_price），這裡顯示的數字就是實際會拿去算價的那一個
         （不是另一條網頁現查的路，2026/08/29 使用者確認拿掉了）。這裡存了
-        Label 物件本體（row["price_label"]）而不是只畫一次文字，因為
-        _refresh_added_stock_price 每次有人按「新增」都會觸發一次背景重讀
-        （2026/08/29 使用者要求），回來要能就地更新這一列的文字，不是只有
-        新加的那一列，而是畫面上全部盤中列一起刷新——單按「讀取試算」不會
-        觸發這個更新，只有「新增」股票才會。
+        Label 物件本體（row["price_label"]）而不是只畫一次文字，因為每次按
+        「新增」都會觸發一次背景重讀（2026/09/03 起併進 refresh_order_plans，
+        見 _on_order_plans_data 補畫 price_label 那一段），回來要能就地更新
+        這一列的文字，不是只有新加的那一列，而是畫面上全部盤中列一起刷新。
         """
         # 買賣股票的方向是**逐檔逐帳戶**由試算的正負決定（規劃文件：正數為買、
         # 負數為賣），同一檔股票在甲帳戶是買、在乙帳戶可能是賣。所以這一列不掛
@@ -1376,15 +1318,17 @@ class UiOrderMixin:
                 ordered, self.order_plans, self.order_holdings, self.order_unit.get(),
                 loaded_sheets=self.order_loaded)
             # 勾了但還沒讀的那幾位：他們的每一列都會寫「還沒讀取試算，略過」，
-            # 但那是一列一列講的，整批漏讀（最常見的情況：勾完就直接看預覽）
-            # 要在這裡講一次。讀取試算 2026/09/02 起勾帳戶就自動觸發（見
-            # ui_order._after_order_accounts_changed），這裡通常只是短暫出現、
-            # 讀完就消失，不用再叫人去按哪顆按鈕。
+            # 但那是一列一列講的，整批漏讀（最常見的情況：勾完帳戶、加了股票，
+            # 但那一批試算剛好撞上 Excel 忙碌而被 refresh_order_plans 靜靜跳過，
+            # 見 add_order_stock 的說明）要在這裡講一次。2026/09/03 起讀取試算
+            # 的入口改成「新增」，「重新勾選」已經不會觸發重讀，remedy 改成
+            # 「按新增」——哪怕股票已經在清單裡也一樣會重讀（見 add_order_stock
+            # 把重讀擺在「已經加過了」檢查之前的理由）。
             missing = [account["sheet"] for account in ordered
                        if account["sheet"] not in self.order_loaded]
             if codes and missing:
                 who = "、".join(missing) if len(missing) <= 3 else f"{len(missing)} 位"
-                hints.append(f"⚠ {who}還沒讀到下單試算，讀取中或請重新勾選。")
+                hints.append(f"⚠ {who}還沒讀到下單試算，讀取中或請按「新增」重新觸發。")
         elif self._order_clear_odd():
             # 出清零股：量是持股的零股那一段，沒有比重可讀；價格跟盤中出清同一條
             # 追價路（見 orders.plan_clear_odd_orders）。

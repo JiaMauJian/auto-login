@@ -1095,15 +1095,16 @@ class UiLayoutMixin:
         pick = ttk.Frame(box)
         pick.grid(row=0, column=0, sticky="ew")
 
-        # 「讀取試算」按鈕 2026/09/02 拿掉了：勾帳戶（含「全選」）現在會自動
-        # 觸發同一件事（見 ui_order._after_order_accounts_changed），不必再讓
-        # 人多按一次。`refresh_order_plans` 這個方法留著，換帳戶勾選時還是靠
-        # 它讀 Excel，只是入口從按鈕改成勾選事件。
+        # 「讀取試算」按鈕 2026/09/02 拿掉了，入口先改成勾帳戶自動觸發，
+        # 2026/09/03 又改成按「新增」股票才觸發（見 ui_order.add_order_stock）
+        # ——勾帳戶當下往往還沒決定股票，先讀一次太早。`refresh_order_plans`
+        # 這個方法留著，只是呼叫端換了。
         self.order_stock_pick = ttk.Combobox(pick, width=15, font=(self.family, FONT_SIZE))
         self.order_stock_pick.grid(row=0, column=0, sticky="w")
-        # 存成屬性是因為它會跟著 Excel 忙碌狀態一起變灰：盤中模式按「新增」
-        # 會附帶跑一次「更新股價」巨集（見 ui_order._refresh_added_stock_price），
-        # 那是一條會動 COM 的路，不能在別人正在動同一份活頁簿的時候按下去。
+        # 存成屬性是因為它會跟著 Excel 忙碌狀態一起變灰：勾了帳戶的話，按
+        # 「新增」就會附帶重讀一次試算（盤中模式還會跑一次「更新股價」巨集，
+        # 見 ui_order.add_order_stock），那是一條會動 COM 的路，不能在別人
+        # 正在動同一份活頁簿的時候按下去（見 ui_order._order_excel_buttons）。
         self.order_add_button = ttk.Button(pick, text="新增", command=self.add_order_stock,
                                            bootstyle="primary-outline")
         self.order_add_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
