@@ -43,6 +43,12 @@ CANCEL_KINDS = (("buy", "取消全部買單", "B"),
 CANCEL_SIDES = {kind: side for kind, _text, side in CANCEL_KINDS}
 CANCEL_TEXTS = {kind: text for kind, text, _side in CANCEL_KINDS}
 
+# 確認視窗裡的問句，跟按鈕上「取消全部OO單」分開放——按鈕是動作名稱，這句是
+# 問句，不重複「全部」兩個字（2026/09/03 使用者要求簡化）。
+CANCEL_CONFIRM_TEXTS = {"buy": "確定要取消買單？",
+                         "sell": "確定要取消賣單？",
+                         "all": "確定要取消全部掛單？"}
+
 
 def _kind_text(row):
     """委託單／預約單哪一種——兩者取消走的機制不一樣（order_cancel.py／
@@ -199,12 +205,13 @@ class UiPendingMixin:
         for row in rows:
             groups.setdefault(row["sheet"], []).append(row)
 
-        # 2026/09/02 使用者要求簡化：逐筆列出來的清單拿掉，只問筆數
-        # ——人是看著這張表按下去的，按下去之前要看的細節表上本來就有。
+        # 2026/09/02 使用者要求簡化：逐筆列出來的清單拿掉，只問一句。
+        # 2026/09/03 再簡化：問句拿掉筆數（人是看著這張表按下去的，細節表上
+        # 本來就有），確定鍵也從「取消這幾筆」縮成「取消」。
         if not ask_confirm(
                 self.root, CANCEL_TEXTS[kind],
-                f"確定要取消這 {len(rows)} 筆委託？",
-                confirm_text="取消這幾筆", cancel_text="不要"):
+                CANCEL_CONFIRM_TEXTS[kind],
+                confirm_text="取消", cancel_text="不要"):
             return
 
         queue = []
