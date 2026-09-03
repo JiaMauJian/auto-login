@@ -34,8 +34,8 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
 | `excel_io.py` | COM 開檔、讀寫 B8/E/F，只認得這三處（2026/08/24 起不再自動備份） |
 | `util.py` | 數字與寬度對齊等小工具 |
 | `ui.py` / `ui_layout.py` / `ui_sync.py` / `ui_background.py` / `ui_common.py` / `ui_history.py` / `ui_cert.py` | Tkinter GUI，唯一有畫面的一批檔案；背景執行緒跑 Playwright／COM，主執行緒才碰 widget |
-| `ui_order.py` / `ui_order_exec.py` | 下單分頁：前者收設定、讀 Excel、算執行預覽，後者是按下「開始下單」之後的依序執行引擎（吃凍結好的 queue，不管那份 queue 是哪個作業產生的） |
-| `ui_pending.py` | 掛單分頁：把今天送出去的委託整批查回來攤成一張表，是自動送出的驗證面 |
+| `ui_order.py` / `ui_order_exec.py` | 下單分頁：前者收設定、讀 Excel、算執行預覽，後者是按下「開始下單」之後的依序執行引擎（吃凍結好的 queue，不管那份 queue 是哪個作業產生的），以及一輪跑完之後的三段收尾（撤零股單／完整同步／重讀判斷收斂，見 docs/介面規劃.md 9.8、9.9） |
+| `ui_pending.py` | 掛單分頁：把今天送出去的委託整批查回來攤成一張表，是自動送出的驗證面；`_cancel_orders_split`（委託單／預約單兩種都撤）給它跟出清零股的自動撤單共用 |
 | `dev_tools/simulate.py` | 假帳號、假網頁（`window.__SIM__`），讓 `fetch.py` 走假資料但形狀跟真 API 一樣 |
 | `dev_tools/sim_excel.py` | 在 Excel 裡加/移除模擬分頁 |
 | `dev_tools/check_two_accounts.py` | 多帳號「各拿各的資料」回歸測試 |
@@ -77,5 +77,18 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
   介面字調大了它還是系統預設的小字。也**不要換成 `ttkbootstrap.dialogs.Messagebox`**：
   它斷行用 `textwrap.wrap(width=50)`，那個 50 數的是字元個數，中文會從第 50 個字中間
   硬切、檔案路徑照切、視窗被撐到 1133 像素寬，按鈕還是英文 OK（2026/08/30 實測後定案）。
+- **下單多輪之間一定要跑完整同步，不能只重讀 Excel**（2026/09/03，見
+  `docs/介面規劃.md` 9.9）。E/F 只有更新分頁寫得到（`excel_io.write_cells` 全專案
+  只有 `ui_background._write_worker` 一個呼叫端），所以「重讀 Excel」讀回來的永遠
+  是下單前那份數字——第 2 輪會照著還沒賣掉的持股再算一次量，**重複賣同一批部位**，
+  一路到 `ORDER_MULTI_ROUND_CAP` 為止。同步走的是更新分頁那一整條路
+  （`ui_order_exec._start_round_sync`），不要另外寫一份簡化版：現金基準一天只設
+  一次、`round_scope`、寫入成功才落帳這幾條都在那條路上。同步完那條路會
+  `_set_busy(False)`，**busy 要自己補回來**，否則下一輪開始前「登入／更新／全部
+  登出」變成可以按的，換掉 cookie 之後委託會掛到別人帳上。
+- 出清零股是「掛了再撤」不是 IOC——零股那一場沒有 IOC 可選（`orders.BS_FLAG_ODD`），
+  所以 20 秒後的撤單是**程式的責任**。要撤哪幾筆是查回來再過濾的（`apcode == '5'`
+  ＋這一輪的股票＋賣出＋`open`），不是靠程式記得自己送出了什麼——半自動時按確認的
+  是人，拿不到委託書號。細節見 `docs/介面規劃.md` 9.8。
 - `.bat` 檔案內容只能純 ASCII（連中文註解都不行），呼叫同層 exe 用 `%~dp0` 完整路徑。
 - exe 是 `--windowed` 打包，啟動失敗看 exe 旁邊的 `crash.log`。

@@ -113,6 +113,13 @@ def normalize(row, sheet):
         "ordno": ordno.strip(),
         "ordstatus": ordstatus,
         "code": (row.get("stockno") or "").strip(),
+        # 盤別代碼原樣留一欄（1整股／2盤後／3盤後零股／4興櫃／5盤中零股，見
+        # order_recon.APCODE_NAMES）。畫面上那一欄是 describe_trade() 組出來的
+        # 中文，但「出清零股」跑完 20 秒要回頭撤掉自己掛出去的那幾筆時，挑的
+        # 條件是 apcode 等於盤中零股（＝order_fill.TAB1_ODD），拿中文字串去比
+        # 對會在網站哪天改一個字的時候靜靜地一筆都挑不到（見
+        # ui_order_exec._order_odd_cancel_job）。
+        "apcode": str(row.get("apcode") or "").strip(),
         "trade_text": describe_trade(row),
         "side": side,
         "side_text": BUYSELL_NAMES.get(side, side),

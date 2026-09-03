@@ -460,7 +460,7 @@ def _message_box(parent, message):
 
 
 def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否", danger=True,
-                confirm_style=None):
+                confirm_style=None, emphasize=None):
     """
     是非確認對話框，取代 messagebox.askyesno。
 
@@ -481,6 +481,11 @@ def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否"
     生效」，兩件事不一定要綁在一起（例如切換現金算法：換錯了有代價，所以
     danger=True 焦點還是鎖「否」，但按鈕顏色 2026/08/22 使用者要求跟同一天
     新增的「今天的現金餘額怎麼算」那顆藍色「確定」統一，不繼續用警示色）。
+
+    emphasize：訊息裡要染成警示紅色的一段字（例如「自動送出委託單」），逐行找
+    出來單獨用一顆紅字 Label 顯示，同一行其餘文字維持預設顏色。message 常是
+    呼叫端自己兜出來的多行文字，紅字通常只落在其中一行，所以要逐行找而不是
+    假設在第一行。
     """
     win = tk.Toplevel(parent)
     win.title(title)
@@ -492,7 +497,23 @@ def ask_confirm(parent, title, message, *, confirm_text="是", cancel_text="否"
     outer = ttk.Frame(win, padding=16)
     outer.pack(fill="both", expand=True)
 
-    ttk.Label(outer, justify="left", text=message).pack(anchor="w")
+    body = ttk.Frame(outer)
+    body.pack(anchor="w", fill="x")
+    if emphasize and emphasize in message:
+        for line in message.split("\n"):
+            row = ttk.Frame(body)
+            row.pack(anchor="w", fill="x")
+            before, mark, after = line.partition(emphasize)
+            if not mark:
+                ttk.Label(row, text=line).pack(side="left")
+                continue
+            if before:
+                ttk.Label(row, text=before).pack(side="left")
+            ttk.Label(row, text=mark, bootstyle="danger").pack(side="left")
+            if after:
+                ttk.Label(row, text=after).pack(side="left")
+    else:
+        ttk.Label(body, justify="left", text=message).pack(anchor="w")
 
     def confirm(*_args):
         answer["ok"] = True

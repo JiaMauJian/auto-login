@@ -612,9 +612,12 @@ class UiLayoutMixin:
         # 在每次查詢／每次狀態變動之後重算。kind 用 lambda 綁進去，不能直接寫
         # command=self.cancel_pending(kind)（那是「現在就呼叫」）。
         self.pending_cancel_buttons = {}
+        # buy 維持原本的 danger-outline；sell 改 success-outline、all 改 danger
+        # （實心紅底白字）跟 buy/sell 的外框樣式區隔開，避免使用者混淆。
+        cancel_bootstyles = {"buy": "danger-outline", "sell": "success-outline", "all": "danger"}
         for kind, text, _side in CANCEL_KINDS:
             button = ttk.Button(cancel_bar, text=text, state="disabled",
-                                bootstyle="danger-outline",
+                                bootstyle=cancel_bootstyles[kind],
                                 command=lambda k=kind: self.cancel_pending(k))
             button.pack(side="left", padx=(0, 8))
             self.pending_cancel_buttons[kind] = button
@@ -900,8 +903,8 @@ class UiLayoutMixin:
         買賣股票的第二列：張數與價格都來自 Excel 的下單試算 M19:N28，人不必填
         任何數字，所以這一列只剩「單位」一項設定。
 
-        零股那半段還沒接（下單表單的交易盤別要選哪個值還沒人看過，見
-        order_fill.TAB1_ODD），所以「單位」目前只有整張選得到。
+        整張與零股都接上了（零股 2026/09/01，見 order_fill.TAB1_ODD）——選哪一個
+        決定這一輪送同一個試算股數的哪一段（見 orders.split_lots）。
         """
         box = ttk.Frame(parent)
         self._build_order_unit(box, orders.JOB_TRADE)
@@ -918,12 +921,17 @@ class UiLayoutMixin:
 
         ttk.Separator(box, orient="vertical").pack(side="left", fill="y", padx=(16, 0), pady=2)
         ttk.Label(box, text="時機").pack(side="left", padx=(16, 0))
-        ttk.Radiobutton(box, text="盤前", variable=self.order_mode, value="pre",
-                        style="Choice.TRadiobutton",
-                        command=self._on_order_mode_changed).pack(side="left", padx=(8, 0))
-        ttk.Radiobutton(box, text="盤中", variable=self.order_mode, value="intraday",
-                        style="Choice.TRadiobutton",
-                        command=self._on_order_mode_changed).pack(side="left", padx=(8, 0))
+        # 兩顆留著參照：選了零股的時候「盤前」要變灰（見 ui_order.
+        # _sync_order_mode_for_unit）。零股走的是盤中零股那一場（order_fill.
+        # TAB1_ODD = '5'），規劃文件「出清股票－零股」整節也只有一組設定、沒有
+        # 盤前那一版，所以那顆不是「還沒接」，是這個單位下根本不存在。
+        self.order_mode_radios = {}
+        for value, text in (("pre", "盤前"), ("intraday", "盤中")):
+            radio = ttk.Radiobutton(box, text=text, variable=self.order_mode, value=value,
+                                    style="Choice.TRadiobutton",
+                                    command=self._on_order_mode_changed)
+            radio.pack(side="left", padx=(8, 0))
+            self.order_mode_radios[value] = radio
 
         # 追價檔數：整批共用一個值（不是像比重那樣每檔股票各自設定，使用者
         # 2026/08/28 確認過），只有盤中用得到，盤前維持看得到但打不動——理由

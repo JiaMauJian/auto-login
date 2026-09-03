@@ -29,7 +29,7 @@ import order_fill
 import orders
 from ui_common import (
     FONT_SIZE, ORDER_STOCK_ROW_H, ORDER_STOCK_ROWS_SHOWN, PRICE_PENDING_TEXT,
-    ask_confirm, col_width, show_error, show_info, wide,
+    col_width, show_error, show_info, wide,
 )
 from util import show
 
@@ -276,7 +276,11 @@ class UiOrderMixin:
             show_info(self.root, "還沒勾帳戶", self._order_no_account_text())
             return
 
-        run_macro = self._order_intraday()
+        # 追價的兩條路（出清整張・盤中、出清零股）才要先跑「更新股價」：它們的
+        # 委託價以 Excel I 欄的成交價為基準（見 orders.chase_price），基準是舊的
+        # 就整輪都算錯。盤前的價格是人填的、買賣股票的價格來自試算，兩者都不必
+        # 為此付一頁 10 次 Yahoo HTTP 的代價。
+        run_macro = self._order_uses_excel_price()
         # 買賣股票的張數與價格來自下單試算 M19:N28，那是另外幾格，只有這個作業
         # 要讀——其他作業讀它只是多 10 格 COM 往返。
         read_plan = self.order_job.get() == orders.JOB_TRADE
@@ -692,35 +696,67 @@ class UiOrderMixin:
             return
 
         self._order_mode_last = self.order_mode.get()
-        intraday = self._order_mode_last == "intraday"
-
-        self.order_ticks_entry.configure(state="normal" if intraday else "disabled")
-        # 「查詢委買賣」是盤中限定功能，跟 order_ticks_entry 同一個道理
+        self._sync_order_clear_controls()
+        # 「查詢委買賣」是追價限定功能，跟 order_ticks_entry 同一個道理
         # （disabled 不整個藏起來）。切模式代表股票清單整批清掉重來（下面），
         # 舊查到的報價沒有對象可用，一併清空——不留著一份查不到任何一列在
         # 用的舊資料。
         self.order_quotes = {}
         self._update_order_quotes_ui()
+        self._reset_order_stock_rows()
 
-        # 多輪直到出清／自動更新股價是盤中限定的功能（規劃文件「是否要跑
-        # 多輪」只列在盤中設定底下，2026/08/28 使用者更正）。切到盤前就強制
-        # 關掉、鎖住兩個勾選框；切回盤中才解鎖多輪那顆——自動更新股價那顆
-        # 還是要等使用者自己勾多輪才會跟著解鎖（見 _on_order_multi_round_changed），
-        # 不是切模式就自動打開。
-        self.order_multi_round_check.configure(state="normal" if intraday else "disabled")
-        if not intraday:
+    def _sync_order_clear_controls(self):
+        """
+        出清作業第二列那幾組控制項（時機、追價檔數、多輪那一列）的亮暗。切時機、
+        切單位、切作業三條路共用這一支——三個地方各寫一份的話，之後任何一條規則
+        改了都會有一邊沒跟上，而且不會報錯，只是某顆按鈕停在不該有的狀態。
+
+        兩條規則：
+
+        - **零股沒有盤前那一版。** 規劃文件「出清股票－零股」整節只有一組設定，
+          而且走的是盤中零股那一場（`order_fill.TAB1_ODD = '5'`，見
+          orders.BS_FLAG_ODD）。所以選了零股就把時機固定在盤中、「盤前」那顆
+          變灰——那不是「還沒接」，是這個單位底下根本不存在的選項。
+        - **追價檔數與多輪是「價格不是人填的」那幾種情況才有意義**（出清整張・
+          盤中、出清零股兩種），所以問的是 _order_uses_excel_price，不是時機
+          本身。盤前的價格是人一格一格填的，追不追價無從談起。「自動更新股價」
+          再多一層：沒勾多輪它不會發生（見 _on_order_multi_round_changed）。
+        """
+        odd = self._order_clear_odd()
+        if odd and self.order_mode.get() != "intraday":
+            # 固定成盤中。set() 不會觸發 command，所以 _order_mode_last 要自己
+            # 跟上——不然下一次切時機被 busy 擋下來時，那個「還原回上一個值」
+            # 的還原點會是一個已經不存在的選擇。
+            self.order_mode.set("intraday")
+            self._order_mode_last = "intraday"
+        for value, radio in self.order_mode_radios.items():
+            radio.configure(state="disabled" if odd and value == "pre" else "normal")
+
+        chase = self._order_uses_excel_price()
+        self.order_ticks_entry.configure(state="normal" if chase else "disabled")
+        self.order_multi_round_check.configure(state="normal" if chase else "disabled")
+        if not chase:
             self.order_multi_round.set(False)
             self.order_auto_price.set(False)
             self.order_auto_price_check.configure(state="disabled")
 
+    def _reset_order_stock_rows(self):
+        """
+        股票清單整批清掉重選，再把跟著它變的東西重畫一遍。切時機、切單位、切
+        作業三條路共用（9.3 第 1 點）：每一列的形狀跟著設定走（出清整張有比重、
+        出清零股沒有、盤前還多一格價格），與其想辦法把舊的列轉成新形狀，不如
+        整批清掉重來。
+        """
         for row in list(self.order_rows):
             row["frame"].destroy()
         self.order_rows = []
         self._resize_order_stock_column()
         self._recompute_order_preview()
-        # 執行按鈕上寫著「盤前」還是「盤中」（見 _order_exec_label），要跟著換。
+        # 執行按鈕上寫著「整張・盤中」還是「零股・盤中」（見 _order_exec_label），
+        # 要跟著換。
         self._update_order_exec_ui()
-        # 「新增」能不能按跟模式有關（見 _order_excel_buttons），切模式要重算一次。
+        # 「新增」能不能按跟這一輪要不要跑巨集有關（見 _order_excel_buttons），
+        # 切設定要重算一次。
         self._apply_busy_state()
 
     def _on_order_job_changed(self):
@@ -761,46 +797,98 @@ class UiOrderMixin:
             self.order_auto_price.set(False)
             self.order_multi_round_check.configure(state="disabled")
             self.order_auto_price_check.configure(state="disabled")
-        else:
-            self._on_order_mode_changed()
 
         # 「單位」兩個作業各畫一組單選鈕，綁的卻是同一個變數（見
         # ui_layout._build_order_unit）——切過來之後那個值在新作業可能是還沒接
-        # 上的那一段（例如買賣股票的零股接上了、出清的零股還沒），單選鈕是灰
-        # 的，變數卻還停在上面：按鈕上的字、送出去的量都會照一個按不到的選項
-        # 走。跟 _order_intraday 要連作業一起問 order_mode 是同一類的錯——不會
-        # 報錯，只會做了不該做的事。
+        # 上的那一段（例如全持股交易只有整張），單選鈕是灰的，變數卻還停在上
+        # 面：按鈕上的字、送出去的量都會照一個按不到的選項走。跟 _order_intraday
+        # 要連作業一起問 order_mode 是同一類的錯——不會報錯，只會做了不該做的事。
+        #
+        # **要先扳正單位再同步第二列**：_sync_order_clear_controls 問的「現在是
+        # 不是出清零股」取決於單位（見 _order_clear_odd），反過來做會拿還沒扳正
+        # 的值去決定時機那兩顆的亮暗。
         if not orders.unit_ready(job, self.order_unit.get()):
             self.order_unit.set(orders.UNIT_LOT)
 
-        for row in list(self.order_rows):
-            row["frame"].destroy()
-        self.order_rows = []
-        self._resize_order_stock_column()
-        self._recompute_order_preview()
-        self._update_order_exec_ui()
-        self._apply_busy_state()
+        if job == orders.JOB_CLEAR:
+            self.order_ticks.set(orders.DEFAULT_TICKS[self.order_unit.get()])
+            self._sync_order_clear_controls()
+
+        self._reset_order_stock_rows()
 
     def _on_order_unit_changed(self):
         """
-        切整張／零股。買賣股票的「張數」「備註」兩欄是照單位算出來的（同一個
-        試算股數拆兩段，見 orders.plan_trade_orders），所以預覽要跟著重算，
-        不是只換執行按鈕上的字——只更新按鈕的話，畫面會停在另一半的數字上。
+        切整張／零股。
+
+        **買賣股票**只是同一個試算股數換送另一半（見 orders.plan_trade_orders），
+        股票清單留著就好，但「張數」「備註」兩欄是照單位算出來的，所以預覽要跟
+        著重算，不是只換執行按鈕上的字——只更新按鈕的話，畫面會停在另一半的
+        數字上。
+
+        **出清股票要整批清掉重選**：出清整張的每一列有「比重」，出清零股沒有
+        （規劃文件「出清股票－零股」那一節的設定裡就沒有比重——零股是整段賣掉，
+        沒有賣幾成可以斟酌），列的形狀不一樣，沿用舊列會留下一個再也不會被讀到
+        的輸入框，跟 9.3 第 1 點對切作業的規矩是同一條。
+
+        追價檔數也跟著換成那個單位的預設值（整張 2 檔、零股 3 檔，規劃文件各自
+        寫在自己那一節）。使用者自己改過的數字一樣會被蓋掉，跟股票清單被清掉是
+        同一種取捨：切單位＝這一輪整套設定重來，留一半舊的比全部重設更難察覺。
         """
-        self._recompute_order_preview()
-        self._update_order_exec_ui()
+        if self.order_job.get() != orders.JOB_CLEAR:
+            self._recompute_order_preview()
+            self._update_order_exec_ui()
+            return
+
+        self.order_ticks.set(orders.DEFAULT_TICKS[self.order_unit.get()])
+        self._sync_order_clear_controls()
+        # 舊的即時報價跟著作廢，理由同切時機：清單都清空了，沒有任何一列在用它。
+        self.order_quotes = {}
+        self._update_order_quotes_ui()
+        self._reset_order_stock_rows()
 
     def _order_intraday(self):
         """
-        現在是不是「出清股票・盤中」。
+        現在是不是「出清股票・**整張**・盤中」。
 
         盤前／盤中是**出清作業自己的設定**（9.3 第 4 點），所以問「是不是盤中」
         一定要連作業一起問：從出清・盤中切到買賣股票的時候 order_mode 還留著
         "intraday"，只看它的話，買賣股票會莫名其妙跑去追價、跑去觸發更新股價
         巨集。這種錯不會報錯，只會做了一堆不該做的事。
+
+        2026/09/03 起還要連單位一起問：出清・零股接上之後，它的時機也是盤中
+        （而且被固定成盤中），但走的是完全不同的一條路——比重、IOC、收斂條件
+        全都不一樣（見 _order_clear_odd）。這一支從此專指整張那一版，「兩種
+        出清都算」的那個問題改問 _order_uses_excel_price。
         """
         return (self.order_job.get() == orders.JOB_CLEAR
-                and self.order_mode.get() == "intraday")
+                and self.order_mode.get() == "intraday"
+                and self.order_unit.get() == orders.UNIT_LOT)
+
+    def _order_clear_odd(self):
+        """
+        現在是不是「出清股票・零股」（規劃文件「出清股票－零股」那一節）。
+
+        跟 _order_intraday 一樣要連作業一起問，不能只看單位：零股在買賣股票是
+        「照下單試算的股數送出去」那半段，在出清股票才是「全部掛賣單、20 秒後
+        全部取消」這一整套流程——兩邊差的不是幾個欄位，是整條執行路徑（見
+        orders.UNITS_READY 的說明）。
+        """
+        return (self.order_job.get() == orders.JOB_CLEAR
+                and self.order_unit.get() == orders.UNIT_ODD)
+
+    def _order_uses_excel_price(self):
+        """
+        這一輪的委託價要不要以 Excel I 欄的成交價為基準追價（見
+        orders.chase_price）。出清整張・盤中與出清零股都算：兩者的價格都不是人
+        填的，所以都要在「新增」股票時順便觸發一次「更新股價」巨集、都用得到
+        「查詢委買賣」把即時委買一先查回來。
+
+        跟 _order_intraday 分成兩支而不是把零股塞進去：那一支問的是「時機是不是
+        盤中」，而零股根本沒有盤前那一版（時機被固定成盤中，見
+        _sync_order_mode_for_unit）。混在一起的話，「盤前／盤中」這個設定會同時
+        代表兩件事，之後每一個問它的地方都要自己再分一次。
+        """
+        return self._order_intraday() or self._order_clear_odd()
 
     def _order_job_ready(self):
         """
@@ -841,25 +929,17 @@ class UiOrderMixin:
         """
         切「半自動」／「自動送出」。自動送出是這裡的預設（2026/09/02 使用者改，
         半自動曾經是預設值、也是最早實測過整條路能通的模式，見記憶
-        order-exec-sequential-wired-up）；切到自動那一刻要跳確認——這不是畫面
-        選項，是「程式會自己按下真的會送出委託的按鈕」，跟其他「按錯了大不了
-        重選」的設定不是同一個等級的風險，要讓使用者確認過才生效，而不是
-        勾了就算。
+        order-exec-sequential-wired-up）。
 
-        **確認框留著，只是把說明縮成一句**（2026/08/31 使用者要求）。原本那三段
-        （會自動按確認、節奏不變、送出後收不回要自己去委託查詢取消）是寫給第一次
-        看到這個開關的人看的，而按它的人就是每天在用的那一位；擋一次的效果來自
-        「要多按一下」，不是來自那三段字。
+        勾選當下不再跳確認框（2026/09/03 使用者要求拿掉）——「開始下單」那顆
+        確認框本來就會把目前是自動還是手動模式紅字標出來（見
+        ui_order_exec._start_order_batch 的 emphasize 那段），真正送出委託之前
+        還是會看到、還是要按一次確認，不用兩顆確認框講同一件事。
         """
         if self.busy:
             self.order_auto_confirm.set(self._order_auto_last)
             show_info(self.root, "忙碌中", "現在有背景工作在跑，先等它結束才能切換。")
             return
-
-        if self.order_auto_confirm.get() and not ask_confirm(
-                self.root, "切換為自動送出", "確定切換為自動送出委託單",
-                confirm_style="primary"):
-            self.order_auto_confirm.set(False)
 
         self._order_auto_last = self.order_auto_confirm.get()
 
@@ -892,7 +972,7 @@ class UiOrderMixin:
         # 還是該能把股票加進清單。所以這一顆多看一個模式。它也不跟著 excel_open
         # 走：這顆真正在做的是「把這一檔加進清單」，那是純畫面的事，Excel 沒開
         # 只是附帶那次股價重讀會跳過（見 _refresh_added_stock_price 的守門）。
-        add_busy = busy and self._order_intraday()
+        add_busy = busy and self._order_uses_excel_price()
         self.order_add_button.configure(state="disabled" if add_busy else "normal")
         # 「執行帳戶」在有事情在跑的時候鎖住。改勾選會把持股、試算整批清掉
         # （見 _on_order_account_toggled），而背景那一趟讀回來的是**改之前**
@@ -949,6 +1029,11 @@ class UiOrderMixin:
             # 買賣股票不填任何數字：張數與價格都來自各帳戶自己的下單試算
             # （規劃文件「一、買賣股票」只有「指定股票」跟「選帳戶」兩項設定）。
             row.pop("weight", None)
+        elif self._order_clear_odd():
+            # 出清零股也不填比重：規劃文件「出清股票－零股」的設定裡沒有這一項，
+            # 送出去的量固定是持股的零股那一段（見 orders.plan_clear_odd_orders）。
+            # 留一個永遠不會被讀的輸入框比沒有更糟——人填了數字卻不影響任何結果。
+            row.pop("weight", None)
         elif self.order_mode.get() == "pre":
             row["price"] = tk.StringVar()
             row["price"].trace_add("write", lambda *_a: self._recompute_order_preview())
@@ -957,13 +1042,15 @@ class UiOrderMixin:
         self.order_stock_pick.set("")
         self._resize_order_stock_column()
         self._recompute_order_preview()
-        if self._order_intraday():
+        if self._order_uses_excel_price():
             self._refresh_added_stock_price()
 
     def _refresh_added_stock_price(self):
         """
-        盤中模式「新增」股票時附帶觸發一次「更新股價」巨集、重讀 Excel I 欄
-        （2026/08/29 使用者要求）。
+        追價的那兩條路（出清整張・盤中、出清零股）「新增」股票時附帶觸發一次
+        「更新股價」巨集、重讀 Excel I 欄（2026/08/29 使用者要求）——剛加進來
+        的這一檔如果沒被最近一次「讀取試算」涵蓋到（例如本來沒持股），不補這
+        一步，它的追價基準價就會一直停在讀不到／很舊的數字上。
 
         刻意不共用 refresh_order_plans／_on_order_plans_data 那條路——那邊會
         整個重建帳戶勾選框（見 _fill_order_accounts 的說明：「目前只有『重新
@@ -1136,18 +1223,29 @@ class UiOrderMixin:
 
         # 比重、價格各自包一個小 Frame 再放進格子裡：label＋entry＋單位是一組
         # 三件套，讓它們在組內用 pack 貼在一起，組跟組之間才靠 grid 的欄對齊。
+        #
+        # `"weight" in row` 決定畫不畫比重那一組（出清零股沒有，見
+        # add_order_stock），跟下面 `"price" in row` 是同一種做法：這一列有哪
+        # 幾個設定是加進來那一刻就定案的，不是在這裡再判斷一次作業／單位——
+        # 兩邊各判一次遲早會分岔，而分岔的結果是畫得出來卻讀不到的輸入框。
         weight_box = ttk.Frame(block)
         weight_box.grid(row=0, column=2, sticky="w", padx=(12, 0))
-        ttk.Label(weight_box, text="比重").pack(side="left")
-        # 比重是「持股 × 這個百分比」（orders.lots_from_weight），沒有上限的話
-        # 打錯一個 0（例如 150）會算出比實際持股還多的張數，出清股票時可能因此
-        # 送出一張比帳上還多的委託——按鍵層級擋掉範圍外的輸入，不是送出前才報錯。
-        if not hasattr(self, "_order_weight_vcmd"):
-            self._order_weight_vcmd = (self.root.register(self._order_weight_key_ok), "%P")
-        ttk.Entry(weight_box, textvariable=row["weight"], width=6,
-                 font=(self.family, FONT_SIZE),
-                 validate="key", validatecommand=self._order_weight_vcmd).pack(side="left", padx=(4, 0))
-        ttk.Label(weight_box, text="%").pack(side="left", padx=(2, 0))
+        if "weight" in row:
+            ttk.Label(weight_box, text="比重").pack(side="left")
+            # 比重是「持股 × 這個百分比」（orders.lots_from_weight），沒有上限的話
+            # 打錯一個 0（例如 150）會算出比實際持股還多的張數，出清股票時可能因此
+            # 送出一張比帳上還多的委託——按鍵層級擋掉範圍外的輸入，不是送出前才報錯。
+            if not hasattr(self, "_order_weight_vcmd"):
+                self._order_weight_vcmd = (self.root.register(self._order_weight_key_ok), "%P")
+            ttk.Entry(weight_box, textvariable=row["weight"], width=6,
+                     font=(self.family, FONT_SIZE),
+                     validate="key", validatecommand=self._order_weight_vcmd).pack(side="left", padx=(4, 0))
+            ttk.Label(weight_box, text="%").pack(side="left", padx=(2, 0))
+        else:
+            # 出清零股：量是算出來的（持股的零股那一段，1~999 股），不是人填的。
+            # 這一格空著不寫字的話，三檔上下對齊的那張小表會缺一塊，看起來像
+            # 沒載入完；寫一句話同時把「為什麼這裡不能填」講掉。
+            ttk.Label(weight_box, text="全部零股", style="Hint.TLabel").pack(side="left")
 
         price_box = ttk.Frame(block)
         price_box.grid(row=0, column=3, sticky="w", padx=(12, 0))
@@ -1204,11 +1302,15 @@ class UiOrderMixin:
         """
         stock_settings = []
         for row in self.order_rows:
-            try:
-                weight = float(row["weight"].get())
-            except ValueError:
-                weight = 0
-            setting = {"code": row["code"], "name": row["name"], "weight_pct": weight}
+            setting = {"code": row["code"], "name": row["name"]}
+            # 出清零股那一列沒有比重（見 add_order_stock），連 weight_pct 這個鍵
+            # 都不給——plan_clear_odd_orders 本來就不看它，補一個 0 進去只會讓
+            # 「這個作業沒有比重」變成「比重是 0」，兩者在別的 plan_* 底下差很多。
+            if "weight" in row:
+                try:
+                    setting["weight_pct"] = float(row["weight"].get())
+                except ValueError:
+                    setting["weight_pct"] = 0
             if "price" in row:
                 setting["price"] = row["price"].get()
             stock_settings.append(setting)
@@ -1228,9 +1330,10 @@ class UiOrderMixin:
             "lots", text=orders.UNIT_COLUMN_TITLES[self.order_unit.get()])
 
         if not self._order_job_ready():
+            ready = "、".join(orders.JOB_NAMES[job] for job in orders.JOBS_READY)
             self._render_order_preview([], [
                 f"「{orders.JOB_NAMES[self.order_job.get()]}」還沒接上，"
-                f"目前只有「{orders.JOB_NAMES[orders.JOB_CLEAR]}」可以執行"
+                f"目前可以執行的是「{ready}」"
                 f"（落地順序見 docs/介面規劃.md 9.7）。"])
             return
 
@@ -1257,6 +1360,17 @@ class UiOrderMixin:
             if codes and missing:
                 who = "、".join(missing) if len(missing) <= 3 else f"{len(missing)} 位"
                 hints.append(f"⚠ {who}還沒讀到下單試算，讀取中或請重新勾選。")
+        elif self._order_clear_odd():
+            # 出清零股：量是持股的零股那一段，沒有比重可讀；價格跟盤中出清同一條
+            # 追價路（見 orders.plan_clear_odd_orders）。
+            ticks = self._order_ticks_setting()
+            if ticks is None:
+                preview = []
+                hints.append("⚠ 追價檔數要填 0 以上的整數。")
+            else:
+                preview = orders.plan_clear_odd_orders(
+                    self._order_stock_settings(), ordered, self.order_holdings, ticks,
+                    prices=self.order_prices, quotes=self.order_quotes)
         elif self._order_intraday():
             stock_settings = self._order_stock_settings()
             ticks = self._order_ticks_setting()
@@ -1298,10 +1412,12 @@ class UiOrderMixin:
             # orders.chase_price 算出來的數字，用 show() 補千分位，跟 Excel
             # 股價那句「Excel股價 {show(excel_price)} 元」同一個格式。盤前
             # 模式的 price 是使用者自己打的字串，原樣顯示，不套 show()。
-            if item["price"] is None and item.get("bs_flag") == orders.BS_FLAG_INTRADAY:
-                # 盤中那條路才會「現在還沒有價格，下單前才算」——買賣股票的
-                # 價格是 Excel 試算給的，讀不到就是這一列根本不會送（沒這一檔、
-                # 試算是空的），寫「依 Excel 成交價追價」會讓人以為它還會去查。
+            if item["price"] is None and item.get("chase"):
+                # 追價那兩條路（出清整張・盤中、出清零股）才會「現在還沒有價格，
+                # 下單前才算」——買賣股票的價格是 Excel 試算給的，讀不到就是這
+                # 一列根本不會送（沒這一檔、試算是空的），寫「依 Excel 成交價
+                # 追價」會讓人以為它還會去查。問 "chase" 不問 bs_flag：零股同樣
+                # 是追價來的，委託別卻是 ROD（見 orders.BS_FLAG_ODD）。
                 price_text = PRICE_PENDING_TEXT
             elif item["price"] is None:
                 price_text = "－"
@@ -1496,10 +1612,11 @@ class UiOrderMixin:
 
     def _order_quotes_available(self):
         """
-        「查詢委買賣」現在有沒有意義：只有「出清股票」有盤前／盤中這個設定，
-        而追價比價是盤中限定的（9.3 把盤前／盤中降級成出清作業自己的設定）。
+        「查詢委買賣」現在有沒有意義：只有價格是追價算出來的那兩條路用得到即時
+        委買賣一（出清整張・盤中、出清零股）。盤前的價格是人一格一格填的，買賣
+        股票的價格來自 Excel 試算，查回來的報價沒有任何一列會用到。
         """
-        return self._order_intraday()
+        return self._order_uses_excel_price()
 
     def _update_order_quotes_ui(self):
         if self.order_quotes_busy:

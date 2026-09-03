@@ -29,6 +29,7 @@ STEP_NAMES = {"logged_in": "登入", "fetched": "讀取", "written": "寫入", "
               "order_filled": "下單填單",
               "order_dialog_closed": "委託確認視窗關閉偵測",
               "order_price_refresh": "多輪出清重讀持股",
+              "order_odd_cancelled": "出清零股自動撤單",
               "order_stock_price": "新增股票查價",
               "order_rates": "帳戶報酬率補讀", "excel_layout": "Excel 版面錨點檢查",
               "order_quotes_fetched": "查詢委買賣", "pending_fetched": "查詢掛單",
@@ -501,6 +502,35 @@ class UiBackgroundMixin:
                     self.queue.put(("pending_cancelled", payload))
                     continue
 
+                if cmd == "order_odd_cancel":
+                    # 出清零股跑完一輪、等 20 秒之後的自動撤單（見
+                    # ui_order_exec._dispatch_next_odd_cancel）。形狀照
+                    # pending_cancel 抄：一則指令＝一個帳戶（停止就是不派下一則）、
+                    # 同樣有 OrderMaybeSubmitted 要分開處理，所以一樣不收進
+                    # 下面 simple_jobs 那張表。
+                    order_number, account, sheet, codes = arg
+                    payload = {"sheet": sheet}
+                    try:
+                        ensure_browser()
+                        payload.update(self._order_odd_cancel_job(
+                            context, store, order_number, account, sheet, codes))
+                    except order_fill.OrderMaybeSubmitted as exc:
+                        # 刪單的「確認」已經按下去了：那一批多半已經送到券商，
+                        # 不能被當成「這一則沒做，再派一次就好」。
+                        payload["error"] = str(exc)
+                        payload["maybe_submitted"] = True
+                    except RuntimeError as exc:
+                        # order_query／order_cancel／ensure_logged_in 丟的
+                        # RuntimeError 訊息本來就是寫給人看的，而且都發生在按下
+                        # 確認之前，不必連 traceback 一起丟到畫面上。
+                        payload["error"] = str(exc)
+                    except Exception:
+                        payload["error"] = traceback.format_exc()
+                        if context is None:
+                            payload["hint"] = BROWSER_HINT
+                    self.queue.put(("order_odd_cancelled", payload))
+                    continue
+
                 if cmd in simple_jobs:
                     # 「查完就結束」那一類：參數形狀各自不同（一批股票代號、一批
                     # 帳戶…），但錯誤處理與回話方式完全一樣，所以收成一張表，
@@ -636,6 +666,7 @@ class UiBackgroundMixin:
                     "order_plans": self._on_order_plans_data, "order_filled": self._on_order_filled,
                     "order_dialog_closed": self._on_order_dialog_closed,
                     "order_price_refresh": self._on_order_price_refresh,
+                    "order_odd_cancelled": self._on_order_odd_cancelled,
                     "order_stock_price": self._on_order_stock_price,
                     "order_rates": self._on_order_rates,
                     "excel_layout": self._on_excel_layout,
@@ -820,6 +851,9 @@ class UiBackgroundMixin:
         if "error" in payload:
             self._say("讀取失敗")
             show_error(self.root, "讀取失敗", _error_text(payload))
+            # 多輪出清叫來的那一輪同步（見 ui_order_exec._start_round_sync）：
+            # 查不到網頁資料就判斷不出出清了沒，整批停下來，不拿舊持股硬跑。
+            self._order_sync_finished(False, _error_text(payload))
             return
 
         # 這一輪讀到的一律是「補上去」，不是「整份換掉」：一次只更新一位的時候，
@@ -891,6 +925,8 @@ class UiBackgroundMixin:
         if not self.round_scope:
             self._say((f"{who} 這一次沒讀到，什麼都沒做。" if who
                        else "這一輪沒有一位對照得起來，什麼都沒做。") + note)
+            # 一位都沒對照起來＝這一輪的持股完全沒更新，跟讀取失敗是同一種後果。
+            self._order_sync_finished(False, "這一輪沒有一位對照得起來，持股沒有更新。" + note)
             return
 
         head = f"已讀取（{who}）。" if who else "已讀取。"
@@ -924,6 +960,11 @@ class UiBackgroundMixin:
             scope = who if who else ("對照得起來的那幾位" if self.problems else "Excel 的數字")
             kept = f"紀錄檔更新了 {recorded} 筆（見歷程）。" if recorded else ""
             self._say(f"{head}{scope}跟網頁一致，沒有需要寫的格子。{kept}{note}")
+
+            # 多輪出清那條路的另一個終點：一格都不必寫代表 Excel 本來就是最新的
+            # （這一輪的委託一筆都沒成交），照樣可以回去判斷出清了沒——那個判斷
+            # 本來就是「重讀一次 Excel 再算一遍」，不必真的寫過才算數。
+            self._order_sync_finished(True)
 
     def _commit_round(self):
         """
@@ -965,6 +1006,9 @@ class UiBackgroundMixin:
         if "error" in payload:
             self._say("寫入失敗")
             show_error(self.root, "寫入失敗", _error_text(payload))
+            # 這一輪如果是多輪出清叫來的（見 ui_order_exec._start_round_sync），
+            # 寫入失敗代表 Excel 上的持股還是舊的，下一輪不能跑。
+            self._order_sync_finished(False, _error_text(payload))
             return
 
         # 紀錄檔一定在 Excel 寫成功之後才更新。順序反過來的話，寫入失敗會留下
@@ -998,6 +1042,11 @@ class UiBackgroundMixin:
         # 那句話是寫給「以為自己開著的那份沒被改到」的人看的，而畫面上的數字
         # 本來就跟 Excel 一致、存檔也一律會做，兩種情況對人來說沒有差別。
         self._say(f"已自動寫入 {self.write_count} 格並存檔。{self._problem_note()}")
+
+        # 多輪出清那條路的終點之一：Excel 的現金、股數、成本都已經是最新的了，
+        # 可以回去判斷出清了沒（見 ui_order_exec._order_sync_finished）。平常按
+        # 「更新」進來時這一支什麼都不做。
+        self._order_sync_finished(True)
 
     def _on_logged_out(self, payload):
         self.browser_waiting = max(0, self.browser_waiting - 1)

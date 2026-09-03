@@ -4,10 +4,16 @@
 不碰 Excel、不碰瀏覽器——跟 planner.py 同樣的理由，介面跟之後要補的測試
 可以共用同一份判斷邏輯，也可以拿假資料直接測。
 
-服務兩個模式：
+價格有三種來源，對應三支 plan_*：
     盤前  一次設定（股票、比重、價格）套用到好幾個帳戶，價格是人手動填的
           固定值，預覽階段就算得出完整的執行清單（見 plan_stock_orders）。
-    盤中  價格不是人填的，成交價來自 Excel I 欄（新增股票／讀取試算
+    試算  張數與價格都來自各帳戶那一頁的下單試算 M19:N28，人一個數字都不必填
+          （見 plan_trade_orders）。
+    追價  價格是「成交價往對手方吃幾檔」算出來的，出清整張・盤中
+          （plan_intraday_orders）與出清零股（plan_clear_odd_orders）共用同一
+          支 chase_price，差別在量怎麼來：前者是比重 × 持股，後者固定是持股的
+          零股那一段（規劃文件「出清股票－零股」沒有比重這一項）。以下那段
+          說明講的就是這一種：成交價來自 Excel I 欄（新增股票／讀取試算
           時就讀進來，見 ui_order.order_prices／order_exec_prices，不再現查
           網頁），下單前那一刻只再跟對手方第一檔比大小算出最終委託價
           （見 chase_price）。plan_intraday_orders 是純函式，不自己查 Excel
@@ -58,8 +64,8 @@ UNIT_ODD = "odd"
 UNIT_NAMES = {UNIT_LOT: "整張", UNIT_ODD: "零股"}
 
 # 執行預覽那一欄的欄名跟著單位換（2026/09/01 使用者指定）：單位寫在欄名上，
-# 格子裡就只放數字，不必每一格都跟一個「張」或「股」。出清那兩個作業只有
-# 整張，換不到「股數」那個字。
+# 格子裡就只放數字，不必每一格都跟一個「張」或「股」。三個作業共用這一份，
+# 出清零股接上之後（2026/09/03）出清那邊也換得到「股數」了。
 UNIT_COLUMN_TITLES = {UNIT_LOT: "張數", UNIT_ODD: "股數"}
 
 # 哪個作業的哪個單位真的接上了——**不是三個作業共用一個開關**。「零股」在買賣
@@ -69,9 +75,14 @@ UNIT_COLUMN_TITLES = {UNIT_LOT: "張數", UNIT_ODD: "股數"}
 # 那半邊還沒寫的流程也變成按得下去，而且不會報錯——它會照整張的流程送出去。
 UNITS_READY = {
     JOB_TRADE: (UNIT_LOT, UNIT_ODD),   # 零股 2026/09/01 接上（order_fill.TAB1_ODD = "5"）
-    JOB_CLEAR: (UNIT_LOT,),            # 零股：出清・零股 那套流程本身還沒寫
+    JOB_CLEAR: (UNIT_LOT, UNIT_ODD),   # 零股 2026/09/03 接上（見 plan_clear_odd_orders）
     JOB_FULL: (UNIT_LOT,),
 }
+
+# 追價檔數的預設值，一個單位一個（規劃文件：出清整張盤中「預設2檔」、出清零股
+# 「預設3檔」）。零股給得比較寬是因為它沒有 IOC 可用（見 BS_FLAG_ODD），掛出去
+# 的單要等 20 秒才撤，貼得太保守就整輪都不會成交。
+DEFAULT_TICKS = {UNIT_LOT: "2", UNIT_ODD: "3"}
 
 
 def unit_ready(job, unit):
@@ -89,6 +100,13 @@ def unit_ready(job, unit):
 # 更正：早先以為盤前也能用 IOC 是錯的。
 BS_FLAG_PRE = "R"
 BS_FLAG_INTRADAY = "I"
+# 零股一律 ROD，**不是**因為出清零股比較保守，是交易所那一場根本沒有 IOC／FOK
+# 可選（2026/09/01 盤中偵察確認：零股的委託別下拉只剩 'R'，見 docs/介面規劃.md
+# 9.4 最後一段）。`order_fill.fill_order` 收到非 R 的零股委託會直接擋下來，不
+# 等 select_option 丟一句「找不到這個選項」。規劃文件「出清股票－零股」那套
+# 「全部掛賣單、20 秒後全部取消」的流程就是這條限制的產物——沒有 IOC 可以用
+# 「沒成交就自動取消」，只能掛了再自己撤。
+BS_FLAG_ODD = "R"
 
 # plan_stock_orders／plan_intraday_orders「note」欄位僅有的幾種固定文字，
 # 不是使用者亂打的自由文字——執行預覽表格算「備註」欄要多寬時（見
@@ -96,6 +114,10 @@ BS_FLAG_INTRADAY = "I"
 # 的是同一份文字，這裡改了措辭那邊的欄寬會自動跟著變，不必兩處各改一次。
 REASON_NO_HOLDING = "沒有這檔，略過"
 REASON_UNDER_ONE_LOT = "比重算出來不到 1 張，略過"
+# 出清零股專用：有這檔、但股數剛好是整張的倍數，沒有零股那一段可以出清。
+# 跟 REASON_NO_HOLDING 分開講——「這一位根本沒這檔」跟「有，但已經沒有零股了」
+# 是兩件事，後者正是多輪跑到收斂時每一列都會寫的那一句。
+REASON_NO_ODD = "沒有零股（持股剛好是整張），略過"
 REASON_NO_PRICE = "尚未設定價格"
 REASON_CHASE_TEMPLATE = "以 Excel 成交價±{ticks}檔為邊界，下單前查{opposite}比價"
 # 2026/08/29 使用者要求：先用「查詢委買賣」按鈕把即時委買賣一整批查回來
@@ -299,10 +321,92 @@ def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down,
                 "code": stock["code"],
                 "name": stock["name"],
                 "side": side,
+                # 價格是下單前那一刻才算出來的（追價＋比對對手方第一檔），所以
+                # price 是 None 代表「還沒算」而不是「沒有價格」——畫面要印
+                # 「下單前才算」那句話、執行端要現算，兩邊都問這一欄。用它而不是
+                # 看 bs_flag：出清零股也走同一條追價路，但委託別是 ROD（零股沒有
+                # IOC，見 BS_FLAG_ODD），拿委託別當判準會把它漏掉。
+                "chase": True,
                 "held_qty": held_qty,
                 "lots": lots,
                 "price": price,
                 "skip": held_qty == 0 or lots <= 0,
+                "note": "；".join(reasons),
+            })
+    return preview
+
+
+def plan_clear_odd_orders(stock_settings, ordered_accounts, holdings, ticks_down,
+                          prices=None, quotes=None):
+    """
+    出清股票・零股的執行預覽（規劃文件「出清股票－零股」）。
+
+    跟 plan_intraday_orders 最大的差別是**沒有比重**：規劃文件那一節的設定只有
+    「指定股票、追價檔數、執行帳戶、多輪」四項，沒有整張那一節的「賣出比重」，
+    因為零股本來就是整張切剩下的那一段零頭（見 split_lots／9.4），出清它就是
+    整段賣掉，沒有「賣幾成」這種東西可以斟酌。所以 stock_settings 只要
+    [{"code", "name"}, ...]，有沒有帶 weight_pct 都不看。
+
+    送出去的量 ＝ 持股的零股那一段（`split_lots(held_qty)[1]` 的絕對值，1~999
+    股）。持股剛好是整張的倍數就沒有零股可以出清，那一列 skip 掉並寫
+    REASON_NO_ODD——這正是多輪跑到收斂時每一列都會長的樣子。
+
+    價格跟盤中出清同一條路（chase_price，賣方向查委買一），prices／quotes 的
+    意義與「沒查到就留 None、下單前再算」的規矩都跟 plan_intraday_orders 一模
+    一樣，見那邊的說明。委託別固定 ROD（BS_FLAG_ODD）：零股那一場沒有 IOC。
+
+    每一列自己帶 "unit": UNIT_ODD——執行端 `ui_order_exec._order_fill_job` 就是
+    看這一欄決定下單表單的交易盤別要選盤中零股（`order_fill.TAB1_ODD`）、以及
+    "lots" 那個數字的單位是股不是張。出清整張那兩支 plan_* 不帶這一欄（執行端
+    當整張），這裡一定要帶，漏了就會拿零股的股數去送整張，差 1000 倍。
+    """
+    prices = prices or {}
+    quotes = quotes or {}
+    preview = []
+    for account in ordered_accounts:
+        for stock in stock_settings:
+            held_qty = holdings.get((account["sheet"], stock["code"]), 0) or 0
+            lots, odd = split_lots(held_qty)
+            qty = abs(odd)
+
+            reasons = []
+            price = None
+            if held_qty == 0:
+                reasons.append(REASON_NO_HOLDING)
+            elif qty == 0:
+                reasons.append(REASON_NO_ODD)
+            else:
+                pricenow = prices.get(stock["code"])
+                quote = quotes.get(stock["code"])
+                if pricenow is not None and quote is not None:
+                    price = chase_price(pricenow, ticks_down, SIDE_SELL, quote["bid"])
+                    reasons.append(REASON_CHASE_FROZEN_TEMPLATE.format(
+                        opposite="委買一", value=show(quote["bid"])))
+                else:
+                    reasons.append(REASON_CHASE_TEMPLATE.format(
+                        ticks=ticks_down, opposite="委買一"))
+                if lots:
+                    # 整張那一段這一輪不送（規劃文件把整張與零股分成兩個流程）。
+                    # 跟買賣股票選零股時那句是同一件事，共用同一個樣板。
+                    reasons.append(REASON_WITH_LOT_TEMPLATE.format(lots=abs(lots)))
+
+            preview.append({
+                "order": account["order"],
+                "sheet": account["sheet"],
+                "code": stock["code"],
+                "name": stock["name"],
+                "side": SIDE_SELL,
+                "bs_flag": BS_FLAG_ODD,
+                "unit": UNIT_ODD,
+                # 「這一列的價格是下單前才算出來的」（見下面 plan_intraday_orders
+                # 的同一欄）：price 是 None 的意思因此是「還沒算」，不是「算不
+                # 出來」，畫面與執行端都靠這一欄分辨。零股不能用 bs_flag 判斷
+                # ——它是 ROD，跟盤前出清、買賣股票同一個值。
+                "chase": True,
+                "held_qty": held_qty,
+                "lots": qty,
+                "price": price,
+                "skip": qty == 0,
                 "note": "；".join(reasons),
             })
     return preview

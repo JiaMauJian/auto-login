@@ -270,6 +270,22 @@ class UiPendingMixin:
         if probs:
             raise RuntimeError(f"{sheet}：{'；'.join(probs)}")
 
+        return self._cancel_orders_split(page, session, sheet,
+                                         committed_ordnos, reservation_ordnos)
+
+    def _cancel_orders_split(self, page, session, sheet,
+                             committed_ordnos, reservation_ordnos):
+        """
+        同一個帳戶、同一個已登入的分頁上，委託單與預約單兩種都撤掉，結果合併成
+        一份。分兩支不是我們想分，是網站那兩頁的刪除機制本來就不一樣（委託查詢頁
+        是勾選＋一個批次確認視窗，預約查詢頁是每一列自己一顆 `.delRow`，見
+        docs/介面規劃.md 10.3 第十二點）。
+
+        掛單分頁那三顆取消按鈕（_pending_cancel_job）與出清零股每一輪跑完的自動
+        撤單（ui_order_exec._order_odd_cancel_job）共用這一支：兩邊要做的事逐字
+        相同，各寫一份的話，之後補進來的任何一條（例如又多一種 ordstatus 要分流）
+        都會有一邊沒跟上，而且不會報錯——只是那一種單默默沒被撤掉。
+        """
         combined = {"results": [], "missing": [], "locked": []}
         if committed_ordnos:
             part = order_cancel.cancel_orders(page, session, sheet, committed_ordnos)
