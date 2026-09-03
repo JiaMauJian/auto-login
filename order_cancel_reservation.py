@@ -8,8 +8,8 @@
 docs/自動下單與半自動下單規劃.pptx.txt 81-85 行，原始規劃沒有分開兩顆），
 不是新功能，是把漏掉的一半補上。
 
-2026/09/02 用 `order_cancel_reservation_recon.py` 對真帳號、真的一筆預約單
-（P0638918）偵察過兩輪，這支裡面每一條選擇器都是照那次看到的東西寫的：
+2026/09/02 對真帳號、真的一筆預約單（P0638918）偵察過兩輪（用過的偵察腳本已經
+拿掉，這支已經是正式版），這支裡面每一條選擇器都是照那次看到的東西寫的：
 
 - 逐列的「刪除」鈕是 `.delRow`，點下去**不會送出任何 AJAX**——只是把
   `orderObj` 塞進 `parent.orderArray`、`parent.mod='3'`，再 `layer.open(...)`
@@ -35,7 +35,7 @@ docs/自動下單與半自動下單規劃.pptx.txt 81-85 行，原始規劃沒�
 
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
-from order_cancel import ConfirmDebugLog, close_dialog, log_row_not_found
+from order_cancel import close_dialog, log_row_not_found
 from order_fill import CONFIRM_IFRAME_SELECTOR, OrderMaybeSubmitted
 from order_query import PAGE_READY_JS, query_orders
 from order_recon import RESERVE_PAGE
@@ -202,28 +202,27 @@ def cancel_orders(page, session, sheet, ordnos, timeout_ms=20000):
             log_row_not_found(sheet, ordno, page, rows, "刪不掉")
             continue
 
-        with ConfirmDebugLog(page, sheet, [ordno]):
-            page.locator(f"#{row['bar']} .delRow").click()
-            page.locator(".layui-layer-title", has_text="刪單確認").wait_for(state="visible", timeout=10000)
+        page.locator(f"#{row['bar']} .delRow").click()
+        page.locator(".layui-layer-title", has_text="刪單確認").wait_for(state="visible", timeout=10000)
 
-            try:
-                sent = _verify_dialog(page, ordno, sheet, session)
-            except RuntimeError:
-                close_dialog(page)   # 這一筆沒送，把視窗收乾淨再把例外丟出去
-                raise
+        try:
+            sent = _verify_dialog(page, ordno, sheet, session)
+        except RuntimeError:
+            close_dialog(page)   # 這一筆沒送，把視窗收乾淨再把例外丟出去
+            raise
 
-            frame = page.frame_locator(CONFIRM_IFRAME_SELECTOR)
-            frame.locator(SUBMIT_BUTTON).click()
-            # ↑ 過了這一行就沒有回頭路了：以下任何失敗都是 OrderMaybeSubmitted。
+        frame = page.frame_locator(CONFIRM_IFRAME_SELECTOR)
+        frame.locator(SUBMIT_BUTTON).click()
+        # ↑ 過了這一行就沒有回頭路了：以下任何失敗都是 OrderMaybeSubmitted。
 
-            text = _read_result0(page, timeout_ms)
-            close_dialog(page)
+        text = _read_result0(page, timeout_ms)
+        close_dialog(page)
 
-            if not text:
-                raise OrderMaybeSubmitted(
-                    f"{sheet}：已經按下刪單確認視窗的「確認」（預約書號 {sent}），"
-                    f"但畫面上沒出現結果。這一筆可能已經送出去了，不要再按一次——"
-                    f"請重查掛單，用查回來的結果為準。")
+        if not text:
+            raise OrderMaybeSubmitted(
+                f"{sheet}：已經按下刪單確認視窗的「確認」（預約書號 {sent}），"
+                f"但畫面上沒出現結果。這一筆可能已經送出去了，不要再按一次——"
+                f"請重查掛單，用查回來的結果為準。")
 
         results.append({
             "ordno": ordno,
