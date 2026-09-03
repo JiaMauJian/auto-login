@@ -165,6 +165,9 @@ class UiOrderExecMixin:
         # 真正的收尾在 _order_sync_finished（由 ui_background 的 _on_fetched／
         # _on_written 末端呼叫）。
         self.order_exec_sync_busy = False
+        # 借用更新分頁 cash_method 那顆 Var 算完這一輪要換回來的原值（見
+        # _start_round_sync／_order_sync_finished）。None＝目前沒有借用中。
+        self._round_sync_prev_method = None
 
     def start_order_execution(self):
         """
@@ -370,27 +373,30 @@ class UiOrderExecMixin:
 
     def _order_round_sync_ready(self):
         """
-        勾了「多輪直到出清」才要問的三件事，全部在按下「開始」之前問完。
+        勾了「多輪直到出清」才要做的檢查，全部在按下「開始」之前做完。
 
         多輪的每一輪之間會做一次完整同步（規劃文件流程：更新持股管理檔的現金、
         股數、成本），走的是更新分頁那一整條路（見 _start_round_sync）——它要
-        Excel 開著、要紀錄檔是好的，而且今天還沒問過的話會跳「今天用哪一種現金
-        算法」那個視窗。
+        Excel 開著、要紀錄檔是好的。
 
-        **一定要在整批開始之前問，不能等第一輪跑完才問**：那時候委託已經送出去
-        了，而那個視窗會跳在一段本來應該無人值守的流程中間——人回來看到的是一
-        個「不回答就不會繼續、回答了又不知道會影響剛才送出去的什麼」的對話框。
-        跟 ui_background.start_fetch 在派工之前先問是同一個道理。
+        **現金算法固定用「初始餘額累加」，不問、不跳視窗**（2026/09/03 使用者
+        訂正）：規劃文件原文「更新持股管理檔的現金（初始餘額累加）」寫的就是
+        這個算法本身，不是「跳視窗讓人選」。跟更新分頁的全域開關（20 人共用、
+        今天要不要用銀行餘額推算）是兩件事——出清這幾位當下用哪一種不受那顆
+        開關影響，也不會因為先跑了出清就把「今天問過了」那個旗標點掉，更新
+        分頁該問的還是照問（見 _start_round_sync 怎麼暫時切換 cash_method）。
+
+        **一定要在整批開始之前檢查完，不能等第一輪跑完才發現 Excel 沒開好**：
+        那時候委託已經送出去了。跟 ui_background.start_fetch 在派工之前先確認
+        是同一個道理。
         """
         if not self._require_excel():
             return False
         if self.ledger_error:
             show_error(self.root, "紀錄檔有問題", self.ledger_error)
             return False
-        # 現金算法決定同步那一趟要不要多查銀行餘額（見 fetch.collect），所以跟
-        # start_fetch 一樣要在派工之前就定案。使用者按取消就整批不要開始。
         self.today = datetime.date.today()
-        return self._maybe_ask_cash_method()
+        return True
 
     def _dispatch_next_order(self):
         row = self.order_exec_queue[self.order_exec_pos]
@@ -762,9 +768,14 @@ class UiOrderExecMixin:
         `_on_written` → `_commit_round`），等同程式自己按一次「更新（這幾位）
         帳戶」，不是另外寫一份簡化版：現金基準一天只設一次、`round_scope` 只准碰
         這一輪讀到的那幾位、寫入成功才落帳——這些規則都在那條路上，複製一份出來
-        遲早會少掉其中一條（見 CLAUDE.md「改動前必看」）。現金要用哪一種算法也
-        跟著全域那顆總開關走，不在這條路上偷偷改成方法一，否則同一個 B8 會因為
-        「是誰寫的」而算出兩種數字。
+        遲早會少掉其中一條（見 CLAUDE.md「改動前必看」）。
+
+        **現金算法固定用初始餘額累加**（2026/09/03 使用者訂正，見
+        `_order_round_sync_ready`），不是跟著更新分頁那顆全域開關走。`cash_method`
+        是更新分頁跟這裡共用的同一個 Var，所以這裡用「暫時切過去、同步結束再切
+        回來」而不是把它永久改掉——不然出清跑完之後，更新分頁會被靜靜換成初始
+        餘額累加，跟使用者今天在那邊選的算法對不上。切回來的動作在
+        `_order_sync_finished` 開頭，兩邊要對稱。
 
         **2026/09/03 之前這一步根本不存在**，多輪只有 _prepare_next_round 那次
         重讀 Excel。但 E/F 只有更新分頁寫得到（`excel_io.write_cells` 全專案只有
@@ -796,9 +807,14 @@ class UiOrderExecMixin:
         self._update_order_exec_ui()
         self._ensure_browser_thread()
         self.browser_waiting += 1
+        # 暫時蓋掉更新分頁的算法選擇，讓這一趟 fetch → replan → 寫入全程都用
+        # 初始餘額累加算（見本函式說明）。need_bank 因此固定是 False——方法一
+        # 用不到銀行餘額，一併省掉那支查詢。_order_sync_finished 開頭會切回來。
+        self._round_sync_prev_method = self.cash_method.get()
+        self.cash_method.set(planner.METHOD_OPENING)
         self.browser_cmd_queue.put((
             "fetch",
-            (selected, self.path, self.cash_method.get() == planner.METHOD_BANK),
+            (selected, self.path, False),
         ))
 
     def _order_sync_finished(self, ok, reason=""):
@@ -813,6 +829,12 @@ class UiOrderExecMixin:
         if not self.order_exec_sync_busy:
             return
         self.order_exec_sync_busy = False
+        # 跟 _start_round_sync 開頭對稱：這一輪借用 cash_method 算完了，換回
+        # 使用者在更新分頁原本選的那一種，不管這一輪成功、失敗還是使用者中途
+        # 按了停止都要換回來（下面幾個 return 之前一定要先執行到這裡）。
+        if self._round_sync_prev_method is not None:
+            self.cash_method.set(self._round_sync_prev_method)
+            self._round_sync_prev_method = None
         if not self.order_exec_active:
             return
         if not ok:
