@@ -810,11 +810,15 @@ class UiOrderMixin:
         if not orders.unit_ready(job, self.order_unit.get()):
             self.order_unit.set(orders.UNIT_LOT)
 
+        # 先清空股票清單再改追價檔數：order_ticks.set() 會立刻觸發
+        # _recompute_order_preview（見 __init__ 的 trace_add），這時候如果
+        # order_rows 還是切作業前的舊列（形狀跟到手的新作業對不上，例如買賣
+        # 股票的列沒有 weight_pct），plan_stock_orders 會 KeyError。
+        self._reset_order_stock_rows()
+
         if job == orders.JOB_CLEAR:
             self.order_ticks.set(orders.DEFAULT_TICKS[self.order_unit.get()])
             self._sync_order_clear_controls()
-
-        self._reset_order_stock_rows()
 
     def _on_order_unit_changed(self):
         """
@@ -839,12 +843,14 @@ class UiOrderMixin:
             self._update_order_exec_ui()
             return
 
+        # 同 _on_order_job_changed：先清空股票清單再改追價檔數，避免
+        # order_ticks.set() 觸發的即時重算讀到切單位前的舊列形狀。
+        self._reset_order_stock_rows()
         self.order_ticks.set(orders.DEFAULT_TICKS[self.order_unit.get()])
         self._sync_order_clear_controls()
         # 舊的即時報價跟著作廢，理由同切時機：清單都清空了，沒有任何一列在用它。
         self.order_quotes = {}
         self._update_order_quotes_ui()
-        self._reset_order_stock_rows()
 
     def _order_intraday(self):
         """
@@ -1148,6 +1154,22 @@ class UiOrderMixin:
             return False
         return 0 <= num <= 100
 
+    @staticmethod
+    def _order_price_key_ok(value):
+        """
+        出清股票・整張・盤前那格價格輸入框的按鍵驗證，跟 _order_weight_key_ok
+        同一個做法：放行空字串（打到一半、刪光重打），只放行非負的數字，其餘
+        （中文、負號、整段貼上非數字的內容）一律在按鍵層級擋下，不是送出前
+        才靠 REASON_NO_PRICE 那句提醒去發現填錯。
+        """
+        if value == "":
+            return True
+        try:
+            num = float(value)
+        except ValueError:
+            return False
+        return num >= 0
+
     def _build_order_stock_row(self, row):
         """
         一檔股票一列，**一行排完**：買賣別、股票、比重、價格（或試算／
@@ -1251,8 +1273,11 @@ class UiOrderMixin:
         price_box.grid(row=0, column=3, sticky="w", padx=(12, 0))
         if "price" in row:
             ttk.Label(price_box, text="價格").pack(side="left")
+            if not hasattr(self, "_order_price_vcmd"):
+                self._order_price_vcmd = (self.root.register(self._order_price_key_ok), "%P")
             ttk.Entry(price_box, textvariable=row["price"], width=8,
-                     font=(self.family, FONT_SIZE)).pack(side="left", padx=(4, 0))
+                     font=(self.family, FONT_SIZE),
+                     validate="key", validatecommand=self._order_price_vcmd).pack(side="left", padx=(4, 0))
             ttk.Label(price_box, text="元").pack(side="left", padx=(2, 0))
         else:
             excel_price = self.order_prices.get(row["code"])
