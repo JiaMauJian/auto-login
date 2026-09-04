@@ -820,15 +820,9 @@ class UiBackgroundMixin:
             # 使用者有可能登入完就沒有再按讀取。
             book["account_code"] = record.get("account_code", "")
             at = self.round_at.get(name) or datetime.datetime.now().isoformat(timespec="seconds")
-            new_events, blocked = planner.initialize(data, book, name, self.today, at)
-            events.extend(new_events)
-            # B8 是空的，今日初始現金餘額設不成：讀幾次都一樣，不會自動好，
-            # 掛一則 [異常] 讓人回頭去 Excel 補（見 ui_sync._fill_notes）。
-            # 讀到非空的 B8 就代表補好了，把上一輪掛著的提醒收掉。
-            if blocked:
-                self.cash_baseline_errors[name] = {"text": "EXCEL 現金餘額是空白，無法設定今日初始餘額", "at": at}
-            else:
-                self.cash_baseline_errors.pop(name, None)
+            # B8 空白就從 0 起算（見 planner.initialize），所以基準一定設得成，
+            # 不再有「設不成」這種結果要往畫面上掛提醒。
+            events.extend(planner.initialize(data, book, name, self.today, at))
 
         if not events:
             return 0
