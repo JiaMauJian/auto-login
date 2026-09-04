@@ -228,11 +228,8 @@ class UiSyncMixin:
                 continue
             book = self.ledger.sheet(name)
             book["account_code"] = record.get("account_code", "")
-            # zero_missing 只有多輪出清那一輪的同步會是非空的（見
-            # ui_order_exec._round_zero_missing）；更新分頁自己按「更新」時它是
-            # 空的，「網頁沒有這一列就不動」那條規矩在這裡完全沒變。
             items, warns = planner.plan(data, record, book, self.today,
-                                        self.cash_method.get(), self._round_zero_missing())
+                                        self.cash_method.get())
             self.proposals[name] = items
             self.warnings[name] = warns
 
