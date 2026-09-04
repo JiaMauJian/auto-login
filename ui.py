@@ -154,6 +154,7 @@ _on_tab_changed（切分頁時兩個分頁都要碰的膠水邏輯）。方法�
 
 import datetime
 import queue
+import time
 import tkinter as tk
 import traceback
 
@@ -169,6 +170,11 @@ from ui_order import UiOrderMixin
 from ui_order_exec import UiOrderExecMixin
 from ui_pending import UiPendingMixin
 from ui_sync import UiSyncMixin
+
+# 關掉程式時，最多等背景把登出做完幾秒。比 2026/08/31 之前的 10 秒寬一點：
+# 多了「清 cookie、關 context」這一段，而且前面可能還有一則指令正在跑
+# （使用者是在忙的時候按 X 進來的）。等到這個數字還沒收工就直接關掉。
+LOGOUT_WAIT_SEC = 20
 
 
 class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHistoryMixin,
@@ -217,6 +223,10 @@ class SyncApp(UiLayoutMixin, UiCertMixin, UiBackgroundMixin, UiSyncMixin, UiHist
         # 不往下疊的小提示（見 docs/更新分頁訊息框改版.md）。
         self.round_at = {}
         self.busy = False
+        # 關閉流程開始了沒。按下 X 之後那段「等背景登出」會呼叫 root.update()
+        # 保持視窗有回應（見 main 的 on_close），這個旗標就是用來讓 _drain 在
+        # 那段期間不要再收背景結果、把剛變灰的按鈕又點亮（見 _drain 開頭）。
+        self.closing = False
         # 「修改今日初始現金餘額」現在能不能按。_fill_status 判定，_sync_buttons 套用
         # ——「忙不忙」跟「有沒有資料」是兩件事，分開記才不會互相蓋掉。
         self.opening_ready = False
@@ -347,7 +357,41 @@ def main():
 
     app = SyncApp(root)
 
+    def wait_for_logout():
+        """
+        等背景把登出做完，最多 LOGOUT_WAIT_SEC 秒，等的期間狀態列倒數。
+
+        不能直接 join(timeout=20)：主執行緒睡在那裡的期間 Tk 一則訊息都不處理，
+        狀態列停在按下 X 前那句、進度條不動，Windows 還會把視窗標成「沒有回應」
+        塗成一片白 —— 看起來就是當掉了，使用者只好去工作管理員砍掉它
+        （2026/09/04 使用者遇到；20 組登入著的時候這一段最久）。
+
+        送出去的東西一個字都沒改：logout 只丟一次，背景收到就 clear_cookies、
+        關 context 與 browser（見 ui_background._browser_worker 的 logout 分支）。
+        倒數講的是「還會等多久就放棄、直接關掉」，不是每秒再登出一次 —— 平常
+        瀏覽器一兩秒就關掉了，數字根本走不完；真的一路數到底就代表背景卡住了。
+        """
+        deadline = time.monotonic() + LOGOUT_WAIT_SEC
+        while app.browser_thread.is_alive():
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            # max(1, ...)：最後那零點幾秒不要顯示成「再等 0 秒」。
+            app._say("登出中，瀏覽器會自己關掉…"
+                     f"（最多再等 {max(1, int(remain + 0.5))} 秒）")
+            # update() 而不是原本的 update_idletasks()：後者只跑重畫、不去抽
+            # Windows 的訊息佇列，視窗照樣會被判定沒有回應。代價是這個空檔裡
+            # 使用者按得動東西，兩道防線擋著：上面的 _set_busy(True) 讓登入／
+            # 登出／更新那幾顆變灰，再按一次 X 則由 app.closing 擋在 on_close
+            # 門口（原本不敢用 update() 的理由就是它會把 on_close 重進一遍）。
+            root.update()
+            app.browser_thread.join(timeout=0.2)
+
     def on_close():
+        # 重入保護：下面等背景登出那段會呼叫 root.update()，使用者在那個空檔裡
+        # 再按一次 X 就會把 on_close 整支重進一遍。
+        if app.closing:
+            return
         # danger=False：使用者是自己按 X 才走到這裡，本來就打算關，Enter 應該
         # 順著他的意思關掉（跟原本 messagebox.askokcancel 的預設一致）。
         if app.busy and not ask_confirm(
@@ -356,6 +400,7 @@ def main():
             danger=False,
         ):
             return
+        app.closing = True
         if app.browser_thread is not None and app.browser_thread.is_alive():
             # 關掉之前先做一次「全部登出」，跟那顆按鈕走同一條路（2026/08/31
             # 使用者要求）。差別在「登出」跟「關瀏覽器」不是同一件事：
@@ -368,15 +413,14 @@ def main():
             # 兩則指令一起排隊：logout 那則做完（清 cookie、關 context 與
             # browser）才輪到 stop 讓迴圈收工。它回的那則 "logged_out" 沒有人
             # 會收——畫面正在關，不必為了它多等一輪。
-            app._say("登出中，瀏覽器會自己關掉…")
-            # update_idletasks 只重畫，不處理使用者事件——用 update() 的話，
-            # 這個空檔裡再按一次 X 會把 on_close 整支重進一遍。
-            root.update_idletasks()
+            # _set_busy 而不是只 _say：等待期間視窗是活的（wait_for_logout 會
+            # 呼叫 root.update()），登入／登出／更新那幾顆得先變灰，不然使用者
+            # 按得下去、指令卻是丟給一個正在收工的執行緒。順便讓進度條轉起來 ——
+            # 「還在動」比任何一句文字都好認。
+            app._set_busy(True, "登出中，瀏覽器會自己關掉…")
             app.browser_cmd_queue.put(("logout", None))
             app.browser_cmd_queue.put(("stop", None))
-            # 比原本的 10 秒寬一點：多了「清 cookie、關 context」這一段，而且
-            # 前面可能還有一則指令正在跑（使用者是在忙的時候按 X 進來的）。
-            app.browser_thread.join(timeout=20)
+            wait_for_logout()
         excel_io.clear_all_markers(app.path)
         root.destroy()
 

@@ -302,14 +302,19 @@ CASH_MIN, CASH_MAX = 500_000, 5_000_000
 POSITION_MIN, POSITION_MAX = 500_000, 5_000_000
 
 
-def simulate_count():
+def simulate_count(raw=None):
     """
     要模擬幾個假帳號。.env 的 SIMULATE_ACCOUNTS，沒設或設 0 就完全沒有假帳號。
 
     預設關閉是重點：正式部署的機器上這個變數不存在，整套模擬就等於不存在，
     不可能因為忘記關而把假資料寫進真的 Excel。
+
+    raw 有傳就用那個值、不看 os.environ —— 給「直接讀 .env 檔案」的那條路用
+    （見 login.accounts_on_disk），假帳號的數量改了也要算進「.env 變了沒」。
     """
-    raw = os.getenv("SIMULATE_ACCOUNTS", "").strip()
+    if raw is None:
+        raw = os.getenv("SIMULATE_ACCOUNTS", "")
+    raw = raw.strip()
     if not raw:
         return 0
     try:

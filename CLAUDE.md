@@ -104,5 +104,15 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
   要撤哪幾筆是查回來再過濾的（`apcode == '5'`
   ＋這一輪的股票＋賣出＋`open`），不是靠程式記得自己送出了什麼——半自動時按確認的
   是人，拿不到委託書號。細節見 `docs/介面規劃.md` 9.8。
+- **帳號清單一個行程只讀一次，改完 `.env` 要重開程式**（2026/09/04 使用者定案）。
+  `login.py` 的 `load_dotenv` 是 import 時跑的，`ui.py` 的 `self.accounts` 是建
+  `SyncApp` 那一刻的快照，登入／讀取／下單／掛單全部吃那一份 —— 程式開著改 `.env`
+  存檔，那個行程完全不知道。按「登入」或「更新全部帳戶」時會拿
+  `login.accounts_on_disk()`（直接讀檔）跟它比對，對不上就跳「.env 的帳號已變更／
+  請重新關掉程式再開啟」並擋下這次動作。**只提醒，不要改成自動重讀**：cookie store
+  用「第幾組」當 key（`fetch.new_store`），執行中換掉清單會讓第 N 組配到上一位的
+  cookie 與分頁，靜靜拿到別人的資料。比對也不能用 `load_dotenv(override=True)` ——
+  python-dotenv 只設不刪，`.env` 裡刪掉的 `TBB_ID_3` 還留在 `os.environ` 裡，
+  `load_accounts()` 照樣數得到，比對永遠說「沒變」（2026/09/04 實測）。
 - `.bat` 檔案內容只能純 ASCII（連中文註解都不行），呼叫同層 exe 用 `%~dp0` 完整路徑。
 - exe 是 `--windowed` 打包，啟動失敗看 exe 旁邊的 `crash.log`。

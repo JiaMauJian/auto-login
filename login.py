@@ -25,7 +25,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from playwright.sync_api import (
     Error as PlaywrightError,
     TimeoutError as PlaywrightTimeoutError,
@@ -259,6 +259,29 @@ def open_context(p):
         raise
 
 
+def _accounts_from(lookup, sim_raw):
+    """
+    照 TBB_ID_1、TBB_ID_2… 一路數下去數到缺號為止，後面接上模擬用的假帳號。
+
+    lookup 是「怎麼查一個設定」：正式路徑傳 os.getenv（開機時 load_dotenv 灌進
+    os.environ 的那一份），accounts_on_disk 傳的是直接讀檔拿到的字典。兩條路
+    共用同一套數法 —— 各寫一份的話，「檔案現在是幾組」與「這次開機是幾組」
+    會用兩種規則算出來，比對出的差異就不能信了。
+    """
+    accounts = []
+    i = 1
+    while True:
+        tbb_id = lookup(f"TBB_ID_{i}")
+        tbb_password = lookup(f"TBB_PASSWORD_{i}")
+        if not tbb_id or not tbb_password:
+            break
+        accounts.append({"id": tbb_id, "password": tbb_password})
+        i += 1
+
+    accounts.extend(simulate.fake_accounts(simulate.simulate_count(sim_raw)))
+    return accounts
+
+
 def load_accounts():
     """
     .env 裡的帳號設定，依序編號。
@@ -266,19 +289,39 @@ def load_accounts():
     後面會接上模擬用的假帳號（.env 的 SIMULATE_ACCOUNTS，沒設就一個都沒有，
     正式部署的機器上等於這件事不存在）。假帳號帶 fake 旗標，
     不會去登入任何網站，詳見 dev_tools/simulate.py。
-    """
-    accounts = []
-    i = 1
-    while True:
-        tbb_id = os.getenv(f"TBB_ID_{i}")
-        tbb_password = os.getenv(f"TBB_PASSWORD_{i}")
-        if not tbb_id or not tbb_password:
-            break
-        accounts.append({"id": tbb_id, "password": tbb_password})
-        i += 1
 
-    accounts.extend(simulate.fake_accounts())
-    return accounts
+    讀的是 os.environ，也就是這個檔案開頭 load_dotenv 那一次的結果 —— 整個行程
+    只讀那一次，所以程式跑著的時候改 .env 對它沒有任何影響。要知道「檔案現在
+    長什麼樣」得走 accounts_on_disk。
+    """
+    return _accounts_from(os.getenv, os.getenv("SIMULATE_ACCOUNTS", ""))
+
+
+def accounts_on_disk():
+    """
+    .env 檔案**現在**的帳號設定。只讀檔，不動 os.environ。
+
+    用途只有一個：跟開機時讀到的那一份比對，對不上就請使用者重開程式（見
+    ui_background._env_accounts_changed）。**不是熱更新** —— cookie store 用
+    「第幾組」當 key（見 fetch.new_store），執行中換掉清單會讓第 N 組配到上一位
+    的 cookie 與分頁，正好是這支程式最不能出的錯（2026/09/04 使用者定案：只提醒，
+    不自動重讀）。
+
+    不能改用 load_dotenv(override=True) 重讀：python-dotenv 只設不刪，.env 裡
+    刪掉的 TBB_ID_3 還會留在 os.environ 裡，load_accounts() 照樣數得到它，比對
+    永遠說「沒變」（2026/09/04 實測確認）。所以這裡走 dotenv_values 讀檔本身。
+
+    檔案不見或讀不動時回傳 None＝「不知道」，呼叫端當成沒變 —— 這條路只是提醒，
+    不該因為自己讀不到檔就把人擋在門外。
+    """
+    env = app_dir() / ".env"
+    if not env.is_file():
+        return None
+    try:
+        values = dotenv_values(env, encoding="utf-8-sig")
+    except OSError:
+        return None
+    return _accounts_from(values.get, values.get("SIMULATE_ACCOUNTS") or "")
 
 
 def do_login(context, tbb_id, tbb_password, page=None):

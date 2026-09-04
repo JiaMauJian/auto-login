@@ -20,7 +20,7 @@ import order_fill
 import planner
 import fetch as fetch_mod
 from fetch import collect, login_only
-from login import app_dir, configure_browsers_path, open_context
+from login import accounts_on_disk, app_dir, configure_browsers_path, open_context
 from ui_common import ask_cash_method, ask_confirm, show_error, show_warning
 
 # 背景做的三件事，講給人聽的名字。收尾出錯時要說得出是哪一步壞掉的。
@@ -232,6 +232,37 @@ class UiBackgroundMixin:
             self.browser_thread = threading.Thread(target=self._browser_worker, daemon=True)
             self.browser_thread.start()
 
+    def _env_accounts_changed(self):
+        """
+        .env 的帳號跟這次開機讀到的那一份對不對得起來。對不上就跳提醒、擋下這次
+        動作，回傳 True。
+
+        帳號清單一個行程只讀一次：login.py 的 load_dotenv 是 import 時跑的，
+        self.accounts 是建 SyncApp 那一刻的快照（見 ui.py），之後登入、讀取、
+        下單、掛單全部吃那一份。所以程式開著的時候改 .env 存檔，這個行程完全
+        不知道 —— 使用者以為改成 2 組了，按下去還是照舊 20 組整輪跑完
+        （2026/09/04 使用者遇到，只好去工作管理員把程式砍掉）。
+
+        只提醒、不自動重讀是刻意的（2026/09/04 使用者定案）：cookie store 用
+        「第幾組」當 key（見 fetch.new_store），執行中換掉清單會讓第 N 組配到
+        上一位的 cookie 與分頁 —— 拿到別人的資料，而且不會報錯。
+
+        比對帳號本身而不是檔案的修改時間：.env 裡還有視窗大小、Excel 路徑那些
+        設定（「開啟EXCEL」選一次檔就會改寫這個檔案，見 excel_io.remember_excel_path），
+        看 mtime 的話那些改動也會跳出這個提醒，講的卻是帳號 —— 說謊比不說還糟。
+        """
+        current = accounts_on_disk()
+        if current is None:
+            return False
+
+        def signature(accounts):
+            return [(a["id"], a["password"]) for a in accounts]
+
+        if signature(current) == signature(self.accounts):
+            return False
+        show_warning(self.root, ".env 的帳號已變更", "請重新關掉程式再開啟")
+        return True
+
     def start_login(self):
         """
         登入**一律全部**，不看更新分頁那個「範圍」。
@@ -249,6 +280,8 @@ class UiBackgroundMixin:
         """
         if self.busy:
             return
+        if self._env_accounts_changed():
+            return
         if not self.accounts:
             show_error(self.root, "沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
             return
@@ -265,6 +298,10 @@ class UiBackgroundMixin:
         # 看 _excel_in_use() 而不是只看 self.busy：下單分頁那幾條路也在用 COM 動
         # 同一份活頁簿（見那個述詞的說明）。
         if self._excel_in_use() or not self._require_excel():
+            return
+        # 讀取也要問一次，不是只有「登入」那一顆：沒登入過的那幾組是這條路自己
+        # 順手登進去的（見 fetch.collect），所以它一樣是「.env 那份清單」的入口。
+        if self._env_accounts_changed():
             return
         if not self.accounts:
             show_error(self.root, "沒有帳號", "請先在 .env 填入 TBB_ID_1 / TBB_PASSWORD_1。")
@@ -674,6 +711,14 @@ class UiBackgroundMixin:
                     "pending_fetched": self._on_pending_fetched,
                     "pending_cancelled": self._on_pending_cancelled,
                     "macro_stuck": self._on_macro_stuck}
+        if self.closing:
+            # 關閉流程正在等背景登出（見 ui.py 的 on_close）。那段等待會呼叫
+            # root.update() 讓視窗保持有回應，連帶把這一支也叫進來 —— 但這時候
+            # 收背景結果只會壞事：_on_logged_out 會把 busy 解除、剛剛變灰的按鈕
+            # 全部重新亮起來，狀態列的倒數也會被它那句「已全部登出」蓋掉。畫面
+            # 正在關，那則回話本來就沒有人需要（見 on_close 的說明），直接不收，
+            # 也不必再排下一次。
+            return
         try:
             while True:
                 kind, payload = self.queue.get_nowait()
