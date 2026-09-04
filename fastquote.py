@@ -1,8 +1,31 @@
 """
 即時報價 WebSocket：訂閱 FastQuote 那條推播（wss://push.tbbstock.com.tw/WEBSOCKET），
-解出委買一／委賣一／成交價，給盤中模式的追價（見 orders.chase_price）跟畫面即時
-顯示共用同一份資料來源——這裡只用委買一／委賣一（成交價一律來自 Excel I 欄，
-見 ui_order.order_prices，2026/08/29 使用者確認拿掉了「未實現損益」那條現查
+解出委買一／委賣一／成交價。
+
+## 2026/09/04 起這支已經不在正式路徑上了
+
+委買賣一改成走 `stockinfo.quote()`（一個 HTTP GET，不用登入、不開瀏覽器），
+兩個呼叫端（`ui_order.fetch_order_quotes`、`ui_order_exec` 的追價）都換掉了，
+現在只剩 `recon_fastquote_*.py` 那幾支偵察腳本還 import 這裡的東西。
+
+換掉的理由有兩個，第二個才是關鍵：
+
+1. 這條路要「登入 → `fastQuoteUtil.openWinURL()` 開彈出視窗 → 在頁面 script
+   跑之前 patch `window.WebSocket` → 送訂閱指令 → 解側錄反推的二進位」，而且
+   2026/09/02 盤中實測踩過 `expect_page()` 等不到新視窗、留下孤兒視窗的坑
+   （見下面「expect_page() 有時候真的等不到」那段）。HTTP 那條一行就查完。
+2. **channel 42 只有整股，拿不到零股。**「出清零股」那條路的追價因此一直在
+   拿整股的委買賣一比價（同一時刻可以差好幾檔），`stockinfo` 的 `.O` 才補得上。
+   零股在這條 WebSocket 上的入口是 channel 57，2026/09/04 側錄過，值全程不動、
+   代號也解不出來，是死路（見 偵察資料\\20260904_091345_fastquote_channel57_*）。
+
+整支留著不刪：它是這個網站唯一驗證過的 push 來源，哪天 `GetStockInfo` 那條被
+擋掉或要做「常駐即時報價表格」（HTTP 輪詢不適合）時，這裡的手法還是有用的。
+下面的說明全部保留原樣，是當時一步一步試出來的過程。
+
+原本的定位：給盤中模式的追價（見 orders.chase_price）跟畫面即時顯示共用同一份
+資料來源——這裡只用委買一／委賣一（成交價一律來自 Excel I 欄，見
+ui_order.order_prices，2026/08/29 使用者確認拿掉了「未實現損益」那條現查
 成交價的 AJAX），FastQuote 頁本來就是走這條推播更新報價，不是輪詢（見 docs/
 自動下單與半自動下單規劃.pptx.txt「盤中」小節、偵察資料\\20260828_*_fastquote_*）。
 
@@ -81,7 +104,8 @@ channel 42 的推播裡，一支股票拆成好幾段子紀錄，每段開頭都
 
 ## expect_page() 有時候真的等不到「page」事件，但視窗其實開出來了
 
-2026/09/02 真帳號盤中實測踩到：`_order_quotes_job` 丟出 `TimeoutError`，30 秒內
+2026/09/02 真帳號盤中實測踩到：當時「查詢委買賣」那支背景 job（`ui_order.
+_order_quotes_job`，2026/09/04 換成 HTTP 之後已經刪掉）丟出 `TimeoutError`，30 秒內
 沒等到 `context.expect_page()` 的「page」事件；但事後去看 Chrome，那個彈出視窗
 其實真的開出來了（標題列有「Chrome 目前受到自動測試軟體控制」，確認是同一個
 自動化 context 開的，不是使用者自己手動點開），而且已經在正常收報價。也就是說

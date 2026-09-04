@@ -29,6 +29,8 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
 | `fetch.py` | 抓網頁資料（`collect()`）、cookie store（換人＝換 cookie，不是重登），登入完立刻抓完那一組才換下一組 |
 | `recon.py` | AJAX 重放，只讀不寫，偵察新查詢用（`python recon.py 1`） |
 | `order_query.py` | 掛單查詢正式版（`queryOrder`），對 `order_recon.py` 就像 `fetch.py` 對 `recon.py` |
+| `stockinfo.py` | 即時委買賣一（`GetStockInfo`，一個 HTTP GET，不用登入不開瀏覽器）。整股零股都查得到，零股是 `odd=True`。刻意一次只查一檔——批次有地雷，見模組說明 |
+| `fastquote.py` | 舊的即時報價 WebSocket，2026/09/04 起已經不在正式路徑上（被 `stockinfo.py` 取代），只剩偵察腳本在用。留著當備援 |
 | `planner.py` | 網頁資料 × Excel 現值 × 紀錄檔 → 一張「變更提案」清單，純計算 |
 | `ledger.py` | 紀錄檔讀寫、現金基準、歷程追加 |
 | `excel_io.py` | COM 開檔、讀寫 B8/E/F，只認得這三處（2026/08/24 起不再自動備份） |
@@ -59,6 +61,12 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
 - `branchId` 查詢要加 `'1'` 前綴（`query610`、`queryBankBalance`），`transDateQuery`
   不加；`queryBankBalance` 的 `Amount` 單位是分要除以 100。這兩條錯了都不會報錯，只
   是靜靜算錯，改到這幾支查詢務必對照 `docs/現金餘額兩種算法.md` 重新核對。
+- 委買賣一走 `stockinfo.quote()`，**一次只查一檔**。`GetStockInfo` 其實吃得下逗號
+  分隔的多檔，但只有整股可以：`2330.O,2454.O` 回 0 筆（零股不能批次），而
+  `2330,2330.O` 回 1 筆而且是 `Market=0`——`.O` 被無聲吃掉、降級成整股，不報錯、
+  不回空，就給你一筆整股資料。要「順手加個批次版本」之前先讀 `stockinfo.py` 的
+  模組說明。另外零股跟整股是**兩本不同的簿子**（實測 2454 同一刻差兩檔），追價
+  要查哪一本跟著那一列的 `unit` 走，不是跟著整批模式走。
 - 一次讀取只動「這一輪的範圍」（`round_scope`），不能因為讀了新資料就順手把別人
   上一輪的舊提案也寫進 Excel。
 - Excel 已有的巨集（`Module1.更新股價`、`Module1.自動計算`）用的是無限定的

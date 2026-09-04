@@ -376,8 +376,10 @@ class UiBackgroundMixin:
         # 把回傳的 payload 送回主執行緒。「order」不在這裡——它要留一個 page 讓
         # 下面的閒置輪詢繼續盯著委託確認視窗，還有自己的 OrderMaybeSubmitted
         # 要分開處理，硬收進來只會讓這張表變成一堆例外。
+        # 「查詢委買賣」以前也在這張表裡，2026/09/04 起搬走了：它換成 HTTP
+        # 查行情（見 stockinfo.py），不用登入也不碰瀏覽器，留在這條瀏覽器
+        # 專屬執行緒上只會白白跟登入／讀取／下單排隊，見 ui_order.fetch_order_quotes。
         simple_jobs = {
-            "order_quotes": (self._order_quotes_job, "order_quotes_fetched"),
             "pending": (self._pending_job, "pending_fetched"),
         }
 

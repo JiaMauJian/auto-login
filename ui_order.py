@@ -20,13 +20,11 @@ import threading
 import tkinter as tk
 
 import ttkbootstrap as ttk
-from playwright.sync_api import Error as PlaywrightError
 
 import excel_io
-import fastquote
-import fetch as fetch_mod
 import order_fill
 import orders
+import stockinfo
 from ui_common import (
     FONT_SIZE, ORDER_STOCK_ROW_H, ORDER_STOCK_ROWS_SHOWN, PRICE_PENDING_TEXT,
     col_width, show_error, show_info, wide,
@@ -41,6 +39,14 @@ from util import show
 # 股票那一欄 110 夠放「2330 台積電」這種四碼＋三到五個中文；真的更長也不會被
 # 切掉（minsize 是下限不是上限），只是那一列的後面幾欄會往右推、跟別列對不齊。
 ORDER_STOCK_COL_W = (26, 110, 130, 140, 60)
+
+# 「查詢委買賣」整條路連不上時，錯誤視窗最上面那段人話（下面接原始錯誤）。
+# 重點是講清楚「不影響下單」——這一步本來就只是提前看價格，沒查到的話下單前
+# 那一刻還是會照原本方式再查一次（見 ui_order_exec 追價那段）。
+QUOTES_OFFLINE_HINT = (
+    "連不上行情伺服器，這一趟沒有查到任何一檔。"
+    "下單前還是會照原本方式即時查一次，不影響下單。"
+)
 
 
 class UiOrderMixin:
@@ -92,11 +98,17 @@ class UiOrderMixin:
         self.order_rates_busy = False
         self.order_busy = False           # 「讀取試算」還在跑
         self.order_stock_list_busy = False  # 「讀取ＯＯ持股」還在跑
-        # 股票代號 -> {"bid","ask","last"}，「查詢委買賣」按鈕整批查回來的即時
-        # 委買賣一（見 fetch_order_quotes／fastquote.FastQuoteStream.latest()
-        # 的形狀）。有這份資料時 orders.plan_intraday_orders 會直接算出實際
-        # 會送出的價格，不是只留一句「下單前會再查」的說明文字（2026/08/29
-        # 使用者要求）。切模式會清空重來，理由跟 order_rows 一樣。
+        # 股票代號 -> {"bid","ask","last"}，「查詢委買賣」按鈕查回來的即時
+        # 委買賣一（見 fetch_order_quotes／stockinfo.quote 的形狀）。有這份資料
+        # 時 orders.plan_intraday_orders 會直接算出實際會送出的價格，不是只留
+        # 一句「下單前會再查」的說明文字（2026/08/29 使用者要求）。切模式會清空
+        # 重來，理由跟 order_rows 一樣。
+        #
+        # 只用股票代號當 key、不分整股零股，是因為整份預覽同一時間必定只有一種：
+        # 「出清零股」跟「出清整張・盤中」是 _recompute_order_preview 裡互斥的
+        # 兩條作業分支。哪天這個前提變了（同一份預覽混著兩種單位），這份字典的
+        # key 要跟著改成 (代號, 是不是零股)——兩者是兩本不同的簿子，同一時刻
+        # 可以差好幾檔，共用一個 key 會靜靜拿錯。
         self.order_quotes = {}
         self.order_quotes_busy = False
         self._order_quotes_requested = []  # 上一次按「查詢委買賣」實際問了哪幾檔，回話時算漏了誰用
@@ -836,30 +848,43 @@ class UiOrderMixin:
 
     def _on_order_unit_changed(self):
         """
-        切整張／零股。
+        切整張／零股。**三種作業一律股票清單整批清掉重選**，執行預覽跟著空掉。
 
-        **買賣股票**只是同一個試算股數換送另一半（見 orders.plan_trade_orders），
-        股票清單留著就好，但「張數」「備註」兩欄是照單位算出來的，所以預覽要跟
-        著重算，不是只換執行按鈕上的字——只更新按鈕的話，畫面會停在另一半的
-        數字上。
+        出清股票本來就是這樣：出清整張的每一列有「比重」，出清零股沒有（規劃
+        文件「出清股票－零股」那一節的設定裡就沒有比重——零股是整段賣掉，沒有
+        賣幾成可以斟酌），列的形狀不一樣，沿用舊列會留下一個再也不會被讀到的
+        輸入框，跟 9.3 第 1 點對切作業的規矩是同一條。
 
-        **出清股票要整批清掉重選**：出清整張的每一列有「比重」，出清零股沒有
-        （規劃文件「出清股票－零股」那一節的設定裡就沒有比重——零股是整段賣掉，
-        沒有賣幾成可以斟酌），列的形狀不一樣，沿用舊列會留下一個再也不會被讀到
-        的輸入框，跟 9.3 第 1 點對切作業的規矩是同一條。
+        買賣股票原本不清——理由是它只是同一個試算股數換送另一半（見
+        orders.plan_trade_orders），列的形狀沒變，重算預覽就夠了。2026/09/04
+        使用者確認**三種作業統一照出清那條走**：切單位就是「這一輪整套設定重來」
+        這個意思，一個作業一套規矩的話，人得先想起自己站在哪一邊才知道清單會不會
+        留著。代價是切完要重按「新增」（那也會順便重讀一次下單試算，見
+        add_order_stock），使用者確認接受。
 
-        追價檔數也跟著換成那個單位的預設值（整張 2 檔、零股 3 檔，規劃文件各自
-        寫在自己那一節）。使用者自己改過的數字一樣會被蓋掉，跟股票清單被清掉是
-        同一種取捨：切單位＝這一輪整套設定重來，留一半舊的比全部重設更難察覺。
+        全持股交易（JOB_FULL）現在只開放整張（orders.UNITS_READY），實務上切不到
+        單位，但規則一樣套在它身上——哪天零股接上了不必回來補這一條。
+
+        切時機（_on_order_mode_changed）、切作業（_on_order_job_changed）也都是
+        無條件清空，三條路現在講的是同一句話。
+
+        追價檔數跟著換成那個單位的預設值（整張 2 檔、零股 3 檔，規劃文件各自寫在
+        自己那一節）；這是出清限定的收尾，另外兩個作業根本沒有這個欄位。使用者
+        自己改過的數字一樣會被蓋掉，跟股票清單被清掉是同一種取捨：留一半舊的比
+        全部重設更難察覺。
         """
+        # 三種作業共同的那一步，擺在分支之前——這就是「統一作法」本身，不是
+        # 剛好三條路各自都寫了一次。順序也不能反過來：下面 order_ticks.set()
+        # 會立刻觸發 _recompute_order_preview（見 __init__ 的 trace_add），
+        # 這時候 order_rows 要是還留著切單位前的舊列形狀就會 KeyError
+        # （同 _on_order_job_changed 的說明）。
+        self._reset_order_stock_rows()
+
         if self.order_job.get() != orders.JOB_CLEAR:
-            self._recompute_order_preview()
-            self._update_order_exec_ui()
+            # 買賣股票／全持股交易沒有追價檔數，也用不到即時報價
+            # （見 _order_quotes_available），清單清掉就結束了。
             return
 
-        # 同 _on_order_job_changed：先清空股票清單再改追價檔數，避免
-        # order_ticks.set() 觸發的即時重算讀到切單位前的舊列形狀。
-        self._reset_order_stock_rows()
         self.order_ticks.set(orders.DEFAULT_TICKS[self.order_unit.get()])
         self._sync_order_clear_controls()
         # 舊的即時報價跟著作廢，理由同切時機：清單都清空了，沒有任何一列在用它。
@@ -1467,22 +1492,32 @@ class UiOrderMixin:
 
     # ---------- 查詢委買賣（盤中限定） ----------
     #
-    # 「查詢委買賣」按鈕：先幫目前清單裡的股票整批查一次即時委買賣一，讓
-    # 執行預覽直接顯示 orders.chase_price 算出來的實際價格，不用等「開始
-    # 下單」依序跑到那一筆才臨時查（2026/08/29 使用者要求：出清股票時想在
-    # 按下去之前就看到會發生什麼事）。跟 start_order_execution 借同一組
-    # self.busy／瀏覽器背景執行緒，理由一樣：這一步也要登入／換 cookie，
-    # 不能跟更新分頁或下單依序執行同時搶同一顆瀏覽器。
+    # 「查詢委買賣」按鈕：先幫目前清單裡的股票查一次即時委買賣一，讓執行預覽
+    # 直接顯示 orders.chase_price 算出來的實際價格，不用等「開始下單」依序跑到
+    # 那一筆才臨時查（2026/08/29 使用者要求：出清股票時想在按下去之前就看到會
+    # 發生什麼事）。
+    #
+    # 2026/09/04 起資料來源從 fastquote 的 WebSocket 換成 stockinfo 的 HTTP
+    # （見 stockinfo.py 模組說明）。連帶三件事跟著變，都是刻意的：
+    #   1. 不用登入、不碰瀏覽器，所以不再借帳戶、不再進瀏覽器背景執行緒的
+    #      queue，改成自己開一條 thread（跟 _order_rates_worker 同一種寫法）。
+    #   2. 不再佔用 self.busy——查報價不會跟更新分頁或下單搶瀏覽器，沒有理由
+    #      在這段期間鎖住「登入／更新／全部登出」。
+    #   3. 一檔一個 GET。stockinfo.quote 刻意不做批次（理由見它的模組說明：
+    #      零股不能批次，而且整股零股混查會靜靜降級成整股）。
 
     def fetch_order_quotes(self):
         """
         觸發背景查詢；結果回來見 _on_order_quotes_fetched。
 
-        報價是公開資料，不因帳戶而不同（跟 order_exec_prices 那份 Excel
-        股價「哪個帳戶先讀到就先用哪個」同一種態度）——這裡拿**第一位登入得了
-        的勾選帳戶**去登入，純粹是借「已經登入」這件事開 FastQuote 彈出視窗，
-        不代表這批報價只給那個帳戶用。所以勾了好幾位也只借一位，不是每位都
-        查一次。
+        報價是公開資料，不因帳戶而不同，所以這裡完全不看帳戶——**沒登入也能
+        按**。以前要借一組登入過的帳戶去開 FastQuote 彈出視窗，那個限制是舊
+        資料來源的技術債，換成 HTTP 之後沒有存在的理由了。
+
+        `self.busy` 仍然擋著（見 _update_order_quotes_ui 的按鈕狀態）：不是
+        技術上不行，是「下單依序執行到一半」重查會改掉畫面上的執行預覽價格，
+        而正在跑的那一輪用的是開始下單那刻凍結的 order_exec_quotes，兩邊對不
+        起來，人看了會誤會（2026/09/04 使用者確認保留這一條）。
         """
         if self.busy or self.order_quotes_busy:
             return
@@ -1494,61 +1529,39 @@ class UiOrderMixin:
             show_info(self.root, "還沒有股票", "請先加入至少一檔股票。")
             return
 
-        ordered = self._order_execution_accounts()
-        if not ordered:
-            show_info(self.root, "還沒勾帳戶",
-                      f"{self._order_no_account_text()}（查詢委買賣要借一組帳戶登入。）")
-            return
-        # 借得到誰就借誰：勾選的第一位不一定登入過（清單來自 Excel 分頁，跟
-        # 登入無關），一位一位往下找，全部都對不到帳號才報錯。
-        order_number = next(
-            (number for number in
-             (self._order_number_for_sheet(account["sheet"]) for account in ordered)
-             if number is not None), None)
-        if order_number is None:
-            show_error(self.root, "找不到帳戶",
-                       "勾選的帳戶都對不到任何一組帳號（還沒登入過），"
-                       "沒有辦法借一組來查即時報價。")
-            return
-
         self._order_quotes_requested = codes
         self.order_quotes_busy = True
-        self._set_busy(True, "查詢即時委買賣中…")
         self._update_order_quotes_ui()
-        self._ensure_browser_thread()
-        self.browser_waiting += 1
-        self.browser_cmd_queue.put(
-            ("order_quotes", (order_number, self.accounts[order_number - 1], codes)))
+        # 這一趟查整股還是零股，跟著現在選的作業走——「出清零股」送出去的是零股
+        # 委託，要比的就是零股那本簿子（見 stockinfo.quote 的 odd 參數）。整份
+        # 預覽同一時間只會有一種，理由見 self.order_quotes 那段說明。
+        threading.Thread(target=self._order_quotes_worker,
+                         args=(codes, self._order_clear_odd()), daemon=True).start()
 
-    def _order_quotes_job(self, context, store, order_number, account, codes):
+    def _order_quotes_worker(self, codes, odd):
         """
-        背景執行緒用（只能在 ui_background._browser_worker 裡呼叫）：借這組
-        已登入的帳戶開一個 fastquote.FastQuoteStream，一次訂閱這一批股票
-        代號，查回目前的委買一／委賣一／成交價。
+        背景執行緒：一檔一個 HTTP GET 查即時委買賣一（見 stockinfo.quote）。
 
-        跟 _order_fill_job 裡那個「每筆單各自開各自關」的一次性用法是同一招，
-        差別只在這裡一次訂閱一整批代號、不是一檔——FastQuoteStream.subscribe
-        本來就吃一個代號清單，不需要另外寫批次版本。查不到的代號（逾時、
-        不在自選清單…）就不會出現在回傳的字典裡，不是塞一個 None 佔位，
-        呼叫端（_on_order_quotes_fetched）自己比對哪些代號漏了。
+        查不到的代號就不會出現在回傳的字典裡，不是塞一個 None 佔位，呼叫端
+        （_on_order_quotes_fetched）自己比對哪些代號漏了——這是換資料來源之前
+        就有的約定，沒有變。
+
+        「這一檔查不到」（收盤後、盤中零股第一盤之前、代號不存在）跟「整條路
+        壞了」（連不上、逾時）要分開：前者是正常情況，跳過那一檔繼續查下一檔；
+        後者每一檔都會壞，記下第一個錯誤就整趟結束，讓畫面說得出是連線問題，
+        不要讓人以為是這幾檔剛好沒行情。
         """
-        page, _, problems = fetch_mod.ensure_logged_in(context, [(order_number, account)], store)[order_number]
-        if problems:
-            raise RuntimeError("；".join(problems))
-
         quotes = {}
-        stream = fastquote.FastQuoteStream(page)
-        try:
-            stream.subscribe(codes)
-            for code in codes:
-                quote = stream.wait_for(code)
-                if quote:
-                    quotes[code] = quote
-        finally:
-            stream.close()
-        # 回傳的就是要送回主執行緒的那份 payload（見 ui_background 的 simple_jobs：
-        # 那張表直接把 job 的回傳值當 payload 送出去）。
-        return {"quotes": quotes}
+        for code in codes:
+            try:
+                quote = stockinfo.quote(code, odd=odd)
+            except Exception as exc:
+                self.queue.put(("order_quotes_fetched",
+                                {"error": str(exc), "hint": QUOTES_OFFLINE_HINT}))
+                return
+            if quote:
+                quotes[code] = quote
+        self.queue.put(("order_quotes_fetched", {"quotes": quotes}))
 
     def _on_order_quotes_fetched(self, payload):
         """
@@ -1556,10 +1569,12 @@ class UiOrderMixin:
         整份換掉——重複按「查詢委買賣」，這次沒查到的代號還留著上次查到的
         舊值，比整份清空更安全，見下面 missing 那段的說明），再重算一次
         執行預覽讓畫面反映最新算出來的價格。
+
+        不動 browser_waiting／_set_busy：2026/09/04 起這一趟走自己的 thread、
+        不碰瀏覽器也不佔 self.busy（見 fetch_order_quotes）。這裡要是還留著
+        `_set_busy(False)`，等於幫別人（更新分頁、下單）把 busy 清掉。
         """
-        self.browser_waiting = max(0, self.browser_waiting - 1)
         self.order_quotes_busy = False
-        self._set_busy(False)
         self._update_order_quotes_ui()
 
         if "error" in payload:

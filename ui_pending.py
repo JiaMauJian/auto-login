@@ -142,7 +142,7 @@ class UiPendingMixin:
         **一組登入完就立刻查那一組**，不是先把全部登入完再回頭查——整個瀏覽器
         只有一組 cookie，全部登入完之後它是最後一組的（見 fetch.ensure_logged_in
         的警告與 fetch.collect 開頭那段）。所以 ensure_logged_in 是在迴圈裡一次
-        只帶一組進去呼叫的，跟 ui_order._order_quotes_job 同一個寫法。
+        只帶一組進去呼叫的，跟 ui_order_exec._order_fill_job 同一個寫法。
 
         某一組失敗不中斷整批：查掛單是「看看現在外面有什麼」，20 個裡有 1 個
         登入逾時，另外 19 個的委託還是該看得到。失敗的收進 problems 一起回報。

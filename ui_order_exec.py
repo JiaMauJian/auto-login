@@ -37,12 +37,12 @@ import tkinter as tk
 from playwright.sync_api import Error as PlaywrightError
 
 import excel_io
-import fastquote
 import fetch as fetch_mod
 import order_fill
 import order_query
 import orders
 import planner
+import stockinfo
 from ui_common import ask_confirm, show_error, show_info, show_warning
 from util import show
 
@@ -1184,6 +1184,20 @@ class UiOrderExecMixin:
         # 事綁在一起——哪天零股不再固定盤中，這裡就會靜靜地送出一個 None 價格。
         # 舊的 queue（沒有這一欄）退回原本的判斷，行為不變。
         chase = row.get("chase", mode == "intraday")
+
+        # 整張還是零股看**那一列自己帶的值**（理由同上面的 side）：這台引擎吃的
+        # 是凍結好的 queue，不回頭問畫面上現在選的是哪一個——多輪之間、或人在
+        # 執行中動了那顆單選鈕，畫面上的值跟這批 queue 算出來的量就對不起來了。
+        # 沒帶這一欄的（出清那兩支 plan_*）當整張。row["lots"] 的單位跟著它走：
+        # 整張是張、零股是股（見 orders.plan_trade_orders），兩支 order_fill 都要
+        # 帶同一個 odd。
+        #
+        # 這一行在追價之前算，不是在下面填單前才算：追價要查的是**這一列自己那
+        # 本簿子**，整股零股是兩本，同一時刻可以差好幾檔（2026/09/04 實測 2454
+        # 整股 4395/4400、零股 4385/4390）。以前這裡是先追價才算 odd，零股那幾
+        # 筆等於拿整股的委買賣一去追價——不會報錯，只是靜靜算錯一個價。
+        odd = row.get("unit") == orders.UNIT_ODD
+
         if chase and price is None:
             pricenow = self.order_exec_prices.get(row["code"])
             if pricenow is None:
@@ -1191,23 +1205,21 @@ class UiOrderExecMixin:
                     f"沒有讀到 {row['code']} 的股價（Excel I 欄），這一筆沒辦法算追價。"
                     f"請先按「讀取試算」讓 Excel 更新股價。")
 
-            # 對手方第一檔：借這個已登入的 page 開一個 FastQuote 彈出視窗，
-            # 只為了這一檔股票訂閱、等一下、拿到就關掉（見 fastquote.py
-            # 「另開分頁不是一律不行」）——刻意保持簡單，不常駐訂閱、不接
-            # ui_background.py 的即時表格，每筆單各自開各自關。查哪一檔跟
-            # side 是反的：買方向查委賣一（ask）、賣方向查委買一（bid），見
-            # orders.chase_price 的說明。收不到（逾時、或 WebSocket 這輪
-            # 剛好不穩）就讓 best_opposite 維持 None，chase_price 自己會退回
-            # 邊界價，不擋單。
+            # 對手方第一檔：一個 HTTP GET 查回來（見 stockinfo.py，不用登入、
+            # 不開瀏覽器，取代原本開 FastQuote 彈出視窗訂閱 WebSocket 那條路）。
+            # 查哪一邊跟 side 是反的：買方向查委賣一（ask）、賣方向查委買一
+            # （bid），見 orders.chase_price 的說明。
+            #
+            # 查不到就讓 best_opposite 維持 None，chase_price 自己會退回邊界價、
+            # 不擋單——這是原本 WebSocket 收不到時就有的行為，換來源之後照舊。
+            # 例外一律吞掉也是同一個理由：行情查不到不該讓整筆委託送不出去。
             best_opposite = None
-            stream = fastquote.FastQuoteStream(page)
             try:
-                if stream.subscribe([row["code"]]):
-                    quote = stream.wait_for(row["code"])
-                    if quote:
-                        best_opposite = quote["ask"] if row_side == orders.SIDE_BUY else quote["bid"]
-            finally:
-                stream.close()
+                quote = stockinfo.quote(row["code"], odd=odd)
+            except Exception:
+                quote = None
+            if quote:
+                best_opposite = quote["ask"] if row_side == orders.SIDE_BUY else quote["bid"]
 
             price = orders.chase_price(pricenow, ticks, row_side, best_opposite)
 
@@ -1218,14 +1230,6 @@ class UiOrderExecMixin:
         # 決定：盤前只能 ROD，盤中規劃文件明講 IOC。
         bs_flag = row.get("bs_flag") or (
             orders.BS_FLAG_INTRADAY if mode == "intraday" else orders.BS_FLAG_PRE)
-
-        # 整張還是零股也看**那一列自己帶的值**（理由同上面的 side／bs_flag）：
-        # 這台引擎吃的是凍結好的 queue，不回頭問畫面上現在選的是哪一個——多輪
-        # 之間、或人在執行中動了那顆單選鈕，畫面上的值跟這批 queue 算出來的量
-        # 就對不起來了。沒帶這一欄的（出清那兩支 plan_*）當整張。
-        # row["lots"] 的單位跟著它走：整張是張、零股是股（見
-        # orders.plan_trade_orders），兩支 order_fill 都要帶同一個 odd。
-        odd = row.get("unit") == orders.UNIT_ODD
 
         page.goto(order_fill.ORDER_ENTRY_PAGE, wait_until="domcontentloaded")
         order_fill.open_order_form(page, odd=odd)

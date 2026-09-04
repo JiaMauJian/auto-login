@@ -1191,10 +1191,18 @@ class UiLayoutMixin:
         note_candidates = [
             f"{orders.REASON_NO_HOLDING}；{orders.REASON_NO_PRICE}",
             f"{orders.REASON_UNDER_ONE_LOT}；{orders.REASON_NO_PRICE}",
-            orders.REASON_CHASE_TEMPLATE.format(ticks="99", opposite="委買一"),
-            orders.REASON_CHASE_TEMPLATE.format(ticks="99", opposite="委賣一"),
+            orders.chase_pending_note("委買一", "99", orders.SIDE_SELL),
+            orders.chase_pending_note("委賣一", "99", orders.SIDE_BUY),
+            # 追價比完價的兩句：用得上對手方第一檔的那句最短，被底價／上限頂住
+            # 的那句最長。漏掉長的那句欄寬就會照短的算（見 orders.chase_note）。
             orders.REASON_CHASE_FROZEN_TEMPLATE.format(opposite="委買一", value="9,999.99"),
             orders.REASON_CHASE_FROZEN_TEMPLATE.format(opposite="委賣一", value="9,999.99"),
+            orders.REASON_CHASE_BOUND_TEMPLATE.format(
+                opposite="委買一", value="9,999.99",
+                beyond=orders.CHASE_WORDS[orders.SIDE_SELL]["beyond"], price="9,999.99"),
+            orders.REASON_CHASE_BOUND_TEMPLATE.format(
+                opposite="委賣一", value="9,999.99",
+                beyond=orders.CHASE_WORDS[orders.SIDE_BUY]["beyond"], price="9,999.99"),
         ]
         price_candidates = [PRICE_PENDING_TEXT, "9,999.99"]
         wide_cols = {

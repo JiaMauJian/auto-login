@@ -119,12 +119,26 @@ REASON_UNDER_ONE_LOT = "比重算出來不到 1 張，略過"
 # 是兩件事，後者正是多輪跑到收斂時每一列都會寫的那一句。
 REASON_NO_ODD = "沒有零股（持股剛好是整張），略過"
 REASON_NO_PRICE = "尚未設定價格"
-REASON_CHASE_TEMPLATE = "以 Excel 成交價±{ticks}檔為邊界，下單前查{opposite}比價"
-# 2026/08/29 使用者要求：先用「查詢委買賣」按鈕把即時委買賣一整批查回來
+# 追價那三句備註（還沒比價／比完用對手方第一檔／比完被邊界頂住）共用同一組
+# 詞彙，跟著方向換稱呼——「邊界」是 chase_price 內部的講法，畫面上不用它：
+# 賣方向的邊界是「最低願收價」＝底價，買方向是「最高願付價」＝上限。
+# 三句話的用詞要一起看才不會各講各的，所以擺在同一個地方。
+CHASE_WORDS = {
+    SIDE_SELL: {"bound": "底價", "arrow": "往下", "beyond": "低於底價"},
+    SIDE_BUY: {"bound": "上限", "arrow": "往上", "beyond": "高於上限"},
+}
+REASON_CHASE_TEMPLATE = "還沒比價。Excel 股價{arrow} {ticks} 檔是{bound}，下單前查{opposite}決定價格"
+# 2026/08/29 使用者要求：先用「查詢委買賣」按鈕把即時委買賣一查回來
 # （見 ui_order.fetch_order_quotes），這裡就能直接算出實際會送出的價格，
-# 不必再等「開始下單」跑到那一筆才臨時查——note 講清楚「這個數字不會再變」，
-# 跟 REASON_CHASE_TEMPLATE 那句「下單前查」是兩種不同的狀態，不能共用同一句。
-REASON_CHASE_FROZEN_TEMPLATE = "已查{opposite} {value}，下單會直接用這個價格（不再重查）"
+# 不必再等「開始下單」跑到那一筆才臨時查——跟 REASON_CHASE_TEMPLATE 那句
+# 「下單前查」是兩種不同的狀態，不能共用同一句。
+#
+# 拆成兩句是因為 chase_price 有兩種結果，而**只講 best_opposite 會跟價格欄
+# 矛盾**：對手方第一檔走到底價／上限之外時，送出去的是邊界價、不是
+# best_opposite，舊的那句卻只印 best_opposite，看的人會不知道該信哪個數字
+# （2026/09/04 使用者確認改掉）。
+REASON_CHASE_FROZEN_TEMPLATE = "{opposite} {value} 價送出"
+REASON_CHASE_BOUND_TEMPLATE = "{opposite} {value} {beyond}，改用 {price} 價送出"
 
 # 買賣股票（張數與價格來自 Excel 的下單試算 M19:N28）用得到的幾句。
 REASON_NO_PLAN = "下單試算是空的，略過"
@@ -310,10 +324,9 @@ def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down,
                 if pricenow is not None and quote is not None:
                     best_opposite = quote["ask"] if side == SIDE_BUY else quote["bid"]
                     price = chase_price(pricenow, ticks_down, side, best_opposite)
-                    reasons.append(REASON_CHASE_FROZEN_TEMPLATE.format(
-                        opposite=opposite, value=show(best_opposite)))
+                    reasons.append(chase_note(opposite, best_opposite, price, side))
                 else:
-                    reasons.append(REASON_CHASE_TEMPLATE.format(ticks=ticks_down, opposite=opposite))
+                    reasons.append(chase_pending_note(opposite, ticks_down, side))
 
             preview.append({
                 "order": account["order"],
@@ -380,11 +393,9 @@ def plan_clear_odd_orders(stock_settings, ordered_accounts, holdings, ticks_down
                 quote = quotes.get(stock["code"])
                 if pricenow is not None and quote is not None:
                     price = chase_price(pricenow, ticks_down, SIDE_SELL, quote["bid"])
-                    reasons.append(REASON_CHASE_FROZEN_TEMPLATE.format(
-                        opposite="委買一", value=show(quote["bid"])))
+                    reasons.append(chase_note("委買一", quote["bid"], price, SIDE_SELL))
                 else:
-                    reasons.append(REASON_CHASE_TEMPLATE.format(
-                        ticks=ticks_down, opposite="委買一"))
+                    reasons.append(chase_pending_note("委買一", ticks_down, SIDE_SELL))
                 if lots:
                     # 整張那一段這一輪不送（規劃文件把整張與零股分成兩個流程）。
                     # 跟買賣股票選零股時那句是同一件事，共用同一個樣板。
@@ -609,3 +620,36 @@ def chase_price(pricenow, ticks_down, side, best_opposite=None):
     if side == SIDE_BUY:
         return min(best_opposite, boundary)
     return max(best_opposite, boundary)
+
+
+def chase_note(opposite, best_opposite, price, side):
+    """
+    「已經查過委買賣一、價格定案了」那一列的備註（見 REASON_CHASE_FROZEN_TEMPLATE）。
+
+    兩支 plan_*（盤中出清整張、出清零股）共用同一份文字，不要各寫各的——它們
+    講的是同一件事，分開寫遲早會有一邊改了另一邊沒改。
+
+    講哪一句看**價格到底是誰決定的**，不是看方向：`chase_price` 的 min/max 一定
+    原封不動回傳兩個運算元之一，所以 `price == best_opposite` 這個比較是精確的
+    （不是浮點近似），成立就代表對手方第一檔在底價／上限之內、直接用它；不成立
+    就是被邊界頂住了，送出去的是邊界價而不是 best_opposite——這種時候只印
+    best_opposite 會跟畫面上的價格欄對不起來，一定要把實際價格也講出來。
+    """
+    if price == best_opposite:
+        return REASON_CHASE_FROZEN_TEMPLATE.format(
+            opposite=opposite, value=show(best_opposite))
+    return REASON_CHASE_BOUND_TEMPLATE.format(
+        opposite=opposite, value=show(best_opposite),
+        beyond=CHASE_WORDS[side]["beyond"], price=show(price))
+
+
+def chase_pending_note(opposite, ticks_down, side):
+    """
+    「還沒查委買賣一，下單前才會查」那一列的備註（見 REASON_CHASE_TEMPLATE）。
+
+    跟 chase_note 成對，兩支 plan_* 共用，理由一樣：講的是同一件事的兩種狀態，
+    分開寫遲早有一邊改了另一邊沒改。
+    """
+    words = CHASE_WORDS[side]
+    return REASON_CHASE_TEMPLATE.format(
+        arrow=words["arrow"], ticks=ticks_down, bound=words["bound"], opposite=opposite)
