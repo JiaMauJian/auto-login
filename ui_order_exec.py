@@ -146,12 +146,14 @@ class UiOrderExecMixin:
         # 會把它清成空字典，逼所有列都退回「下單前才查」那條舊路，不讓舊報價被
         # 沿用到之後幾輪（市場已經過了一段時間，繼續當最新報價用是在猜數字）。
         #
-        # **所以「這份快照給第 1 輪用」只有沒勾「自動更新股價」時才成立**：勾了的話
-        # 第 1 輪也會先經過 _on_order_price_refresh（start_order_execution 設
-        # round=0 就呼叫 _prepare_next_round），這份快照在送出任何一筆之前就被清掉
-        # 了，第 1 輪也是送單前重查。結果是對的（股價跟委買賣一都是新的），但執行
-        # 預覽那句「委買一 X 價送出」在那個組合下語意不正確——見
-        # _on_order_price_refresh 清空那一行旁邊的說明。
+        # **所以「這份快照給第 1 輪用」只有沒勾多輪時才成立**：勾了的話第 1 輪
+        # 也會先經過 _on_order_price_refresh（start_order_execution 設 round=0
+        # 就呼叫 _prepare_next_round），這份快照在送出任何一筆之前就被清掉了，
+        # 第 1 輪也是送單前重查，不管有沒有另外勾「自動更新股價」（那顆開關
+        # 只決定重讀前要不要先觸發巨集，見 order_exec_prices 開頭的說明）。
+        # 2026/09/04 起 start_order_execution 建第 1 輪預覽時已經配合這件事
+        # （見 _order_exec_start_quotes），勾了多輪就不把 self.order_quotes
+        # 塞進預覽，執行預覽那句「委買一 X 價送出」才不會語意不正確。
         self.order_exec_quotes = {}
         self.order_exec_price_busy = False  # 輪與輪之間正在重讀 Excel／觸發巨集，還沒回話
         # 「這一整批多輪出清作業還在不在跑」，跟 order_exec_queue 分開——
@@ -189,6 +191,26 @@ class UiOrderExecMixin:
         # 上一輪委託佇列的指紋（見 _queue_signature）。多輪的「沒有進展就停」
         # 那道保險靠它，None＝這一批還沒有跑過任何一輪。
         self.order_exec_last_signature = None
+
+    def _order_exec_start_quotes(self, multi_round):
+        """
+        開始下單那一刻，出清（零股／整張盤中）第 1 輪預覽要用哪一份「即時委買
+        賣一」：沒勾多輪就是 self.order_quotes（按過「查詢委買賣」凍結的那份，
+        2026/08/29 使用者要求按下「開始下單」就是執行預覽上看到的價位，不再
+        重查）；勾了多輪則回傳 None，逼這裡的預覽也走 chase_pending_note
+        那一句「下單前才查」。
+
+        理由是 _prepare_next_round 那條路本來就對 order_exec_quotes 做一樣的
+        事（見那邊 order_exec_auto_price 開頭的說明）：勾了多輪的話，round=0
+        一樣要先 _start_round_sync 才進第 1 輪，重組隊列時 quotes 一律清空，
+        所以第 1 輪送出前也會現查一次委買賣一——不管有沒有另外勾「自動更新
+        股價」（那顆開關現在只決定重讀 Excel 前要不要先觸發更新股價巨集，見
+        order_exec_prices 開頭的說明，不影響這裡）。這裡如果照樣把
+        self.order_quotes 塞進第 1 輪的預覽，備註欄會印「已經查過、不會再變」
+        （REASON_CHASE_FROZEN_TEMPLATE），跟實際會發生的事（送出前還會再查
+        一次）對不上，所以多輪時這裡也要當作沒查過。
+        """
+        return None if multi_round else self.order_quotes
 
     def start_order_execution(self):
         """
@@ -249,7 +271,7 @@ class UiOrderExecMixin:
                 return
             preview = orders.plan_clear_odd_orders(
                 stock_settings, ordered, self.order_holdings, ticks,
-                prices=self.order_prices, quotes=self.order_quotes)
+                prices=self.order_prices, quotes=self._order_exec_start_quotes(multi_round))
             queue_rows = orders.executable_intraday_orders(preview)
         elif self._order_intraday():
             stock_settings = self._order_stock_settings()
@@ -259,7 +281,7 @@ class UiOrderExecMixin:
                 return
             preview = orders.plan_intraday_orders(
                 stock_settings, ordered, self.order_holdings, ticks, side,
-                prices=self.order_prices, quotes=self.order_quotes)
+                prices=self.order_prices, quotes=self._order_exec_start_quotes(multi_round))
             queue_rows = orders.executable_intraday_orders(preview)
         else:
             ticks = None
@@ -358,15 +380,18 @@ class UiOrderExecMixin:
         self.order_exec_auto_price = auto_price
         self.order_exec_stock_settings = stock_settings
         self.order_exec_accounts = ordered
-        # 第 1 輪（沒勾自動更新股價時就是唯一一輪）直接拿 self.order_prices
+        # 第 1 輪（沒勾多輪時就是唯一一輪）直接拿 self.order_prices
         # 當起點——那是新增股票／上次「讀取試算」讀進來的 Excel
-        # 成交價，不用再另外查一次。勾了自動更新股價的話，這份值一送進
-        # _prepare_next_round 馬上就會被剛重讀（含觸發巨集）的結果整份蓋掉
-        # （見 _on_order_price_refresh），不是兩份資料混用。
+        # 成交價，不用再另外查一次。勾了多輪的話，這份值一送進
+        # _prepare_next_round 馬上就會被剛重讀（要不要先觸發巨集看
+        # auto_price）的結果整份蓋掉（見 _on_order_price_refresh），不是兩份
+        # 資料混用。
         self.order_exec_prices = dict(self.order_prices)
-        # 凍結這一刻查到的即時委買賣（見 order_exec_quotes 開頭的說明）。真的用得
-        # 到它的只有「沒勾自動更新股價」那條路——勾了的話下面 _prepare_next_round
-        # 進去就被 _on_order_price_refresh 清空，第 1 輪也是送單前重查。
+        # 凍結這一刻查到的即時委買賣（見 order_exec_quotes 開頭的說明；預覽用的
+        # 那份見 _order_exec_start_quotes，兩處要講同一件事）。真的用得到它的
+        # 只有「沒勾多輪」那條路——勾了的話下面 _prepare_next_round 進去就被
+        # _on_order_price_refresh 清空，第 1 輪也是送單前重查，不管有沒有另外
+        # 勾自動更新股價。
         self.order_exec_quotes = dict(self.order_quotes)
         # 新的一批從頭開始比對「有沒有進展」，不能沿用上一批留下來的指紋。
         self.order_exec_last_signature = None
@@ -1131,14 +1156,14 @@ class UiOrderExecMixin:
         # 時第 1 輪也會經過這裡（start_order_execution 設 round=0 就呼叫
         # _start_round_sync，同步完接著就是 _prepare_next_round），所以勾了多輪
         # 的話，人按「查詢委買賣」查到的價格在按下「開始下單」之後就被丟掉、送單
-        # 前重查一次。結果是對的（股價跟委買賣一都是新的，不會一新一舊），但
-        # **執行預覽那句「委買一 X 價送出」在這個組合下語意不正確**——它承諾
-        # 「下單會直接用這個價格」，實際上會重查。沒勾多輪時才是真的。
+        # 前重查一次，不管有沒有另外勾「自動更新股價」（那顆開關現在是多輪底下
+        # 的子選項，只決定重讀 Excel 前要不要先觸發「更新股價」巨集，不再決定
+        # 委買賣一要不要重查）。
         #
-        # 2026/09/04 發現時只有「勾了自動更新股價」會這樣；同一天「第 1 輪之前
-        # 也同步」落地之後，範圍擴大成「勾了多輪就會這樣」（自動更新股價現在是
-        # 多輪底下的子選項，不再自己決定要不要走這條路）。還沒修，見記憶
-        # order-multiround-pending-decisions。
+        # 2026/09/04 起 start_order_execution 建第 1 輪預覽時也配合了這件事
+        # （見 _order_exec_start_quotes）：勾了多輪就不把 self.order_quotes 塞
+        # 進第 1 輪預覽，逼那幾列一開始就走 chase_pending_note「下單前才查」，
+        # 不會印出「委買一 X 價送出」卻實際上還會再查一次的假象。
         self.order_exec_quotes = {}
 
         side = self.order_exec_side
