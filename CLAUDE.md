@@ -36,7 +36,7 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
 | `excel_io.py` | COM 開檔、讀寫 B8/E/F，只認得這三處（2026/08/24 起不再自動備份） |
 | `util.py` | 數字與寬度對齊等小工具 |
 | `ui.py` / `ui_layout.py` / `ui_sync.py` / `ui_background.py` / `ui_common.py` / `ui_history.py` / `ui_cert.py` | Tkinter GUI，唯一有畫面的一批檔案；背景執行緒跑 Playwright／COM，主執行緒才碰 widget |
-| `ui_order.py` / `ui_order_exec.py` | 下單分頁：前者收設定、讀 Excel、算執行預覽，後者是按下「開始下單」之後的依序執行引擎（吃凍結好的 queue，不管那份 queue 是哪個作業產生的），以及一輪跑完之後的三段收尾（撤零股單／完整同步／重讀判斷收斂，見 docs/介面規劃.md 9.8、9.9） |
+| `ui_order.py` / `ui_order_exec.py` | 下單分頁：前者收設定、讀 Excel、算執行預覽，後者是按下「開始下單」之後的依序執行引擎（吃凍結好的 queue，不管那份 queue 是哪個作業產生的），以及一輪跑完之後的三段收尾（撤零股單／完整同步／重讀判斷收斂，見 docs/介面規劃.md 9.8、9.9）——後兩段在第 1 輪之前也會先跑一次 |
 | `ui_pending.py` | 掛單分頁：把今天送出去的委託整批查回來攤成一張表，是自動送出的驗證面；`_cancel_orders_split`（委託單／預約單兩種都撤）給它跟出清零股的自動撤單共用 |
 | `dev_tools/simulate.py` | 假帳號、假網頁（`window.__SIM__`），讓 `fetch.py` 走假資料但形狀跟真 API 一樣 |
 | `dev_tools/sim_excel.py` | 在 Excel 裡加/移除模擬分頁 |
@@ -85,11 +85,17 @@ Excel 版面完全不動（公式、巨集原地保留），程式只認得 B8�
   介面字調大了它還是系統預設的小字。也**不要換成 `ttkbootstrap.dialogs.Messagebox`**：
   它斷行用 `textwrap.wrap(width=50)`，那個 50 數的是字元個數，中文會從第 50 個字中間
   硬切、檔案路徑照切、視窗被撐到 1133 像素寬，按鈕還是英文 OK（2026/08/30 實測後定案）。
-- **下單多輪之間一定要跑完整同步，不能只重讀 Excel**（2026/09/03，見
-  `docs/介面規劃.md` 9.9）。E/F 只有更新分頁寫得到（`excel_io.write_cells` 全專案
+- **下單每一輪開始前都要跑完整同步，第 1 輪也不例外，不能只重讀 Excel**
+  （2026/09/03 補到第 2 輪以後，2026/09/04 補到第 1 輪，見 `docs/介面規劃.md` 9.9）。
+  E/F 只有更新分頁寫得到（`excel_io.write_cells` 全專案
   只有 `ui_background._write_worker` 一個呼叫端），所以「重讀 Excel」讀回來的永遠
   是下單前那份數字——第 2 輪會照著還沒賣掉的持股再算一次量，**重複賣同一批部位**，
-  一路到 `ORDER_MULTI_ROUND_CAP` 為止。同步走的是更新分頁那一整條路
+  一路到 `ORDER_MULTI_ROUND_CAP` 為止。第 1 輪的版本是同一個錯換一個時間點：按下
+  「開始下單」那一刻的 Excel 沒有人保證是最新的（今天還沒按過「更新」、人自己用
+  手機下過單、上一批跑滿輪數上限或按了「停止」——那兩條都不會跑同步）。所以勾了
+  多輪就是 `round=0` 先 `_start_round_sync` 再跑第 1 輪；**那一趟的
+  `_round_zero_missing` 要回空的**，程式還沒送過單，「網頁上不見了」只可能是人自己
+  賣掉，不是被程式賣光。同步走的是更新分頁那一整條路
   （`ui_order_exec._start_round_sync`），不要另外寫一份簡化版：現金基準一天只設
   一次、`round_scope`、寫入成功才落帳這幾條都在那條路上。同步完那條路會
   `_set_busy(False)`，**busy 要自己補回來**，否則下一輪開始前「登入／更新／全部

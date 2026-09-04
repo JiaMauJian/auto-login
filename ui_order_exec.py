@@ -26,6 +26,11 @@ order_auto_confirm 決定（關＝停在那裡等人按，開＝程式自己按�
     重讀判斷  重讀一次 Excel，還組得出隊列就是還沒出清，接下一輪
               （_prepare_next_round／_on_order_price_refresh）。
 
+**後面那兩段在第 1 輪之前也會各跑一次**（勾了多輪的話；那一趟的 round 是 0，
+見 start_order_execution）——所以實際順序是「同步 → 第 1 輪 → 同步 → 第 2 輪
+→ …」，不是「第 1 輪 → 同步 → 第 2 輪」。理由跟輪與輪之間那次一模一樣：送出
+去的量是拿 Excel 算的，而沒有人保證按下「開始下單」那一刻的 Excel 是最新的。
+
 這三段中間 queue 都是空的，但整批作業還在跑——「停止」在每一段都要按得下去，
 靠的是 order_exec_active 而不是 queue 有沒有東西。
 """
@@ -202,9 +207,9 @@ class UiOrderExecMixin:
             self._dispatch_next_order()
             return
 
-        # 看 _excel_in_use()：勾了「自動更新股價」的話，按下去第一件事就是
-        # _prepare_next_round → 用 COM 跑巨集、重讀 Excel（見那條路），不能在
-        # 別人正在動同一份活頁簿的時候開始。
+        # 看 _excel_in_use()：勾了多輪的話，按下去很快就會 _start_round_sync →
+        # 寫回 E/F/B8 → _prepare_next_round 用 COM 跑巨集、重讀 Excel（見那條路），
+        # 不能在別人正在動同一份活頁簿的時候開始。
         if self._excel_in_use():
             return
 
@@ -368,21 +373,33 @@ class UiOrderExecMixin:
         self.order_exec_active = True
         self._set_busy(True, "下單：準備第 1 輪…" if multi_round else "下單：準備第 1 筆…")
 
-        if auto_price:
-            # 「每一輪開始前都先觸發更新股價，包含第一輪」（規劃文件）——第
-            # 一輪不能例外用這裡先算好的 queue_rows 直接送，要跟第 2 輪以後
-            # 走同一條路（_prepare_next_round）：先觸發巨集、重讀 Excel，
-            # 用讀回來的持股／股價重新組隊列再開始送。round 從 0 開始，
-            # _on_order_price_refresh 判斷「還有東西可以送」時會 +1 變成
-            # 第 1 輪——跟後面每一輪 +1 的邏輯是同一條，不必另外寫一次。
+        if multi_round:
+            # **每一輪開始之前都先同步，第 1 輪也不例外**（2026/09/04 使用者定案）。
+            # 上面那份 queue_rows 是拿 Excel E 欄算出來的，而 E 欄只有更新分頁寫得
+            # 到（`excel_io.write_cells` 全專案一個呼叫端），所以它隨時可能比實際
+            # 持股多：今天還沒按過「更新」、人自己用手機下過單、上一批跑滿
+            # ORDER_MULTI_ROUND_CAP 停下或中途按了「停止」（那兩條都不會跑同步）。
+            # 多出來的部分第 1 輪就會照著再賣一次——跟 9.9 那個「重複賣」是同一個
+            # 缺口，只是發生在第 1 輪，2026/09/03 那次只補到第 2 輪以後。
+            #
+            # 所以第 1 輪跟第 2 輪以後走的是完全同一條路：_start_round_sync（查
+            # 網頁 → 寫回 E/F/B8 → 落帳）→ _prepare_next_round（要不要順便跑
+            # 「更新股價」巨集由 order_exec_auto_price 決定）→ _on_order_price_refresh
+            # 用剛讀回來的持股重組隊列。round 從 0 開始，_on_order_price_refresh
+            # 判斷「還有東西可以送」時會 +1 變成第 1 輪——跟後面每一輪 +1 是同一條
+            # 邏輯，不必另外寫一次。
+            #
+            # 「自動更新股價」原本在這裡自己有一條岔路（勾了就 round=0 直接
+            # _prepare_next_round），現在併進來了：規劃文件那句「每一輪開始前都先
+            # 觸發更新股價，包含第一輪」由同步之後那一段照樣做到，沒有少。
             self.order_exec_round = 0
-            self._prepare_next_round()
+            self._start_round_sync()
         else:
             self.order_exec_queue = queue_rows
             self.order_exec_pos = 0
             self.order_exec_round = 1
-            # 沒勾自動更新股價時第 1 輪不走 _prepare_next_round，指紋要在這裡自己
-            # 記一次，否則第 2 輪沒有東西可以比、那道保險等於從第 3 輪才開始生效。
+            # 沒勾多輪就只有這一輪，沒有下一輪可以比，指紋其實用不到；還是記一次，
+            # 讓 order_exec_last_signature 不管走哪條路都對得上目前這一輪。
             self.order_exec_last_signature = self._queue_signature(queue_rows)
             self._dispatch_next_order()
 
@@ -774,10 +791,33 @@ class UiOrderExecMixin:
 
         self._start_round_sync()
 
+    def _round_sync_text(self):
+        """
+        「正在同步」那句狀態文字。狀態列（_update_order_exec_ui）跟訊息列
+        （_say）要一模一樣，所以只寫在這裡一份。
+
+        第 1 輪之前（round 0，見 start_order_execution）跟輪與輪之間做的是同一
+        件事，只是時間點不同，講法要跟著換——輪與輪之間那一版一個字都沒動。
+        """
+        if self.order_exec_round == 0:
+            return "開始之前先更新持股管理檔（現金、股數、成本）…"
+        return (f"第 {self.order_exec_round} 輪已跑完，"
+                f"正在更新持股管理檔（現金、股數、成本）…")
+
+    def _round_reread_text(self):
+        """「正在重讀 Excel」那句狀態文字，理由同 _round_sync_text。"""
+        if self.order_exec_round == 0:
+            return "開始之前先重新讀取持股…"
+        return f"第 {self.order_exec_round} 輪已跑完，重新讀取持股中…"
+
     def _start_round_sync(self):
         """
         規劃文件流程的最後一步：**更新持股管理檔的現金（初始餘額累加）、股數、
         成本**，然後才判斷出清了沒。
+
+        **第 1 輪之前也會走這裡**（round 0，2026/09/04 使用者定案，理由見
+        start_order_execution）——「跑完一輪才同步」等於相信按下「開始下單」那
+        一刻的 Excel，而沒有人保證那份 Excel 是今天最新的。
 
         走的是更新分頁那一整條路（`("fetch", …)` → `_on_fetched` → 寫 Excel →
         `_on_written` → `_commit_round`），等同程式自己按一次「更新（這幾位）
@@ -833,8 +873,7 @@ class UiOrderExecMixin:
 
         self.today = datetime.date.today()
         self.round_target = None
-        self._say(f"下單：第 {self.order_exec_round} 輪已跑完，正在更新持股管理檔"
-                  f"（現金、股數、成本）…")
+        self._say(f"下單：{self._round_sync_text()}")
         self._update_order_exec_ui()
         self._ensure_browser_thread()
         self.browser_waiting += 1
@@ -879,8 +918,13 @@ class UiOrderExecMixin:
 
         範圍也只到「這一輪凍結的那幾檔股票」為止。同一次同步順便讀到的其他股票
         行為完全不變——程式沒動過它們，就沒有立場替它們下「已經賣光」的結論。
+
+        **第 1 輪之前那一次同步（round 0）也回空的**：那時候程式一筆委託都還沒
+        送出去，「網頁上不見了」在那個時間點只可能是人自己賣掉、或本來就沒有這
+        一檔，正是 planner.plan 那段講明不該自作主張清成 0 的情況。同一個旗標在
+        兩個時間點意思相反，所以要多問一次輪數。
         """
-        if not self.order_exec_sync_busy:
+        if not self.order_exec_sync_busy or self.order_exec_round == 0:
             return ()
         return {stock["code"] for stock in self.order_exec_stock_settings}
 
@@ -912,7 +956,7 @@ class UiOrderExecMixin:
         # 的 cookie 鎖，鬆掉的話「登入」「更新」「全部登出」在第 2 輪開始前就變成
         # 可以按的，而它們都會換掉手上這組 cookie，接下來那一輪的委託就會掛到別
         # 人帳上（見本節開頭「依序執行」那段對送錯帳戶風險的說明）。
-        self._set_busy(True, f"下單：第 {self.order_exec_round} 輪已跑完，重新讀取持股中…")
+        self._set_busy(True, f"下單：{self._round_reread_text()}")
         # 同步已經把 E/F/B8 寫成最新的了，接著照原本那條路重讀一次 Excel：要不要
         # 先跑「更新股價」巨集、怎麼判斷出清了沒，都在那邊（_on_order_price_refresh）。
         self._prepare_next_round()
@@ -922,12 +966,21 @@ class UiOrderExecMixin:
         self.order_exec_active = False
         self._set_busy(False)
         self._update_order_exec_ui()
-        show_error(self.root,
-            "更新持股管理檔失敗",
-            f"第 {self.order_exec_round} 輪跑完之後要更新持股管理檔（現金、股數、成本），"
-            f"但沒有成功，「多輪直到出清」先停在這裡：\n\n{reason}\n\n"
-            f"這一輪送出去的委託不受影響，請自己到「更新」分頁跑一次，再決定要不要"
-            f"接著跑下一輪。")
+        if self.order_exec_round == 0:
+            # 第 1 輪之前那一次（見 start_order_execution）：委託一筆都還沒送出
+            # 去，所以講的是「重新按一次開始下單」，不是「要不要接著跑下一輪」。
+            detail = (
+                f"開始下單之前要先更新持股管理檔（現金、股數、成本），但沒有成功，"
+                f"這一批先停在這裡：\n\n{reason}\n\n"
+                f"還沒有送出任何一筆委託。請自己到「更新」分頁跑一次，"
+                f"再重新按「開始下單」。")
+        else:
+            detail = (
+                f"第 {self.order_exec_round} 輪跑完之後要更新持股管理檔（現金、股數、成本），"
+                f"但沒有成功，「多輪直到出清」先停在這裡：\n\n{reason}\n\n"
+                f"這一輪送出去的委託不受影響，請自己到「更新」分頁跑一次，再決定要不要"
+                f"接著跑下一輪。")
+        show_error(self.root, "更新持股管理檔失敗", detail)
         self._say("下單：更新持股管理檔失敗，多輪出清已停止。")
 
     def _prepare_next_round(self):
@@ -936,9 +989,10 @@ class UiOrderExecMixin:
         決定要不要先觸發「更新股價」巨集。結果回來由 _on_order_price_refresh
         接手判斷是否已經出清、要不要繼續下一輪。
 
-        第 1 輪也會走這裡（見 start_order_execution）——「每一輪開始前都先
-        更新股價，包含第一輪」是規劃文件明講的，第一輪不能因為 queue 已經
-        算好了就跳過這一步，兩者共用同一條路，不是各自維護一份類似的邏輯。
+        第 1 輪也會走這裡（勾了多輪的話，經由 _start_round_sync，見
+        start_order_execution）——「每一輪開始前都先更新股價，包含第一輪」是規劃
+        文件明講的，第一輪不能因為 queue 已經算好了就跳過這一步，每一輪共用同一
+        條路，不是各自維護一份類似的邏輯。
         """
         self.order_exec_price_busy = True
         self._apply_busy_state()
@@ -1012,10 +1066,13 @@ class UiOrderExecMixin:
             self.order_exec_active = False
             self._set_busy(False)
             self._update_order_exec_ui()
-            show_error(self.root,
-                "重讀持股失敗",
-                f"第 {self.order_exec_round} 輪跑完後想重新讀取持股，但失敗了，"
-                f"「多輪直到出清」先停在這裡：\n\n{payload['error']}")
+            if self.order_exec_round == 0:
+                detail = (f"開始下單之前想重新讀取持股，但失敗了，這一批先停在這裡："
+                          f"\n\n{payload['error']}\n\n還沒有送出任何一筆委託。")
+            else:
+                detail = (f"第 {self.order_exec_round} 輪跑完後想重新讀取持股，但失敗了，"
+                          f"「多輪直到出清」先停在這裡：\n\n{payload['error']}")
+            show_error(self.root, "重讀持股失敗", detail)
             self._say("下單：重讀持股失敗，多輪出清已停止。")
             return
 
@@ -1070,14 +1127,17 @@ class UiOrderExecMixin:
         # 清空「開始下單那一刻凍結的即時委買賣」，逼這一輪的每一列都退回
         # 「下單前才查」，不把已經過時的報價繼續當最新的用。
         #
-        # **這一行是無條件的，而且不只第 2 輪以後會走到**：勾了「自動更新股價」
+        # **這一行是無條件的，而且不只第 2 輪以後會走到**：勾了「多輪直到出清」
         # 時第 1 輪也會經過這裡（start_order_execution 設 round=0 就呼叫
-        # _prepare_next_round），所以那個組合下，人按「查詢委買賣」查到的價格
-        # 在按下「開始下單」之後就被丟掉、送單前重查一次。結果是對的（股價跟
-        # 委買賣一都是新的，不會一新一舊），但**執行預覽那句「委買一 X 價送出」
-        # 在這個組合下語意不正確**——它承諾「下單會直接用這個價格」，實際上會
-        # 重查。沒勾自動更新股價時才是真的。2026/09/04 發現，還沒修，修法跟
-        # 「多輪收斂改看網頁持股」那個更大的改動糾纏在一起，見記憶
+        # _start_round_sync，同步完接著就是 _prepare_next_round），所以勾了多輪
+        # 的話，人按「查詢委買賣」查到的價格在按下「開始下單」之後就被丟掉、送單
+        # 前重查一次。結果是對的（股價跟委買賣一都是新的，不會一新一舊），但
+        # **執行預覽那句「委買一 X 價送出」在這個組合下語意不正確**——它承諾
+        # 「下單會直接用這個價格」，實際上會重查。沒勾多輪時才是真的。
+        #
+        # 2026/09/04 發現時只有「勾了自動更新股價」會這樣；同一天「第 1 輪之前
+        # 也同步」落地之後，範圍擴大成「勾了多輪就會這樣」（自動更新股價現在是
+        # 多輪底下的子選項，不再自己決定要不要走這條路）。還沒修，見記憶
         # order-multiround-pending-decisions。
         self.order_exec_quotes = {}
 
@@ -1115,11 +1175,18 @@ class UiOrderExecMixin:
             # 沒有這個問題（見下面那個分支）。
             leftover = sum(item["held_qty"] for item in preview if item["held_qty"] > 0)
             if self.order_exec_round == 0:
-                # 第一輪重讀完就發現沒東西可送——可能是持股在按下「開始
-                # 下單」之後、巨集跑完之前這個空檔剛好變了，一輪都還沒真的
-                # 跑，跟「跑了幾輪之後出清」是不同的事，訊息不能講「跑了
-                # 0 輪」，那不是人話。
-                self._say("下單：重讀 Excel 之後，沒有需要處理的委託了（可能持股剛好在這個空檔變了）。")
+                # 第 1 輪之前那次同步完就發現沒東西可送。一輪都還沒真的跑，跟
+                # 「跑了幾輪之後出清」是不同的事，訊息不能講「跑了 0 輪」，那不
+                # 是人話。
+                #
+                # 這一句要跳訊息框（2026/09/04 使用者定案）：確認框剛講完「即將
+                # 依序處理 N 筆委託」，結果一筆都沒送，只寫在狀態列上很容易被當
+                # 成當掉了。而它幾乎一定代表按下去那一刻的持股管理檔是舊的——
+                # 網頁上早就沒有那些部位了，正是這一段同步要抓的東西。
+                self._say("下單：更新持股管理檔之後，沒有需要處理的委託了，一筆都沒有送出。")
+                show_info(self.root, "沒有需要處理的委託",
+                    "更新持股管理檔之後，沒有需要處理的委託了——網頁上的持股跟按下去"
+                    "之前的持股管理檔不一樣，一筆都沒有送出。")
             elif self.order_exec_unit == orders.UNIT_ODD:
                 # 零股的隊列空了就是**真的**沒有零股了：每一列的量就是持股的零股
                 # 那一段（見 orders.plan_clear_odd_orders），不像整張那樣會卡在
@@ -1177,9 +1244,9 @@ class UiOrderExecMixin:
             waiting = (f"取消零股單：第 {self.order_exec_cancel_pos + 1}/"
                        f"{len(self.order_exec_cancel_queue)} 個帳戶…")
         elif self.order_exec_sync_busy:
-            waiting = f"第 {self.order_exec_round} 輪已跑完，正在更新持股管理檔（現金、股數、成本）…"
+            waiting = self._round_sync_text()
         elif self.order_exec_price_busy:
-            waiting = f"第 {self.order_exec_round} 輪已跑完，重新讀取持股中…"
+            waiting = self._round_reread_text()
         else:
             waiting = None
 
