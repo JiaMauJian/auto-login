@@ -395,21 +395,14 @@ def login_only(context, selected, store=None):
     return records
 
 
-def collect(context, selected, store=None, need_bank=False, need_settle=True):
+def collect(context, selected, store=None, need_bank=False):
     """
     逐一確保登入並抓資料。selected 是 [(第幾組, 帳號設定)]，回傳每組一筆記錄。
 
     need_bank 是「現金餘額這次要用銀行餘額推算」。只有那時候才多查銀行餘額這支 ——
     20 個帳號就是 20 次多餘的往返，而用另一種算法的日子完全用不到。交割金額
-    （query610）兩種現金算法都要抓，不受 need_bank 影響：opening 拿它「今天」那一列
+    （query610）兩種算法都要抓，不受 need_bank 影響：opening 拿它「今天」那一列
     算今日淨收付，bank 拿它算還沒交割的錢，一支頂兩支用。
-
-    need_settle 是「這一趟要不要算現金」。更新分頁那條路一律是 True（現金那一格
-    非它不可）；下單分頁多輪出清那一趟查持股是 False（見
-    ui_order_exec._order_holdings_job）——它只要未實現損益，交割金額對它沒有任何
-    用處。省一支查詢只是順帶，真正的理由是**別讓用不到的查詢有機會擋住整批**：
-    query610 查壞了會往 record["problems"] 塞一句話，而那條路是「有 problems ＝
-    這個帳戶這一輪不算數」，等於讓一支根本用不到的查詢有權停掉多輪出清。
 
     **一組登入完就立刻抓完他的資料**，不是全部登入完再回頭抓。整個瀏覽器只有一組
     cookie，登入下一組就等於把上一組的身分換掉了（伺服器那邊的 session 還活著，
@@ -440,24 +433,19 @@ def collect(context, selected, store=None, need_bank=False, need_settle=True):
         record["account_code"] = account_code(session)
         record["sheet_name"] = (session.get("account") or "").strip()
 
-        # 未實現損益一定排第一個，順序不是隨便的：它是這一輪唯一每列都帶
-        # bhno/cseq 的查詢，下面那道身分核對靠它先過一次，後面幾支才跟著信得過
-        # （見 bank_problem／settle_problem 那兩段說明）。
         queries = {
             "未實現損益": ("queryInstantAccount_new", {
                 "branchId": "1" + bid, "custId": cid,
                 "range": "stksum,stkdat", "stock_no": "",
             }),
-        }
-
-        if need_settle:
             # 交割金額查詢就是網站上「交割金額查詢」那一頁（account/layoutRWD.jsp?type=3）
             # 自己打的那一支，回的正好是「接下來每一天各要交割多少」，一天一列，
             # 「今天」那一列的 pay_amt 就是今日淨收付。兩種現金算法都要它，不受
             # need_bank 影響：opening 只用今天那一列，bank 還要用到 cdate 比今天晚的
             # 那幾列。2026/08/21 對過答案，跟撈十天淨收付逐筆看 cdate 算出來一樣（都是
             # -238）；2026/08/24 確認收盤前後都準。
-            queries["交割金額"] = ("query610", {"branchId": "1" + bid, "custId": cid})
+            "交割金額": ("query610", {"branchId": "1" + bid, "custId": cid}),
+        }
 
         if need_bank:
             # 現金餘額第二種算法多要的這支（見 docs/現金餘額兩種算法.md）。
