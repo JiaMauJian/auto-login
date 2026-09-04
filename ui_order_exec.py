@@ -1044,9 +1044,18 @@ class UiOrderExecMixin:
                 if row["code"] not in price_by_code and row["price"] is not None:
                     price_by_code[row["code"]] = row["price"]
         self.order_exec_prices = price_by_code
-        # 第 1 輪凍結的即時委買賣只給第 1 輪用（見 order_exec_quotes 開頭的
-        # 說明）——這裡是第 2 輪以後才會走到的路，清空逼這一輪的每一列都
-        # 退回「下單前才查」，不把已經過時的報價繼續當最新的用。
+        # 清空「開始下單那一刻凍結的即時委買賣」，逼這一輪的每一列都退回
+        # 「下單前才查」，不把已經過時的報價繼續當最新的用。
+        #
+        # **這一行是無條件的，而且不只第 2 輪以後會走到**：勾了「自動更新股價」
+        # 時第 1 輪也會經過這裡（start_order_execution 設 round=0 就呼叫
+        # _prepare_next_round），所以那個組合下，人按「查詢委買賣」查到的價格
+        # 在按下「開始下單」之後就被丟掉、送單前重查一次。結果是對的（股價跟
+        # 委買賣一都是新的，不會一新一舊），但**執行預覽那句「委買一 X 價送出」
+        # 在這個組合下語意不正確**——它承諾「下單會直接用這個價格」，實際上會
+        # 重查。沒勾自動更新股價時才是真的。2026/09/04 發現，還沒修，修法跟
+        # 「多輪收斂改看網頁持股」那個更大的改動糾纏在一起，見記憶
+        # order-multiround-pending-decisions。
         self.order_exec_quotes = {}
 
         side = self.order_exec_side

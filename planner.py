@@ -281,7 +281,13 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
     本來就只有人知道。省下來的還有一支查詢：用 opening 的日子完全不必碰銀行餘額。
     """
     row, col = CELL_BALANCE
+    # B8 空白（讀不出數字也算）一律當成 0（2026/09/04 使用者要求）。原本這裡直接
+    # return，兩種算法都因此整格不寫 —— 但空白的 B8 只代表「還沒填」，不是資料信
+    # 不過，擋住只是逼人每天先回 Excel 補一個數字才跑得動。真正信不過的是網頁那
+    # 幾支查詢，那幾道擋法都還在 _cash_blocked 裡，一道都沒放寬。
     balance = sheet_data["balance"]
+    if balance is None:
+        balance = 0.0
     cash = book["cash"]
 
     # 交割金額（query610）兩種算法都要抓：opening 只拿「今天」那一列當今日淨收付；
@@ -303,10 +309,6 @@ def _cash(sheet_data, record, book, today, warnings, method=METHOD_OPENING):
     proposal["bank"] = bank
     proposal["pending"] = pending
     proposal["pending_items"] = pending_items
-
-    if balance is None:
-        proposal["note"] = "B8 是空的或不是數字，請先填一個現金餘額"
-        return proposal
 
     reason = _cash_blocked(record, today, method, bank, today_amount)
     if reason is not None:
@@ -457,24 +459,23 @@ def initialize(sheet_data, book, sheet_name, today, at):
     跳過之後那一格不是就沒有出口了 —— 當天想改餘額由人明講，走 apply_cash_reset
     （介面上現金那一條底下的「今日初始現金餘額　[修改]」）。
 
-    回傳 (events, blocked)：B8 是空的沒辦法當起點時 events 是空清單、
-    blocked 是 True——基準設不成這件事不能悶著不講，靜靜回空清單的話，
-    畫面上只會看到「還沒有今日初始現金餘額，這組讀到網頁資料就會自動設定」
-    這句話一直掛著、卻永遠不會自動好（B8 不填，讀幾次都一樣），呼叫端要用
-    blocked 去掛一則 [異常] 提醒（見 ui_background._initialize）。
+    **B8 空白就從 0 起算**（2026/09/04 使用者要求，跟 _cash 同一條規則）。原本
+    這裡設不成基準會回一個 blocked 旗標，呼叫端據以掛一則 [異常] 要人回 Excel
+    補數字，現金那一格則整天空著；現在空白當 0，基準照設、當天照算得出餘額，
+    那個旗標與提醒也就一起拿掉了。
     """
     balance = sheet_data["balance"]
+    if balance is None:
+        balance = 0.0
     cash = book["cash"]
     if cash.get("baseline_date") == today.isoformat():
-        return [], False
-    if balance is None:
-        return [], True
+        return []
 
     row, col = CELL_BALANCE
     item = _row(row, col, "cash", "cash", "balance", "現金餘額", balance, None, None)
     was = cash.get("last_written")
     ledger.calibrate(cash, balance, today, 0.0, False, at)
-    return [_event(at, sheet_name, item, "adopt", was, balance, OPENING_NOTE)], False
+    return [_event(at, sheet_name, item, "adopt", was, balance, OPENING_NOTE)]
 
 
 def commit(proposals, book, sheet_name, today, at):
