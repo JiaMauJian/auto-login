@@ -145,10 +145,16 @@ class UiOrderExecMixin:
         # 這個開關現在只決定重讀前要不要先觸發「更新股價」巨集，不再決定
         # pricenow 走哪條路（見 _on_order_price_refresh）。
         self.order_exec_prices = {}
-        # 開始下單那一刻凍結的 self.order_quotes 快照，只給第 1 輪用——第 2
-        # 輪以後在 _on_order_price_refresh 會清成空字典，逼所有列都退回
-        # 「下單前才查」那條舊路，不讓第 1 輪查到的即時報價被沿用到之後幾輪
-        # （市場已經過了一段時間，繼續當最新報價用是在猜數字）。
+        # 開始下單那一刻凍結的 self.order_quotes 快照。_on_order_price_refresh
+        # 會把它清成空字典，逼所有列都退回「下單前才查」那條舊路，不讓舊報價被
+        # 沿用到之後幾輪（市場已經過了一段時間，繼續當最新報價用是在猜數字）。
+        #
+        # **所以「這份快照給第 1 輪用」只有沒勾「自動更新股價」時才成立**：勾了的話
+        # 第 1 輪也會先經過 _on_order_price_refresh（start_order_execution 設
+        # round=0 就呼叫 _prepare_next_round），這份快照在送出任何一筆之前就被清掉
+        # 了，第 1 輪也是送單前重查。結果是對的（股價跟委買賣一都是新的），但執行
+        # 預覽那句「委買一 X 價送出」在那個組合下語意不正確——見
+        # _on_order_price_refresh 清空那一行旁邊的說明。
         self.order_exec_quotes = {}
         self.order_exec_price_busy = False  # 輪與輪之間正在重讀 Excel／觸發巨集，還沒回話
         # 「這一整批多輪出清作業還在不在跑」，跟 order_exec_queue 分開——
@@ -358,8 +364,9 @@ class UiOrderExecMixin:
         # _prepare_next_round 馬上就會被剛重讀（含觸發巨集）的結果整份蓋掉
         # （見 _on_order_price_refresh），不是兩份資料混用。
         self.order_exec_prices = dict(self.order_prices)
-        # 凍結這一刻查到的即時委買賣（見 order_exec_quotes 開頭的說明：只給
-        # 第 1 輪用，第 2 輪以後 _on_order_price_refresh 會清空）。
+        # 凍結這一刻查到的即時委買賣（見 order_exec_quotes 開頭的說明）。真的用得
+        # 到它的只有「沒勾自動更新股價」那條路——勾了的話下面 _prepare_next_round
+        # 進去就被 _on_order_price_refresh 清空，第 1 輪也是送單前重查。
         self.order_exec_quotes = dict(self.order_quotes)
         # 新的一批從頭開始比對「有沒有進展」，不能沿用上一批留下來的指紋。
         self.order_exec_last_signature = None
