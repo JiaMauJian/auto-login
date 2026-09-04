@@ -141,8 +141,15 @@ def add_sheets(path, workbook, count, write):
             template = sheet
             break
     if template is None:
-        print("找不到可以當範本的真分頁（這份 Excel 裡全部都是模擬分頁）。")
-        sys.exit(1)
+        # 沒有真分頁可以借的話，改借一個現有的假分頁：假分頁本來就是從某個真
+        # 分頁整張複製出來的，版面／公式跟真的一模一樣，fill_sheet() 又會把
+        # D4:D13／E4:G13／I4:I13／B6:B8 全部蓋掉，借哪一頁當範本不影響結果——
+        # 這樣「模擬」這份 Excel 就不必留著任何一個真人的分頁。
+        if workbook.Worksheets.Count == 0:
+            print("這份 Excel 一頁都沒有，沒有分頁可以當範本。")
+            sys.exit(1)
+        template = workbook.Worksheets(1)
+        print(f"沒有真分頁可以當範本，借用現有的假分頁「{template.Name.strip()}」代替。")
 
     todo = [name for name in wanted if name not in existing]
     print(f"範本分頁: 「{template.Name}」（整張複製，只改持股與現金那幾格）")

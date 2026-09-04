@@ -28,6 +28,7 @@ import fetch as fetch_mod
 import order_cancel
 import order_cancel_reservation
 import order_query
+from dev_tools import simulate_orders
 from ui_common import ask_confirm, col_width, show_error, show_info, show_warning, wide
 from util import show
 
@@ -171,7 +172,8 @@ class UiPendingMixin:
                 # 入口，那份對照就不能只靠「登入」那顆按鈕長出來。
                 if session.get("account"):
                     names[order] = sheet
-                rows.extend(order_query.query_orders(page, session, sheet))
+                query = simulate_orders.query_orders if account.get("fake") else order_query.query_orders
+                rows.extend(query(page, session, sheet))
             except RuntimeError as exc:
                 problems.append(str(exc))
             except (PlaywrightError, PlaywrightTimeoutError) as exc:
@@ -278,10 +280,11 @@ class UiPendingMixin:
             raise RuntimeError(f"{sheet}：{'；'.join(probs)}")
 
         return self._cancel_orders_split(page, session, sheet,
-                                         committed_ordnos, reservation_ordnos)
+                                         committed_ordnos, reservation_ordnos,
+                                         fake=account.get("fake", False))
 
     def _cancel_orders_split(self, page, session, sheet,
-                             committed_ordnos, reservation_ordnos):
+                             committed_ordnos, reservation_ordnos, fake=False):
         """
         同一個帳戶、同一個已登入的分頁上，委託單與預約單兩種都撤掉，結果合併成
         一份。分兩支不是我們想分，是網站那兩頁的刪除機制本來就不一樣（委託查詢頁
@@ -292,7 +295,15 @@ class UiPendingMixin:
         撤單（ui_order_exec._order_odd_cancel_job）共用這一支：兩邊要做的事逐字
         相同，各寫一份的話，之後補進來的任何一條（例如又多一種 ordstatus 要分流）
         都會有一邊沒跟上，而且不會報錯——只是那一種單默默沒被撤掉。
+
+        fake=True（假帳號）改呼叫 simulate_orders：假網頁沒有模擬「預約單」那層
+        （見它的模組說明），committed／reservation 直接合併成一份 ordnos，一支
+        cancel 就處理完，不必真的分兩套機制各打一次。
         """
+        if fake:
+            return simulate_orders.cancel_orders(
+                page, sheet, list(committed_ordnos) + list(reservation_ordnos))
+
         combined = {"results": [], "missing": [], "locked": []}
         if committed_ordnos:
             part = order_cancel.cancel_orders(page, session, sheet, committed_ordnos)

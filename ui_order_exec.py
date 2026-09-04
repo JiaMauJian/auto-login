@@ -48,6 +48,7 @@ import order_query
 import orders
 import planner
 import stockinfo
+from dev_tools import simulate_orders
 from ui_common import ask_confirm, show_error, show_info, show_warning
 from util import show
 
@@ -191,6 +192,19 @@ class UiOrderExecMixin:
         # 上一輪委託佇列的指紋（見 _queue_signature）。多輪的「沒有進展就停」
         # 那道保險靠它，None＝這一批還沒有跑過任何一輪。
         self.order_exec_last_signature = None
+        # 「沒有進展就停」那道保險的例外：上一輪如果**全部是假帳號**、而且
+        # 每一筆委託當場都確定「一股都沒成交」（不是事後看持股猜的，是
+        # simulate_orders.fill_order 當場回報的 matched_qty，見
+        # _order_fill_job／_on_order_filled），那這一輪算出來的委託跟上一輪
+        # 一樣是必然、不是可疑——不用因為症狀跟真的出事一樣就停下來等人確認。
+        # 兩個旗標任何一輪只要出現「真帳號」或「有成交」就會被打成 False，
+        # 且只在一輪全部跑完、真的要判斷「沒有進展」那一刻才讀，其餘時間
+        # 不影響任何行為。真帳號目前沒有這條路可以確定「當場沒有成交」
+        # （見 order_fill.confirm_order 只回一句訊息、真帳號要另外走
+        # queryDealOrder 才查得到，還沒做），所以這道例外只對假帳號生效，
+        # 真帳號的行為完全不變。
+        self.order_exec_round_all_fake = True
+        self.order_exec_round_all_zero_fill = True
 
     def _order_exec_start_quotes(self, multi_round):
         """
@@ -468,6 +482,11 @@ class UiOrderExecMixin:
             return
 
         account = self.accounts[order_number - 1]
+        if not account.get("fake"):
+            # 這一輪只要出現一筆真帳號，「沒有進展就停」那道保險就完全照舊
+            # ——不因為同一輪裡剛好也有假帳號被鬆綁（見 _order_exec_init_state
+            # 那段說明）。
+            self.order_exec_round_all_fake = False
         self.order_exec_busy = True
         self._update_order_exec_ui()
         self._say(f"下單：第 {self.order_exec_pos + 1}/{len(self.order_exec_queue)} 筆"
@@ -579,6 +598,15 @@ class UiOrderExecMixin:
                     f"排除問題後按「下一筆」會重試同一筆，或按「停止」放棄這一輪。\n\n{text}")
                 self._say(f"下單：第 {self.order_exec_pos + 1}/{len(self.order_exec_queue)} 筆失敗，等你處理。")
             return
+
+        # 「沒有進展就停」那道保險的例外只信假帳號當場回報的成交量，不是
+        # 事後猜的（見 _order_exec_init_state 的說明）。matched_qty 這個鍵
+        # 只有 _order_fill_job 的假帳號分支會帶，真帳號的 payload 裡沒有這個
+        # 鍵——用 .get() 取不到就當「沒辦法確定沒有成交」，打成 False 是刻意
+        # 選保守的那一邊，不是預設值湊巧選對。
+        matched_qty = payload.get("matched_qty")
+        if matched_qty is None or matched_qty > 0:
+            self.order_exec_round_all_zero_fill = False
 
         auto_result = payload.get("auto_result")
         self.order_exec_last_note = (f"已自動送出，結果：{auto_result['message']}"
@@ -1233,8 +1261,17 @@ class UiOrderExecMixin:
         # 但任何讓持股沒跟著更新的原因，症狀都是這一輪算出來的委託跟上一輪一模
         # 一樣，然後照著已經賣掉的部位再送一次，一路重複到輪數上限。根因修好了
         # 這道還是要留：下一個沒想到的原因也會被它接住。
+        #
+        # 唯一的例外：上一輪全部是假帳號、而且每一筆委託當場都確定零成交
+        # （order_exec_round_all_fake／all_zero_fill，見 _order_exec_init_state
+        # 的說明）——這種「跟上一輪一樣」不是可疑的症狀，是必然的結果（沒有
+        # 任何一股動過，持股當然沒理由變），不用因為長得像那個危險的症狀就
+        # 停下來等人確認。真帳號完全不受影響：它沒有這條路可以確定「當場
+        # 零成交」，all_fake 只要遇到一筆真帳號就會被打成 False。
         signature = self._queue_signature(queue_rows)
-        if signature == self.order_exec_last_signature:
+        no_progress = signature == self.order_exec_last_signature
+        confirmed_harmless = self.order_exec_round_all_fake and self.order_exec_round_all_zero_fill
+        if no_progress and not confirmed_harmless:
             self.order_exec_active = False
             self._set_busy(False)
             self._update_order_exec_ui()
@@ -1247,6 +1284,10 @@ class UiOrderExecMixin:
                 f"請自己確認持股管理檔的股數是不是最新的，再決定要不要繼續。")
             return
         self.order_exec_last_signature = signature
+        # 這一輪重新歸零，讓它自己的每一筆委託重新累計（見 _dispatch_next_order
+        # ／_on_order_filled 怎麼更新這兩個旗標）。
+        self.order_exec_round_all_fake = True
+        self.order_exec_round_all_zero_fill = True
 
         self.order_exec_round += 1
         self.order_exec_queue = queue_rows
@@ -1419,6 +1460,20 @@ class UiOrderExecMixin:
         bs_flag = row.get("bs_flag") or (
             orders.BS_FLAG_INTRADAY if mode == "intraday" else orders.BS_FLAG_PRE)
 
+        if account.get("fake"):
+            # 假帳號的假頁面沒有真正的委託確認視窗可以等人按，一律當場決定
+            # 成不成功，不看「自動送出」開著沒——半自動存在的理由是留一步給
+            # 人在真錢送出前看一眼，假帳號沒有那個風險，卡在等一個畫不出來
+            # 的視窗只會讓測試跑不完（見 simulate_orders 模組說明）。
+            ok, message, matched = simulate_orders.fill_order(
+                page, code=row["code"], side=row_side, qty=row["lots"], price=price,
+                bs_flag=bs_flag, odd=odd)
+            # matched_qty 只有假帳號這條路才給得出來（見 simulate_orders.
+            # fill_order 的說明），真帳號沒有這個欄位——_on_order_filled 的
+            # 「沒有進展就停」那道保險靠這一點分辨兩邊，不能讓真帳號的委託
+            # 也帶著這個欄位，那會讓保險誤判成「可以確定沒事」。
+            return page, {"auto_result": {"ok": ok, "message": message}, "matched_qty": matched}
+
         page.goto(order_fill.ORDER_ENTRY_PAGE, wait_until="domcontentloaded")
         order_fill.open_order_form(page, odd=odd)
         order_fill.select_stock(page, row["code"])
@@ -1460,8 +1515,12 @@ class UiOrderExecMixin:
         if problems:
             raise RuntimeError(f"{sheet}：{'；'.join(problems)}")
 
+        # 假帳號用 simulate_orders 那條路（見它的模組說明：沒有預約單這回事，
+        # 一律當作委託單），跟掛單分頁 _pending_job 是同一個判斷。
+        query = simulate_orders.query_orders if account.get("fake") else order_query.query_orders
+
         wanted = set(codes)
-        rows = [row for row in order_query.query_orders(page, session, sheet)
+        rows = [row for row in query(page, session, sheet)
                 if row["open"]
                 and row["side"] == orders.SIDE_SELL
                 and row["apcode"] == order_fill.TAB1_ODD
@@ -1477,7 +1536,8 @@ class UiOrderExecMixin:
             # _odd_cancel_finished），不要丟例外。
             return {"results": [], "missing": [], "locked": [], "found": 0}
 
-        combined = self._cancel_orders_split(page, session, sheet, committed, reservation)
+        combined = self._cancel_orders_split(page, session, sheet, committed, reservation,
+                                             fake=account.get("fake", False))
         combined["found"] = len(committed) + len(reservation)
         return combined
 

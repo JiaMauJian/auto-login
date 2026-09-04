@@ -815,5 +815,141 @@ document.getElementById('addT1').addEventListener('click', () => addTrade('next1
 document.addEventListener('input', refresh);
 document.addEventListener('change', refresh);
 refresh();
+
+// ---- 下單模擬：假帳號的委託／查詢／撤單，供 dev_tools/simulate_orders.py 呼叫 ----
+//
+// 只做「下單分頁／掛單分頁那層協調邏輯」（多輪收斂、等 6 秒撤零股、每輪重新
+// 同步）測得到的最小行為——真的操作 select2／layer.js 那幾支操作真實網站 DOM
+// 的程式碼（order_fill.py／order_query.py／order_cancel.py）完全不會被跑到，
+// 假帳號一律繞過它們，那一層的正確性要靠真帳號實測，見對應模組的模組說明。
+//
+// 成不成交是固定機率決定的，不是查真實委買賣一比價——這幾檔雖然用的是真實
+// 股票代號（見 STOCKS），盤中真的查得到報價，但拿它來判斷成交會讓測試結果
+// 綁著「現在是不是開盤時間」，離峰時間永遠查不到、永遠走同一條路。IOC（整股．
+// 盤中追價）下單當場知道成不成交；ROD（零股、買賣股票／全持股交易）掛著，
+// 之後每次被查詢（掛單分頁查詢、出清零股等 6 秒撤單前的那次查詢）才「擲骰子」
+// 決定要不要判定成交——ROD_FILL_CHANCE 刻意調低，貼近現實裡零股 6 秒內大多數
+// 時候不會成交、得靠撤單清掉那個常態（docs/介面規劃.md 9.8）。
+let ORDERS = [];
+let orderSeq = 0;
+const IOC_FILL_CHANCE = 0.7;
+const ROD_FILL_CHANCE = 0.3;
+
+function genOrdno() {{
+  orderSeq += 1;
+  return 'F' + String(orderSeq).padStart(4, '0');
+}}
+
+// 委託成交要連帶改兩個地方，跟人手動測試時「改 qty 輸入格 + 按新增一筆成交」
+// 做的是同一件事：持股（#pnl 那一列的 .qty）真的減少／增加，成交明細
+// （#mat）多一筆——後者才是「未實現損益」「交割金額查詢」算現金與股數的唯一
+// 資料來源（見 build() 與檔案開頭的說明），只改 qty 不會反映到那兩支查詢上。
+function applyFill(code, side, qty, price) {{
+  const row = [...document.querySelectorAll('#pnl tbody tr')]
+      .find((tr) => tr.dataset.code === code);
+  if (row) {{
+    const box = row.querySelector('.qty');
+    const sign = side === 'B' ? 1 : -1;
+    box.value = Math.max(0, num(box) + sign * qty);
+  }}
+  tradeRow({{ code, bs: side, qty, price, settled: '0' }});
+  refresh();
+}}
+
+// orgqty 的單位跟真的網站一樣看盤別：整股（apcode '1'）填的是「張」，零股
+// （apcode '5'）填的是「股」（見 order_fill.TAB1_LOT／TAB1_ODD 那段說明）。
+// 但 #pnl 的 .qty／成交明細的股數一律是**股**（跟 Excel E 欄同一個單位），
+// 整股成交要拿 orgqty 乘 1000 才是真正要從持股扣掉的股數，這裡漏了會少改
+// 1000 倍，多輪出清會一直看到「還有一大堆股數沒賣掉」。
+const SHARES_PER_LOT = 1000;
+
+function sharesOf(order) {{
+  return order.apcode === '1' ? Number(order.orgqty) * SHARES_PER_LOT : Number(order.orgqty);
+}}
+
+function placeOrder(opts) {{
+  const ordno = genOrdno();
+  const order = {{
+    ordno, stockno: opts.code, buysell: opts.side, apcode: opts.apcode, trade: '0',
+    priceflag: '0', odprice: String(opts.price),
+    orgqty: String(opts.qty), matqty: '0', celqty: '0',
+    ordstatus: '2', act: 'O', bs_flag: opts.bsFlag,
+    orddate: STAMP, ordtime: '090000000', workdate: STAMP,
+  }};
+  ORDERS.push(order);
+
+  if (opts.bsFlag === 'I') {{
+    // 不是全有全無：真實 IOC 吃到多少對手單就成交多少張，剩下的交易所自動
+    // 取消，不是「這一張委託全部成交或全部失敗」——大單一次全部成交在現實
+    // 裡反而是少數。這裡也刻意不是全有全無，成交量落在委託量的 20%~100%
+    // 之間隨機決定，這樣多輪測試才會真的需要跑好幾輪才清得完，跟按「多輪
+    // 直到出清」想測的東西一致（一次就全部成交，多輪那段邏輯反而測不到）。
+    const totalLots = Number(opts.qty);
+    let filledLots = 0;
+    if (Math.random() < IOC_FILL_CHANCE) {{
+      filledLots = Math.max(1, Math.round(totalLots * (0.2 + Math.random() * 0.8)));
+    }}
+    order.matqty = String(filledLots);
+    order.celqty = String(totalLots - filledLots);
+    order.act = 'C';   // 沒吃到的部份，IOC 這一刻交易所就自動取消了
+
+    if (filledLots === 0) {{
+      return {{ ok: false, message: 'IOC. FOK 委託未能成交，委託失敗', ordno, matched: 0 }};
+    }}
+    applyFill(opts.code, opts.side, filledLots * SHARES_PER_LOT, opts.price);
+    const note = filledLots < totalLots
+        ? `（部分成交 ${{filledLots}}/${{totalLots}} 張，其餘 IOC 自動取消）` : '';
+    // matched 是這一次呼叫「當場」確定成交的股數（IOC 沒有懸而未決這回事，
+    // 送出去那一刻結果就確定了）——呼叫端（ui_order_exec._order_fill_job）
+    // 拿它來判斷「這一輪是不是真的什麼都沒發生」，不是靠事後比對持股猜的，
+    // 見那邊「沒有進展就停」那道保險怎麼用這個欄位。
+    return {{ ok: true, message: '委託成功, 委託書編號: ' + ordno + note, ordno,
+             matched: filledLots * SHARES_PER_LOT }};
+  }}
+  // ROD：先掛著，成不成交留到之後查詢那一刻才決定（見 resolvePending），
+  // 下單當下 matched 一律是 0——不是「還不知道」，是「這一刻確定還沒有」。
+  return {{ ok: true, message: '委託成功, 委託書編號: ' + ordno, ordno, matched: 0 }};
+}}
+
+function resolvePending() {{
+  ORDERS.forEach((order) => {{
+    if (order.matqty !== '0' || order.celqty !== '0') return;   // 已經有結果了，不重算
+    if (Math.random() < ROD_FILL_CHANCE) {{
+      order.matqty = order.orgqty;
+      applyFill(order.stockno, order.buysell, sharesOf(order), Number(order.odprice));
+    }}
+  }});
+}}
+
+function snapshotOrder(order) {{
+  // celable／errcode 不存進 ORDERS，是每次查詢當下依 matqty/celqty 現算的
+  // 衍生欄位——省得兩處分別維護，改一個忘了改另一個。
+  const open = order.matqty === '0' && order.celqty === '0';
+  return Object.assign({{}}, order, {{ errcode: '00000000', celable: open ? '1' : '0' }});
+}}
+
+function queryOrders() {{
+  resolvePending();
+  return ORDERS.map(snapshotOrder);
+}}
+
+function cancelOrders(ordnos) {{
+  const wanted = new Set(ordnos);
+  const results = [];
+  const locked = [];
+  ORDERS.forEach((order) => {{
+    if (!wanted.has(order.ordno)) return;
+    if (order.matqty !== '0' || order.celqty !== '0') {{ locked.push(order.ordno); return; }}
+    order.celqty = order.orgqty;
+    order.act = 'C';
+    results.push({{
+      ordno: order.ordno, code: order.stockno,
+      side: order.buysell === 'B' ? '買進' : '賣出', ok: true, message: '刪單成功',
+    }});
+  }});
+  return {{ results, locked }};
+}}
+
+window.__SIM_ORDER__ = {{ place: placeOrder, query: queryOrders, cancel: cancelOrders }};
 </script>
 </body></html>"""
