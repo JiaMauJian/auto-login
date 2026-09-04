@@ -137,13 +137,18 @@ def traded_today(pnl_arrays, today):
     return False
 
 
-def plan(sheet_data, record, book, today, method=METHOD_OPENING):
+def plan(sheet_data, record, book, today, method=METHOD_OPENING, zero_missing=()):
     """
     算出這個分頁的提案。回傳 (提案清單, 提醒清單)。
 
     method 決定現金那一格用哪一種算法（見 METHOD_OPENING / METHOD_BANK）。
     只算選中的那一種：另一種算出來多少，對「今天該用哪一種」這個決定幫不上忙
     （理由見 _cash），而且它要的資料 fetch 那邊根本不會去抓。
+
+    `zero_missing` 是「這幾檔如果網頁上不見了，就當成賣光了、歸零寫回去」的
+    股票代號集合，預設空的（更新分頁就是傳空的，行為跟以前一模一樣）。只有
+    多輪出清那一輪的同步會傳東西進來，內容是那一輪程式自己送過委託的那幾檔，
+    理由見下面 `found is None` 那一段。
 
     純讀取，不會動到 book —— 要落實到紀錄檔是 commit() 的事，
     這樣試算模式才能保證真的什麼都沒改到。
@@ -160,12 +165,42 @@ def plan(sheet_data, record, book, today, method=METHOD_OPENING):
         found = holdings.get(code)
 
         if found is None:
+            if code in zero_missing:
+                # 這一檔是這一輪程式自己送委託賣掉的（多輪出清，見
+                # ui_order_exec._start_round_sync）。網頁上不見了在這個情境下
+                # 的意思跟下面那段**正好相反**：不是「人忘了刪 Excel」，是
+                # 「程式剛剛把它賣光了」，所以歸零、而且不出警告——出清成功
+                # 掛一個 ⚠ 會讓人以為出事了（見 ui_sync._summary）。
+                #
+                # 2026/09/04 加的。在那之前多輪出清踩到這個坑：零股全部賣光
+                # 之後網頁那一列消失，走下面那段「不寫」，Excel 的股數就永遠
+                # 停在賣出前的數字，下一輪照著它再算一次量、把同一批部位重複
+                # 送出去，一路到輪數上限（真的發生過，券商回「集保賣出餘股數
+                # 不足」擋下來的）。
+                #
+                # 歸零寫的是 0 不是清空：這張表沒有持股的列本來就是 E=0、F=0
+                # （實測第 9 列空列就長這樣），G/H 是常數 0、N 有 IFERROR 包著，
+                # 寫 0 不會弄出 #DIV/0!。
+                for which, col, current in (("qty", COL_QTY, line["qty"]),
+                                            ("cost", COL_COST, line["cost"])):
+                    proposals.append(_row(line["row"], col, "holding", code, which,
+                                          f"{'股數' if which == 'qty' else '成本'}（{line['label']}）",
+                                          current, 0, 0))
+                continue
             # 網頁已經沒有這檔了。刻意不自動歸零 —— 使用者的流程是「先刪 Excel 再賣」，
             # 所以這通常代表忘了刪，該由人確認而不是程式清掉。
             # 2026/08/22 使用者要求縮短：訊息框現在混進逐筆歷程的時間序裡
             # （見 ui_sync._fill_notes），不必再自帶「股數與成本維持原樣，請確認
             # 是否忘記刪除這一列」這種說明——跟其他行同樣簡短。
-            warnings.append(f"第 {line['row']} 列「{line['label']}」在網頁庫存中已不存在")
+            #
+            # **股數本來就是 0 的列不出這句警告**（2026/09/04 使用者定案）：這句話
+            # 問的是「Excel 說你有 N 股、網頁卻沒有，是不是忘了刪這一列」，而股數
+            # 0 的列根本沒有這個矛盾——網頁本來就不該有它。出清賣光之後留在表上的
+            # 那一列（見上面 zero_missing）、以及人自己留著當觀察名單的空持股列，
+            # 都是這一種，每次更新都跳一次黃字警告＋帳戶掛 ⚠（見 ui_sync._summary）
+            # 只是在喊狼來了。提案照舊產出（missing=True，不會寫），只是不出警告。
+            if to_num(line["qty"], 0) != 0:
+                warnings.append(f"第 {line['row']} 列「{line['label']}」在網頁庫存中已不存在")
             for which, col, current in (("qty", COL_QTY, line["qty"]),
                                         ("cost", COL_COST, line["cost"])):
                 proposals.append(_row(line["row"], col, "holding", code, which,

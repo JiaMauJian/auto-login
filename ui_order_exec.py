@@ -168,6 +168,9 @@ class UiOrderExecMixin:
         # 借用更新分頁 cash_method 那顆 Var 算完這一輪要換回來的原值（見
         # _start_round_sync／_order_sync_finished）。None＝目前沒有借用中。
         self._round_sync_prev_method = None
+        # 上一輪委託佇列的指紋（見 _queue_signature）。多輪的「沒有進展就停」
+        # 那道保險靠它，None＝這一批還沒有跑過任何一輪。
+        self.order_exec_last_signature = None
 
     def start_order_execution(self):
         """
@@ -292,7 +295,7 @@ class UiOrderExecMixin:
             head = (
                 f"出清股票 零股 盤中（ROD-當日有效）\n"
                 f"即將依序處理 {len(queue_rows)} 筆零股「賣出」委託。\n\n"
-                f"全部掛完之後會等 {seconds} 秒，再取消掛單。\n"
+                f"全部掛完之後會等 {seconds} 秒，再取消掛單。\n\n"
             )
         elif self._order_intraday():
             head = (
@@ -305,24 +308,17 @@ class UiOrderExecMixin:
                 f"即將依序處理 {len(queue_rows)} 筆「{side_word}」委託。\n\n"
             )
 
+        # 勾了什麼就列一行，沒勾的完全不出現——不解釋那個選項會做什麼、也不解釋
+        # 沒勾會怎樣（2026/09/04 使用者定稿）。這兩個開關的實際行為（多輪之間跑
+        # 的是完整同步不是只重讀 Excel、跑滿 ORDER_MULTI_ROUND_CAP 輪一定停、
+        # auto_price 只決定重讀前要不要先觸發巨集）都還在，只是不寫進確認框：
+        # 那幾句是「按下去之後會發生什麼」的說明書，不是這一刻要做的決定。行為
+        # 本身見 _start_round_sync／_on_order_price_refresh 跟 docs/介面規劃.md 9.9。
         if multi_round:
+            head += "已勾選「多輪直到出清」\n"
             if auto_price:
-                price_note = "每一輪開始前會先觸發 Excel 的「更新股價」巨集、重讀最新股價。\n"
-            else:
-                price_note = ("沒勾「自動更新股價」：後面幾輪的追價基準價還是會重讀一次 Excel，"
-                              "但不會先觸發「更新股價」巨集，數字通常跟這一輪相同。\n")
-            # 這一段是 2026/09/03 才變成真的：在那之前多輪只重讀 Excel，而 E/F
-            # 只有更新分頁寫得到，所以持股永遠不變、同一批部位會被重複下單
-            # （見 _start_round_sync）。現在講的是實際會發生的事，不能再寫成
-            # 「自動重讀持股」——那句話會讓人以為程式只是看一眼。
-            head += (
-                f"已勾選「多輪直到出清」：這一輪的委託處理完之後，程式會自動對這幾位"
-                f"跑一次完整更新（查網頁 → 把現金、股數、成本寫回持股管理檔 → 落帳），"
-                f"再看還有沒有沒出清的部位，有就自動接下一輪，最多跑 "
-                f"{ORDER_MULTI_ROUND_CAP} 輪，跑滿還沒出清會停下來等你決定。\n"
-                f"{price_note}"
-                f"每一筆委託是否要停下來等你確認，規則不受影響。\n\n"
-            )
+                head += "已勾選「自動更新股價」\n"
+            head += "\n"
 
         if auto:
             tail = "「自動送出委託單」模式，確定嗎？"
@@ -353,6 +349,8 @@ class UiOrderExecMixin:
         # 凍結這一刻查到的即時委買賣（見 order_exec_quotes 開頭的說明：只給
         # 第 1 輪用，第 2 輪以後 _on_order_price_refresh 會清空）。
         self.order_exec_quotes = dict(self.order_quotes)
+        # 新的一批從頭開始比對「有沒有進展」，不能沿用上一批留下來的指紋。
+        self.order_exec_last_signature = None
         self.order_exec_active = True
         self._set_busy(True, "下單：準備第 1 輪…" if multi_round else "下單：準備第 1 筆…")
 
@@ -369,6 +367,9 @@ class UiOrderExecMixin:
             self.order_exec_queue = queue_rows
             self.order_exec_pos = 0
             self.order_exec_round = 1
+            # 沒勾自動更新股價時第 1 輪不走 _prepare_next_round，指紋要在這裡自己
+            # 記一次，否則第 2 輪沒有東西可以比、那道保險等於從第 3 輪才開始生效。
+            self.order_exec_last_signature = self._queue_signature(queue_rows)
             self._dispatch_next_order()
 
     def _order_round_sync_ready(self):
@@ -817,6 +818,42 @@ class UiOrderExecMixin:
             (selected, self.path, False),
         ))
 
+    @staticmethod
+    def _queue_signature(rows):
+        """
+        一輪委託佇列的指紋，給「沒有進展就停」那道保險比對用（見
+        _on_order_price_refresh）。
+
+        比的是**帳戶、股票、買賣別、數量**——也就是「這一輪要送出去的是不是同一
+        批東西」。價格刻意不算進去：追價每一輪都會查一次即時委買賣一，價格本來
+        就會跳，把它算進指紋的話兩輪永遠不會相等，這道保險就等於沒有。
+
+        排序過再比，不倚賴佇列順序（帳戶順序是報酬率排出來的，理論上穩定，但
+        不該讓一道安全機制去依賴那個假設）。
+        """
+        return tuple(sorted(
+            (row["sheet"], row["code"], row.get("side") or "", row["lots"])
+            for row in rows))
+
+    def _round_zero_missing(self):
+        """
+        這一趟 `planner.plan()` 要把哪幾檔「網頁上已經不見了」當成出清完成、歸零
+        寫回 Excel（見 planner.plan 的 zero_missing）。
+
+        **只有多輪出清那一輪的同步期間才是非空的**，判斷依據是
+        `order_exec_sync_busy`——那個旗標在 `_start_round_sync` 打開、
+        `_order_sync_finished` 關掉，本來就只涵蓋這一趟同步。不另外開一個新變數
+        記狀態：新變數萬一忘了清掉，更新分頁自己按「更新」時就會跟著歸零，
+        那正是使用者明確不要的行為（人手動賣掉、忘了刪 Excel 那一列，程式不該
+        自作主張清成 0）。
+
+        範圍也只到「這一輪凍結的那幾檔股票」為止。同一次同步順便讀到的其他股票
+        行為完全不變——程式沒動過它們，就沒有立場替它們下「已經賣光」的結論。
+        """
+        if not self.order_exec_sync_busy:
+            return ()
+        return {stock["code"] for stock in self.order_exec_stock_settings}
+
     def _order_sync_finished(self, ok, reason=""):
         """
         `_start_round_sync` 派出去那一輪同步的收尾，由 `ui_background._on_fetched`
@@ -1059,6 +1096,26 @@ class UiOrderExecMixin:
             else:
                 self._say(f"下單：跑了 {self.order_exec_round} 輪，已經全部出清。")
             return
+
+        # 沒有進展就停。這道保險跟「為什麼沒有進展」無關——2026/09/04 踩到的那次
+        # 是 planner 對「網頁已無此檔」刻意不歸零（見 planner.plan 的 zero_missing），
+        # 但任何讓持股沒跟著更新的原因，症狀都是這一輪算出來的委託跟上一輪一模
+        # 一樣，然後照著已經賣掉的部位再送一次，一路重複到輪數上限。根因修好了
+        # 這道還是要留：下一個沒想到的原因也會被它接住。
+        signature = self._queue_signature(queue_rows)
+        if signature == self.order_exec_last_signature:
+            self.order_exec_active = False
+            self._set_busy(False)
+            self._update_order_exec_ui()
+            self._say("下單：這一輪算出來的委託跟上一輪完全一樣，多輪出清已停止。")
+            show_warning(self.root,
+                "多輪出清沒有進展",
+                f"第 {self.order_exec_round + 1} 輪算出來的委託跟上一輪完全一樣"
+                f"（同帳戶、同股票、同數量），代表持股沒有跟著更新，"
+                f"再跑下去會把同一批部位重複送出去。已經停在這裡。\n\n"
+                f"請自己確認持股管理檔的股數是不是最新的，再決定要不要繼續。")
+            return
+        self.order_exec_last_signature = signature
 
         self.order_exec_round += 1
         self.order_exec_queue = queue_rows
