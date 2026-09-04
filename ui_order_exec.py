@@ -18,7 +18,7 @@ order_auto_confirm 決定（關＝停在那裡等人按，開＝程式自己按�
 一輪的委託送完之後，最多還有三段（都在這個檔案裡，一段接一段）：
 
     撤零股單  只有出清零股會走。零股沒有 IOC 可用，掛出去不會自己取消，所以
-              等 20 秒再把沒成交的撤掉（規劃文件流程第 2 步）。一個帳戶一則
+              等 6 秒再把沒成交的撤掉（規劃文件流程第 2 步）。一個帳戶一則
               指令，見 _dispatch_next_odd_cancel。
     完整同步  只有勾了多輪才走。查網頁 → 把現金、股數、成本寫回持股管理檔 →
               落帳，走的是更新分頁那一整條路，不是另外寫一份簡化版
@@ -52,14 +52,21 @@ from util import show
 # 但出問題也不會跑太久」的值，不是照文件或使用者指定的數字。
 ORDER_MULTI_ROUND_CAP = 10
 
-# 出清零股：全部掛完賣單之後等多久才回頭撤單（規劃文件「出清股票－零股」
-# 流程第 2 步明講 20 秒）。這是規格給的數字，不是這裡抓的——要改的話先回去
-# 改規劃文件，不要只改這一行。
+# 出清零股：全部掛完賣單之後等多久才回頭撤單。
+#
+# 規劃文件「出清股票－零股」流程第 2 步寫的是 20 秒，2026/09/04 使用者改成
+# **6 秒**：台股盤中零股是**每 5 秒集合競價撮合一次**，6 秒保證涵蓋至少一次
+# 撮合，多的 1 秒是緩衝。20 秒等於白等 3 次撮合週期——會成交的第一次撮合就
+# 成交了，不會的等再久也不會。
+#
+# 代價是每一輪只有一次撮合機會，沒撮到就撤掉：單輪模式下這一輪就結束了，
+# 勾了多輪則是下一輪重新查價再掛一次（而且價格是新的，比在市場上放著等更
+# 貼近當下）。要改回長一點的話連同這段理由一起改，不要只動數字。
 #
 # 為什麼零股要「掛了再撤」而不是像整張那樣用 IOC：零股那一場根本沒有 IOC
 # 可選（見 orders.BS_FLAG_ODD），只能用 ROD 掛出去，掛著不撤就會留在市場上
 # 過夜。
-ODD_CANCEL_WAIT_MS = 20000
+ODD_CANCEL_WAIT_MS = 6000
 
 
 class UiOrderExecMixin:
@@ -148,9 +155,9 @@ class UiOrderExecMixin:
         self.order_exec_job = orders.JOB_CLEAR
         self.order_exec_unit = orders.UNIT_LOT
 
-        # 出清零股「20 秒後取消全部零股單」那一段（規劃文件流程第 2 步）。
+        # 出清零股「掛完之後隔幾秒取消全部零股單」那一段（規劃文件流程第 2 步）。
         # 等待用 root.after 排一次，id 存起來是為了「停止」按得掉——不存的話
-        # 那顆計時器還是會在 20 秒後醒來，對著一個已經停掉的作業派出取消指令。
+        # 那顆計時器還是會在時間到的時候醒來，對著一個已經停掉的作業派出取消指令。
         self.order_exec_cancel_timer = None
         self.order_exec_cancel_queue = []   # [(第幾組, 帳號設定, 分頁名, 這一輪的股票代號)]
         self.order_exec_cancel_pos = 0
@@ -287,7 +294,7 @@ class UiOrderExecMixin:
             )
         elif self._order_clear_odd():
             # 零股跟整張最大的差別要寫在最前面：它不是 IOC，是「掛了再撤」，
-            # 而那個撤是程式 20 秒後自己做的（規劃文件流程第 1、2 步）。人按下
+            # 而那個撤是程式幾秒後自己做的（規劃文件流程第 1、2 步）。人按下
             # 去之前要知道「這批單會真的掛在市場上一段時間」。追價價格是凍結還是
             # 即時算那段說明 2026/09/03 拿掉了（使用者指定），跟取消掛單確認視窗
             # 同一個簡化方向。
@@ -447,7 +454,7 @@ class UiOrderExecMixin:
         watching = self.order_exec_watching
         price_busy = self.order_exec_price_busy
         sync_busy = self.order_exec_sync_busy
-        # 20 秒的撤單計時器一定要收掉：它不像背景執行緒那樣「醒來發現作業停了就
+        # 撤單計時器一定要收掉：它不像背景執行緒那樣「醒來發現作業停了就
         # 什麼都不做」，它醒來就會真的派出一整輪撤單指令。
         pending_cancel = self.order_exec_cancel_timer is not None
         if pending_cancel:
@@ -470,10 +477,10 @@ class UiOrderExecMixin:
         if watching:
             notes.append("瀏覽器裡那個委託確認視窗程式不再追蹤，請自己按「確認」或「取消」。")
         if pending_cancel:
-            # 這是停止零股出清最要緊的一句：委託已經掛在市場上了，而那個「20 秒
+            # 這是停止零股出清最要緊的一句：委託已經掛在市場上了，而那個「幾秒
             # 後自動撤掉」的承諾剛剛被取消掉。不講的話，人會以為停止＝什麼都沒
             # 發生，那批 ROD 賣單就這樣留到收盤。
-            notes.append("零股賣單還掛在市場上，20 秒後的自動撤單已經取消——"
+            notes.append("零股賣單還掛在市場上，之後的自動撤單已經取消——"
                          "請到「掛單」分頁自己取消。")
         if price_busy:
             notes.append("背景正在重讀 Excel／跑「更新股價」巨集，沒辦法中斷，"
@@ -564,7 +571,7 @@ class UiOrderExecMixin:
         這一輪的委託全部處理完了。接下來還有兩段，順序不能換：
 
         1. **出清零股要先撤單**（規劃文件「出清股票－零股」流程第 2 步）：零股
-           只能用 ROD（見 orders.BS_FLAG_ODD），掛出去不會自己取消，所以等 20 秒
+           只能用 ROD（見 orders.BS_FLAG_ODD），掛出去不會自己取消，所以等幾秒
            再把沒成交的撤掉。這一段跟有沒有勾多輪**無關**——單輪也要撤，不然那
            批單就一直留在市場上了。
         2. 勾了多輪才有的收尾：同步、判斷出清了沒、決定要不要再跑一輪（見
@@ -576,7 +583,7 @@ class UiOrderExecMixin:
         if not self.order_exec_active:
             # 使用者已經按過「停止」，只是最後那則回話晚一步才到（委託確認視窗
             # 的關閉偵測是背景輪詢的，見 ui_background._browser_worker）。這裡要
-            # 是照常往下走，就會替一個已經停掉的作業排出 20 秒撤單計時器——
+            # 是照常往下走，就會替一個已經停掉的作業排出撤單計時器——
             # 「停止」擋的正是這件事。
             return
         if self.order_exec_job == orders.JOB_CLEAR and self.order_exec_unit == orders.UNIT_ODD:
@@ -584,16 +591,16 @@ class UiOrderExecMixin:
             return
         self._after_round_actions()
 
-    # ---------- 出清零股：20 秒後撤掉沒成交的那幾筆 ----------
+    # ---------- 出清零股：等幾秒之後撤掉沒成交的那幾筆 ----------
 
     def _start_odd_cancel_wait(self):
         """
         零股全部掛完了，等 ODD_CANCEL_WAIT_MS 再撤（規劃文件流程第 2 步）。
 
-        用 root.after 而不是背景執行緒 sleep：這 20 秒裡主執行緒要照常回應（尤其
+        用 root.after 而不是背景執行緒 sleep：這段等待裡主執行緒要照常回應（尤其
         是底部那顆「停止全部操作」），而醒來之後要做的事（派指令、改狀態列）本來
         就只能在主執行緒上做。計時器 id 存起來是為了停止時取消得掉——不存的話它
-        還是會在 20 秒後醒來，對著一個已經停掉的作業派出一整輪撤單。
+        還是會在時間到的時候醒來，對著一個已經停掉的作業派出一整輪撤單。
         """
         seconds = ODD_CANCEL_WAIT_MS // 1000
         self._say(f"下單：零股已經全部掛出去，{seconds} 秒後自動取消沒成交的部分…")
@@ -602,7 +609,7 @@ class UiOrderExecMixin:
             ODD_CANCEL_WAIT_MS, self._start_odd_cancel)
 
     def _start_odd_cancel(self):
-        """20 秒到了：把這一輪掛出去的零股賣單整批撤掉，一個帳戶一則指令。"""
+        """時間到了：把這一輪掛出去的零股賣單整批撤掉，一個帳戶一則指令。"""
         self.order_exec_cancel_timer = None
         if not self.order_exec_active:
             return
@@ -1127,7 +1134,7 @@ class UiOrderExecMixin:
     def _update_order_exec_ui(self):
         # 「queue 是空的，但整批作業還在跑」現在有四種（見 order_exec_active 的
         # 說明），每一種都要讓「停止」維持可以按，而且要講得出卡在哪一段——都寫
-        # 「處理中…」的話，20 秒的等待跟一次幾分鐘的同步在畫面上長得一模一樣，
+        # 「處理中…」的話，撤單前的等待跟一次幾分鐘的同步在畫面上長得一模一樣，
         # 人會以為當掉了。順序就是它們實際發生的順序。
         seconds = ODD_CANCEL_WAIT_MS // 1000
         cancelling = (self.order_exec_cancel_queue
