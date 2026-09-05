@@ -425,8 +425,10 @@ class UiPendingMixin:
         self._fill_pending()
 
         problems = payload.get("problems") or []
-        open_count = sum(1 for row in self.pending_rows if row["open"])
-        self._say(f"掛單：{open_count} 筆還掛在外面。"
+        open_rows = [row for row in self.pending_rows if row["open"]]
+        buy_count = sum(1 for row in open_rows if row["side"] == "B")
+        sell_count = sum(1 for row in open_rows if row["side"] == "S")
+        self._say(f"掛單：{buy_count} 筆買單，{sell_count} 筆賣單。"
                   + (f"　{len(problems)} 個帳戶查不到。" if problems else ""))
         if problems:
             show_warning(self.root, "有帳戶查不到",
