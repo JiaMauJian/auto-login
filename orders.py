@@ -193,6 +193,61 @@ def lots_from_weight(held_qty, weight_pct):
     return int(lots)
 
 
+# 執行預覽「出清進度」欄用的符號（docs/介面規劃.md 9.10）。只有
+# 出清股票（JOB_CLEAR）這個作業有這一欄——買賣股票／全持股交易的量不是從
+# 「清掉一段持股」算出來的，沒有分母可言，見 progress_text 的 PROGRESS_NONE。
+PROGRESS_CELLS = 5
+PROGRESS_DONE = "█"
+PROGRESS_SENT = "▒"
+PROGRESS_TODO = "░"
+PROGRESS_NONE = "－"
+
+
+def clearable_qty(held_qty, unit):
+    """
+    出清進度欄的分母：這一批開始時「這個作業要清掉的那一段」，不是全部
+    持股。整張只算得到整張的部分（split_lots(held_qty)[0]，換算成股數）——
+    剩下不到 1 張的零股不是這個作業會動的東西；零股就是 split_lots 的零股
+    那一段。回傳一律是正數股數，跟方向（買/賣）無關。
+    """
+    lots, odd = split_lots(held_qty)
+    return abs(lots) * SHARES_PER_LOT if unit == UNIT_LOT else abs(odd)
+
+
+def progress_text(base_qty, now_qty, sent_qty=0):
+    """
+    出清進度欄要顯示的字串，例如 "███▒░ 62%"。
+
+    base_qty <= 0 代表這一批開始時本來就沒有這一段可以清，任何百分比都是
+    騙人的，回傳 PROGRESS_NONE。
+
+    百分比只算「已經確認出清」的部分（done = base_qty - now_qty），刻意不把
+    sent_qty 算進成果——真帳號拿不到成交量（IOC 可能整筆零成交、零股可能沒
+    撮到就被撤掉），把「送出去」當「已出清」是謊報，下一輪重讀持股會自己
+    修正這個數字。sent_qty 只影響「▒」要不要出現，出現的話至少給一格，
+    格數不必跟比例精確對應——它的作用只是讓人看到有東西在路上。
+
+    done_cells 用 floor 除法算，done < base_qty 時代數上保證算不到
+    PROGRESS_CELLS 整格——差一股就顯示 100% 比少顯示一個百分點更容易被
+    忽略，所以沒清完就不給滿格。
+    """
+    if base_qty <= 0:
+        return PROGRESS_NONE
+
+    done = max(0, min(base_qty, base_qty - now_qty))
+    pct = done * 100 // base_qty
+    done_cells = done * PROGRESS_CELLS // base_qty
+
+    remaining = PROGRESS_CELLS - done_cells
+    sent_cells = 0
+    if sent_qty > 0 and remaining > 0:
+        sent_cells = max(1, min(remaining, sent_qty * PROGRESS_CELLS // base_qty))
+    todo_cells = remaining - sent_cells
+
+    bar = PROGRESS_DONE * done_cells + PROGRESS_SENT * sent_cells + PROGRESS_TODO * todo_cells
+    return f"{bar} {pct}%"
+
+
 def order_accounts(accounts):
     """
     依今年報酬率（Excel B22）由低到高排序。
@@ -265,6 +320,7 @@ def plan_stock_orders(stock_settings, ordered_accounts, holdings, side):
                 "name": stock["name"],
                 "side": side,
                 "held_qty": held_qty,
+                "clearing": True,
                 "lots": lots,
                 "price": stock["price"],
                 "skip": held_qty == 0 or lots <= 0,
@@ -341,6 +397,7 @@ def plan_intraday_orders(stock_settings, ordered_accounts, holdings, ticks_down,
                 # IOC，見 BS_FLAG_ODD），拿委託別當判準會把它漏掉。
                 "chase": True,
                 "held_qty": held_qty,
+                "clearing": True,
                 "lots": lots,
                 "price": price,
                 "skip": held_qty == 0 or lots <= 0,
@@ -415,6 +472,7 @@ def plan_clear_odd_orders(stock_settings, ordered_accounts, holdings, ticks_down
                 # ——它是 ROD，跟盤前出清、買賣股票同一個值。
                 "chase": True,
                 "held_qty": held_qty,
+                "clearing": True,
                 "lots": qty,
                 "price": price,
                 "skip": qty == 0,

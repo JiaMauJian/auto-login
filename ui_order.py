@@ -56,6 +56,10 @@ class UiOrderMixin:
         """SyncApp.__init__ 呼叫一次。"""
         self.order_rows = []              # 這一輪加進來的股票設定列（見 add_order_stock）
         self.order_holdings = {}          # (分頁名, 股票代號) -> 股數，按「讀取試算」才會更新
+        # (分頁名, 股票代號) -> Treeview iid，_render_order_preview 每次重畫都會
+        # 整份重建；出清進度那一欄靠這份對照單格更新（見 ui_order_exec.
+        # _refresh_order_progress_cells），不必為了刷新「▒」重畫整張表。
+        self.order_preview_iid = {}
         # 「指定股票」下拉的候選是兩份資料併起來的（見 _rebuild_order_names）：
         # order_stock_catalog 是「讀取ＯＯ持股」讀回來的第一個分頁 D4~D13——
         # 跟勾了誰無關，2026/09/02 起這顆按鈕搬到左邊「執行帳戶」，一開檔就
@@ -1395,6 +1399,20 @@ class UiOrderMixin:
         """
         for item in self.order_preview.get_children():
             self.order_preview.delete(item)
+        self.order_preview_iid = {}
+
+        # 「出清進度」欄只有出清股票這個作業才有意義（見 orders.PROGRESS_NONE
+        # 的說明），問 preview 每一列自己帶的 "clearing"（三支 plan_* 只有出清
+        # 那三支會標）而不是直接問 self.order_job：多輪出清重畫「下一輪還剩
+        # 什麼」時（見 _on_order_price_refresh）只有 preview 拿得到，畫面上的
+        # order_job 隨時可能已經被切到別的作業。preview 是空的（沒有帳戶、還
+        # 沒選股票）就沒有列可以問，退回問 order_job。
+        showing_progress = (any(item.get("clearing") for item in preview) if preview
+                            else self.order_job.get() == orders.JOB_CLEAR)
+        base_columns = self.order_preview_columns
+        self.order_preview["displaycolumns"] = (
+            base_columns if showing_progress
+            else tuple(key for key in base_columns if key != "progress"))
 
         side_names = {"B": "買", "S": "賣"}
         for item in preview:
@@ -1419,21 +1437,49 @@ class UiOrderMixin:
                 price_text = item["price"]
             else:
                 price_text = show(item["price"])
+
+            if item.get("clearing"):
+                unit = item.get("unit", orders.UNIT_LOT)
+                # 基準拿凍結好的快照（_snapshot_order_base_qty），但只在「這一批
+                # 還在跑」的時候信它（order_exec_active）——這支同時被兩條路呼叫：
+                # 多輪重讀時（_on_order_price_refresh）呼叫這裡的時候 active 保證
+                # 是真的（那支開頭就會在 active 是假的時候提早 return）；使用者
+                # 還沒按「開始下單」、單純在調整設定的那條路（_recompute_order_
+                # preview）active 是假的，這時候即使上一批（可能是別的單位／別的
+                # 持股水位）留下的快照剛好對得到同一個 (帳戶,股票)，也不能拿來用
+                # ——那是上一批的分母，不是這一批的。停止之後要「留著讓人看最後
+                # 結果」是 _refresh_order_progress_cells 單格更新在做的事，不靠
+                # 這裡的 fallback，所以這裡收斂成只問 active 不會漏掉那個需求。
+                base_qty = (self.order_exec_base_qty.get((item["sheet"], item["code"]))
+                           if self.order_exec_active else None)
+                if base_qty is None:
+                    # 還沒開始執行（或快照跟這一批對不上）→ 用這一列當下的量當
+                    # 基準，分子減分母是 0，畫出來是「條全空 0%」，不是「－」，
+                    # 因為這一段真的有東西可以清，只是還沒開始清。
+                    base_qty = orders.clearable_qty(item["held_qty"], unit)
+                now_qty = orders.clearable_qty(item["held_qty"], unit)
+                sent_qty = self._order_sent_qty(item["sheet"], item["code"])
+                progress_cell = orders.progress_text(base_qty, now_qty, sent_qty)
+            else:
+                progress_cell = ""
+
             # 順序要跟 ui_layout._build_order_preview 的 columns 一模一樣：
-            # 順序／帳戶／買賣／股票／張數／價格／持股／備註。Treeview 是照位置
-            # 對欄位的，換了順序卻沒改這裡不會報錯，只是每一欄顯示別欄的值。
+            # 順序／帳戶／買賣／股票／張數／價格／持股／出清進度／備註。
+            # Treeview 是照位置對欄位的，換了順序卻沒改這裡不會報錯，只是每一
+            # 欄顯示別欄的值。
             #
             # 「張數」欄：買賣股票選零股時要把「另有幾張沒送」寫出來（9.4），
             # 選整張只顯示張數；其他作業沒有這個問題，就是一個數字（沒有
             # lots_text 就退回 lots）。持股最小單位是 1 股，不需要小數點；股數
             # 本來就可能上看百萬，千分位才看得出位數（util.show 是全專案統一
             # 用的數字顯示格式）。
-            self.order_preview.insert("", "end", values=(
+            iid = self.order_preview.insert("", "end", values=(
                 item["order"], item["sheet"], side_names.get(item["side"], item["side"]),
                 f"{item['code']} {item['name']}",
                 item.get("lots_text") or item["lots"], price_text, show(item["held_qty"]),
-                item["note"],
+                progress_cell, item["note"],
             ), tags=(tag,) if tag else ())
+            self.order_preview_iid[(item["sheet"], item["code"])] = iid
 
         self.order_preview_hint.configure(text="　".join(hints))
 

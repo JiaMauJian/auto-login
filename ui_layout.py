@@ -1169,13 +1169,21 @@ class UiLayoutMixin:
         # 使用者指定）。改這一行的話 ui_order._render_order_preview 那個 values
         # tuple 要跟著換順序——Treeview 是照位置對欄位的，錯了不會報錯，只是每一
         # 欄顯示別欄的值。
-        columns = ("order", "sheet", "side", "stock", "lots", "price", "held", "note")
+        # "progress"（出清進度）夾在 held 與 note 之間——它跟 held 一樣屬於「為
+        # 什麼是這樣」那一區，且只有出清股票才有意義（見 orders.PROGRESS_NONE），
+        # 放在 note 前面讓 ui_order.py 用 displaycolumns 切掉它時不影響 note
+        # 的相對位置。
+        columns = ("order", "sheet", "side", "stock", "lots", "price", "held", "progress", "note")
+        # 給 ui_order.py 的 displaycolumns 切換用：出清作業要看到 "progress"、
+        # 其他作業要切掉它，兩邊都要照同一份順序切，不能各自寫一份欄位清單。
+        self.order_preview_columns = columns
         # 「張數」那一欄的欄名跟著單位換（張數／股數，見
         # orders.UNIT_COLUMN_TITLES）——欄位鍵一直是 "lots"，只有顯示的字會換，
         # 換的地方在 ui_order._recompute_order_preview。這裡填的是開機那一次的
         # 預設值（開機一定是整張）。
         titles = {"order": "順序", "sheet": "帳戶", "side": "買賣", "stock": "股票", "held": "持股",
-                 "lots": orders.UNIT_COLUMN_TITLES[orders.UNIT_LOT], "price": "價格", "note": "備註"}
+                 "lots": orders.UNIT_COLUMN_TITLES[orders.UNIT_LOT], "price": "價格",
+                 "progress": "出清進度", "note": "備註"}
         # 窄欄位（順序／買賣／持股／張數）都是短數字或單一個字，內容範圍本來
         # 就小，壓小一點沒關係。held 加了千分位逗號，可能到「1,234,567」這種
         # 長度，壓太窄反而看不到完整數字（Treeview 超出欄寬不會換行也不會
@@ -1205,9 +1213,13 @@ class UiLayoutMixin:
                 beyond=orders.CHASE_WORDS[orders.SIDE_BUY]["beyond"], price="9,999.99"),
         ]
         price_candidates = [PRICE_PENDING_TEXT, "9,999.99"]
+        # 出清進度欄寬用真的吐得出來的字串量，不要另外寫死一個
+        # "█████ 100%"——progress_text(1000, 0, 0) 就是「清完」那種最寬的
+        # 情況（滿格＋三位數百分比），量出來的寬度自然涵蓋所有更短的中間狀態。
         wide_cols = {
             "note": col_width(self.family, note_candidates, minimum=wide(160)),
             "price": col_width(self.family, price_candidates, minimum=wide(70)),
+            "progress": col_width(self.family, [orders.progress_text(1000, 0, 0)], minimum=wide(90)),
         }
         # 「股票」「帳戶」欄的候選內容要等讀到股票清單／帳戶名單才知道，
         # 這裡先用預設寬度墊著，讀到資料後由 ui_order.py
@@ -1215,7 +1227,7 @@ class UiLayoutMixin:
         self.order_preview = ttk.Treeview(preview, columns=columns, show="headings", height=10)
         for key in columns:
             self.order_preview.heading(key, text=titles[key])
-            centered = key in ("order", "side", "held", "lots", "price")
+            centered = key in ("order", "side", "held", "lots", "price", "progress")
             self.order_preview.column(key, width=wide_cols.get(key, wide(narrow.get(key, 90))),
                                       anchor="center" if centered else "w",
                                       stretch=(key == "note"))

@@ -169,6 +169,12 @@ class UiOrderExecMixin:
         self.order_exec_job = orders.JOB_CLEAR
         self.order_exec_unit = orders.UNIT_LOT
 
+        # 出清進度那一欄的分母快照（docs/介面規劃.md 9.10）：
+        # (分頁名, 股票代號) -> 這一批開始時要清掉的那一段股數
+        # （orders.clearable_qty），只有出清作業會填（見 _snapshot_order_base_qty）。
+        # 新的一批 start 時整份覆蓋掉舊的；「停止」不清，留著讓人看最後結果。
+        self.order_exec_base_qty = {}
+
         # 出清零股「掛完之後隔幾秒取消全部零股單」那一段（規劃文件流程第 2 步）。
         # 等待用 root.after 排一次，id 存起來是為了「停止」按得掉——不存的話
         # 那顆計時器還是會在時間到的時候醒來，對著一個已經停掉的作業派出取消指令。
@@ -440,6 +446,10 @@ class UiOrderExecMixin:
             # 沒勾多輪就只有這一輪，沒有下一輪可以比，指紋其實用不到；還是記一次，
             # 讓 order_exec_last_signature 不管走哪條路都對得上目前這一輪。
             self.order_exec_last_signature = self._queue_signature(queue_rows)
+            # 出清進度的分母就在這一刻拍照：queue_rows 是這一批要送出去的最終
+            # 版本，這之後 self.order_holdings 只會因為委託成交而變小，不會再
+            # 被別的操作動到（見 _snapshot_order_base_qty）。
+            self._snapshot_order_base_qty()
             self._dispatch_next_order()
 
     def _order_round_sync_ready(self):
@@ -957,6 +967,76 @@ class UiOrderExecMixin:
             (row["sheet"], row["code"], row.get("side") or "", row["lots"])
             for row in rows))
 
+    def _snapshot_order_base_qty(self):
+        """
+        出清進度欄的分母快照（docs/介面規劃.md 9.10）：
+        (分頁名, 股票代號) -> 這一批開始時要清掉的那一段股數（orders.
+        clearable_qty），呼叫端要在「這一批要清的東西還沒被程式動過」的最後
+        一刻拍照——沒勾多輪在 start_order_execution 凍結 queue_rows 那一刻，
+        勾了多輪則在 round 0 更新完 order_holdings、算 preview 之前（見那兩處
+        呼叫端自己的說明）。
+
+        只有出清作業（JOB_CLEAR）需要這張表，非出清作業直接清空——執行預覽
+        那一欄本來就不會顯示（見 ui_order._render_order_preview 的
+        displaycolumns），這裡清空是為了不讓上一批出清作業留下的分母被下一批
+        不相干的作業拿去用。
+
+        新的一批 start 時整份覆蓋掉舊的（不是累加）；按「停止」不清，留著讓人
+        看最後結果。
+        """
+        if self.order_exec_job != orders.JOB_CLEAR:
+            self.order_exec_base_qty = {}
+            return
+        unit = self.order_exec_unit
+        self.order_exec_base_qty = {
+            (account["sheet"], stock["code"]): orders.clearable_qty(
+                self.order_holdings.get((account["sheet"], stock["code"]), 0) or 0, unit)
+            for account in self.order_exec_accounts
+            for stock in self.order_exec_stock_settings
+        }
+
+    def _order_sent_qty(self, sheet, code):
+        """
+        出清進度欄「▒」那一段：這一輪 queue 裡已經送出去、但還不知道成交沒的
+        量，換算成股數。
+
+        只算 index < order_exec_pos 那幾筆——_on_order_dialog_closed 要等委託
+        確認視窗真的關了才會把 order_exec_pos 往前推一格，所以正在等視窗的
+        那一筆（可能人還沒按確認，甚至還沒送出）不算已送出，這是對的：把它
+        算進去會在委託根本還沒送出的時候就顯示「有東西在路上」。
+        """
+        total = 0
+        for row in self.order_exec_queue[:self.order_exec_pos]:
+            if row["sheet"] == sheet and row["code"] == code:
+                unit = row.get("unit", orders.UNIT_LOT)
+                total += row["lots"] * orders.SHARES_PER_LOT if unit == orders.UNIT_LOT else row["lots"]
+        return total
+
+    def _refresh_order_progress_cells(self):
+        """
+        出清進度欄的即時刷新，只更新單格（`Treeview.set`），不重畫整張表——
+        表格結構（哪些帳戶／股票、有沒有這一列）在一輪裡不會變，變的只有
+        「清了多少」跟「送出去多少」。
+
+        呼叫端 `_update_order_exec_ui` 要在**最前面**呼叫這支，所有 early
+        return 之前——那支有好幾個分支中途就 return（等撤單、等同步、queue
+        空了），放在後面的話「▒」在撤單等待、輪與輪之間同步那幾段就不會更新，
+        `order_exec_pos` 歸零之後（新一輪開始）也不會跟著消掉。
+
+        只有出清作業會有東西可刷：非出清作業 `order_exec_base_qty` 是空字典，
+        迴圈自然不做事（進度欄也沒有顯示，見 displaycolumns）。
+        """
+        if self.order_exec_job != orders.JOB_CLEAR:
+            return
+        unit = self.order_exec_unit
+        for (sheet, code), iid in self.order_preview_iid.items():
+            base_qty = self.order_exec_base_qty.get((sheet, code))
+            if base_qty is None or not self.order_preview.exists(iid):
+                continue
+            now_qty = orders.clearable_qty(self.order_holdings.get((sheet, code), 0) or 0, unit)
+            sent_qty = self._order_sent_qty(sheet, code)
+            self.order_preview.set(iid, "progress", orders.progress_text(base_qty, now_qty, sent_qty))
+
     def _round_zero_missing(self):
         """
         這一趟 `planner.plan()` 要把哪幾檔「網頁上已經不見了」當成出清完成、歸零
@@ -1158,6 +1238,15 @@ class UiOrderExecMixin:
             for code in codes_this_round - {r["code"] for r in data["rows"]}:
                 self.order_holdings[(name, code)] = 0
 
+        if self.order_exec_round == 0:
+            # 出清進度分母的另一個拍照點（沒勾多輪那一個在 start_order_execution）：
+            # 第 1 輪之前的同步剛把 order_holdings 更新成網頁最新的持股，這是
+            # 「這一批要清的東西還沒被程式動過」的最後一刻——比按下「開始下單」
+            # 那一刻早拍會把使用者自己先賣掉的部分也算進程式的功勞，比這裡晚拍
+            # （例如等第 1 輪送完）又會漏算第 1 輪清掉的那一段（見
+            # docs/介面規劃.md 9.10）。
+            self._snapshot_order_base_qty()
+
         # I 欄跟 D 欄同一列對應同一檔股票（見 excel_io.py 開頭說明），這裡把
         # 讀到的股價彙整成 代號->價格，哪個帳戶先讀到就先用哪個——同一檔
         # 股票的市價理論上不會因為帳戶不同而不同，這裡不刻意比對多個帳戶
@@ -1297,6 +1386,12 @@ class UiOrderExecMixin:
         self._dispatch_next_order()
 
     def _update_order_exec_ui(self):
+        # 出清進度那一欄要放在最前面刷新，不能放在任何一個 early return 之後
+        # ——這支下面有好幾個分支中途就 return（等撤單、等同步、queue 空了），
+        # 放後面的話「▒」在那幾段就不會更新，pos 歸零後也不會跟著消掉（見
+        # _refresh_order_progress_cells 的說明）。
+        self._refresh_order_progress_cells()
+
         # 「queue 是空的，但整批作業還在跑」現在有四種（見 order_exec_active 的
         # 說明），每一種都要讓「停止」維持可以按，而且要講得出卡在哪一段——都寫
         # 「處理中…」的話，撤單前的等待跟一次幾分鐘的同步在畫面上長得一模一樣，
