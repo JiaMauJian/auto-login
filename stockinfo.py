@@ -48,13 +48,28 @@ GetStockInfo_摘要.txt）。
 （順帶一提 `.O` 是外層自己認的，不是內層：`stockId=2330.O` 直接打內層回 0 筆，
 只有經過外層的 `dataObj` 才有效，而且認得很死——小寫 `.o`、尾巴多一個逗號都
 是 0 筆。所以下面組 `dataObj` 的時候不要「順手」改大小寫或補分隔符。）
+
+## SSL 憑證驗證用 certifi，不吃系統憑證存放區
+
+2026/09/05 遇過使用者電腦跳 `CERTIFICATE_VERIFY_FAILED: Missing Subject Key
+Identifier`——那台機器的 Windows 憑證存放區裡快取的 TWCA 憑證鏈是舊版，跟這支
+程式無關，換一台憑證有更新過的機器就正常。`urllib` 預設會去讀執行機器自己的
+系統憑證存放區，等於每台使用者電腦有沒有更新過都會影響查得到查不到。改成指定
+`certifi`（隨套件版本走、跟著 pip 更新）的憑證包，不管送到哪台電腦跑都用同一份
+驗證，不用去猜對方的 Windows 更新到哪。打包成 exe 記得 `tbb-login.spec` 要用
+`collect_all('certifi')` 把 `cacert.pem` 一起包進去，PyInstaller 沒有內建
+certifi 的 hook，純 `import certifi` 抓不到那個資料檔。
 """
 
 import json
+import ssl
 import urllib.parse
 import urllib.request
 
+import certifi
+
 _URL = "https://www.tbbstock.com.tw/tbb/GetStockInfo"
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 # 外層要轉發去的內層網址。`stockId=` 本來就是空的，真正的代號是外層的 dataObj
 # 帶的——這是網站自己頁面在用的形狀，不是我們拼出來的，不要「順手」把代號填
@@ -86,7 +101,7 @@ def quote(code, odd=False, timeout=10):
     data_obj = f"{code}.O" if odd else code
     url = _URL + "?" + urllib.parse.urlencode({"aURL": _INNER, "dataObj": data_obj})
     req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
         rows = json.loads(resp.read().decode("utf-8", "ignore"))
 
     if not rows:
