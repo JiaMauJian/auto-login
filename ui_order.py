@@ -208,7 +208,9 @@ class UiOrderMixin:
             return
         self.order_stock_list_busy = True
         self._apply_busy_state()
-        self.order_status.configure(text="讀取中…")
+        # foreground 要跟著重設：上一次讀到「沒有股票代號」會把它染紅，
+        # ttk.Label 只換 text 不會自動把顏色還原，不然這句「讀取中…」會跟著紅字。
+        self.order_status.configure(text="讀取中…", foreground="")
         threading.Thread(target=self._order_stock_list_worker,
                          args=(self.path,), daemon=True).start()
 
@@ -238,7 +240,7 @@ class UiOrderMixin:
         self._apply_busy_state()
 
         if "error" in payload:
-            self.order_status.configure(text="讀取失敗")
+            self.order_status.configure(text="讀取失敗", foreground=self.colors.danger)
             show_error(self.root, "讀取失敗", payload["error"])
             return
 
@@ -247,13 +249,21 @@ class UiOrderMixin:
         self._update_order_stock_list_button()
         self._rebuild_order_names()
 
+        # 「讀得到分頁但抓不到股票代號」跟「連分頁都沒有」都是讀不到——用紅字
+        # 跟正常結果分開，不然這句話混在一堆黑字裡容易被滑過去（2026/09/05
+        # 使用者要求）。跟 ui_sync 負現金、warn_box 的 err 標籤同一個顏色
+        # （self.colors.danger），成功的那一支要記得把顏色改回預設（""）——
+        # ttk.Label 的 foreground 不會因為換了 text 就自己還原。
         if payload["sheet_name"] is None:
             done = "沒有看得見的分頁，讀不到股票清單。"
+            color = self.colors.danger
         elif not payload["stocks"]:
             done = f"已讀取「{payload['sheet_name']}」，D4~D13 沒有股票代號。"
+            color = self.colors.danger
         else:
             done = f"已讀取「{payload['sheet_name']}」的持股清單（{len(payload['stocks'])} 檔）。"
-        self.order_status.configure(text=done)
+            color = ""
+        self.order_status.configure(text=done, foreground=color)
         self._recompute_order_preview()
 
     # ---------- 讀取試算（勾選那幾位的持股／股價／下單試算） ----------
@@ -301,7 +311,11 @@ class UiOrderMixin:
         read_plan = self.order_job.get() == orders.JOB_TRADE
         self.order_busy = True
         self._apply_busy_state()
-        self.order_status.configure(text="更新股價、讀取中…" if run_macro else "讀取中…")
+        # foreground 重設理由同 refresh_order_stock_list：這顆標籤跟「讀取ＯＯ
+        # 持股」共用，上一次若讀到「沒有股票代號」會把它染紅，換一種讀取不重設
+        # 顏色會沿用下去。
+        self.order_status.configure(text="更新股價、讀取中…" if run_macro else "讀取中…",
+                                    foreground="")
         threading.Thread(target=self._order_plans_worker,
                          args=(self.path, names, run_macro, read_plan), daemon=True).start()
 
