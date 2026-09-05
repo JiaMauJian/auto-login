@@ -336,15 +336,27 @@ def list_account_sheets(book):
 
 def first_visible_sheet(book):
     """
-    活頁簿由左到右第一個看得見的分頁（xlSheetVisible），藏起來的不算。找不到
-    （全部都藏起來）回 None。
+    活頁簿由左到右第一個「看得見、而且不是範本／測試用分頁」的分頁
+    （xlSheetVisible，且名字不在 EXCLUDED_ACCOUNT_SHEET_NAMES 裡）。藏起來的、
+    或名字剛好是範本頁的都不算；找不到（全部都藏起來，或活頁簿裡只有範本頁）
+    回 None。
+
+    2026/09/05 補上排除判斷：「虛擬帳戶」範本頁習慣放在活頁簿最前面（就是
+    因為它是範本才會放第一個），改之前這裡只看 Visible，會把它當成「第一個
+    分頁」讀出它的 D4~D13 當股票候選——範本頁不是真的持股，讀到的要嘛是空的
+    要嘛是舊的示範資料，「指定股票」下拉因此看不到任何一位真交易人手上實際
+    持有的股票（表現成「讀取ＯＯ持股」讀得到分頁卻抓不到股票代號）。跟
+    list_account_sheets 用同一份排除清單，兩邊對「哪些分頁不算數」的認定才不會
+    兜不起來。
 
     獨立成一支是因為下單分頁「讀取ＯＯ持股」那顆按鈕要在畫面上講出這個分頁
     的名字（見 ui_order.refresh_order_stock_list），不能只跟 read_stock_list
     要一份沒有名字的股票清單。用 `for ... in book.Worksheets` 取，不用
     `book.Worksheets(1)`——理由同 read_stock_list 那段說明。
     """
-    return next((s for s in book.Worksheets if s.Visible == -1), None)
+    return next((s for s in book.Worksheets
+                 if s.Visible == -1 and s.Name.strip() not in EXCLUDED_ACCOUNT_SHEET_NAMES),
+                None)
 
 
 def read_stock_list(book):
