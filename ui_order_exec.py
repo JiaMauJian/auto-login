@@ -626,8 +626,11 @@ class UiOrderExecMixin:
         if auto_result:
             self._say(f"下單：{row['sheet']} {row['code']} 已自動送出，結果：{auto_result['message']}")
         else:
+            # 紅字（見 ui_background._say）：這句是在叫人去瀏覽器動作，不是
+            # 單純報告進度，2026/09/05 使用者要求跟其他黑字狀態分開。
             self._say(f"下單：{row['sheet']} {row['code']} 委託確認視窗已開啟，"
-                      f"請到瀏覽器裡確認或取消。視窗關閉後「下一筆」才會亮起來。")
+                      f"請到瀏覽器裡確認或取消。視窗關閉後「下一筆」才會亮起來。",
+                      danger=True)
 
     def _on_order_dialog_closed(self, _payload):
         """
@@ -1391,6 +1394,11 @@ class UiOrderExecMixin:
         # 放後面的話「▒」在那幾段就不會更新，pos 歸零後也不會跟著消掉（見
         # _refresh_order_progress_cells 的說明）。
         self._refresh_order_progress_cells()
+        # 設定面板的鎖（作業／單位／時機／追價檔數／股票清單，見 _order_locked）
+        # 同一個理由放在最前面：order_exec_queue 是不是空的，這支下面每一個
+        # early return 分支都算數（等撤單、等瀏覽器委託確認視窗、輪與輪之間
+        # 同步……），不能只在跑到最後才鎖。
+        self._order_excel_buttons()
 
         # 「queue 是空的，但整批作業還在跑」現在有四種（見 order_exec_active 的
         # 說明），每一種都要讓「停止」維持可以按，而且要講得出卡在哪一段——都寫

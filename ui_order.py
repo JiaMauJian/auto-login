@@ -498,9 +498,24 @@ class UiOrderMixin:
 
     def _order_locked(self):
         """
-        現在能不能改帳戶的勾選。有任何一條路在動那份活頁簿（_excel_in_use）、
-        或這一輪委託還沒跑完（order_exec_queue）都不行——理由見
-        _order_excel_buttons 與 _on_order_account_toggled。
+        現在能不能改下單分頁裡「這一輪要做什麼」的設定——帳戶勾選、作業／
+        單位／時機／追價檔數、股票清單（新增／移除／比重／價格）全部算在內。
+        有任何一條路在動那份活頁簿（_excel_in_use）、或這一輪委託還沒跑完
+        （order_exec_queue）都不行——理由見 _order_excel_buttons 與
+        _on_order_account_toggled。
+
+        2026/09/05 之前只有帳戶清單真的擋在這顆之後：作業／單位這幾個單選鈕
+        改用 self.busy 自己擋（切下去彈窗還原，見 _on_order_job_changed／
+        _on_order_mode_changed），「新增」「移除」跟比重/價格輸入框完全沒擋。
+        self.busy 在依序執行整批期間（包含等瀏覽器委託確認視窗那段）一直是
+        True，理論上已經擋住大半，但那幾顆按鍵沒有跟著變灰，人看不出來
+        「按了為什麼沒用」；而「新增」「移除」一按下去會直接改掉
+        self.order_rows、重畫執行預覽那張表——跟正在跑的那批凍結資料
+        （order_exec_queue／order_exec_stock_settings）對不上，畫面看起來像
+        「跑到一半自己變了」（不影響實際送出去的委託，那批資料本來就是
+        開始下單那一刻就凍結、跟畫面分開的，只是很嚇人）。所以除了灰掉
+        帳戶清單，這顆現在也用來鎖住其餘那幾處，統一由 _order_excel_buttons
+        套用。
         """
         return self._excel_in_use() or bool(self.order_exec_queue)
 
@@ -765,6 +780,11 @@ class UiOrderMixin:
           盤中、出清零股兩種），所以問的是 _order_uses_excel_price，不是時機
           本身。盤前的價格是人一格一格填的，追不追價無從談起。「自動更新股價」
           再多一層：沒勾多輪它不會發生（見 _on_order_multi_round_changed）。
+
+        第三條是後來加的：**依序執行整批期間（見 _order_locked）「時機」跟
+        「追價檔數」也要跟著灰**，理由跟 _order_locked 說明的一樣——這兩個
+        不是各自獨立再擋一次，是跟前兩條規則的結果疊起來（`or locked`），
+        不會互相蓋掉。
         """
         odd = self._order_clear_odd()
         if odd and self.order_mode.get() != "intraday":
@@ -773,11 +793,12 @@ class UiOrderMixin:
             # 的還原點會是一個已經不存在的選擇。
             self.order_mode.set("intraday")
             self._order_mode_last = "intraday"
+        locked = self._order_locked()
         for value, radio in self.order_mode_radios.items():
-            radio.configure(state="disabled" if odd and value == "pre" else "normal")
+            radio.configure(state="disabled" if locked or (odd and value == "pre") else "normal")
 
         chase = self._order_uses_excel_price()
-        self.order_ticks_entry.configure(state="normal" if chase else "disabled")
+        self.order_ticks_entry.configure(state="normal" if chase and not locked else "disabled")
         self.order_multi_round_check.configure(state="normal" if chase else "disabled")
         if not chase:
             self.order_multi_round.set(False)
@@ -1021,8 +1042,18 @@ class UiOrderMixin:
         擋住而不是排隊：跟 refresh_order_plans 開頭那道 `_excel_in_use()` guard
         同一個態度——按下去卻剛好撞上忙碌就默默不做事，不是排進佇列，下一次
         「新增」還會再有機會補上。
+
+        2026/09/05 起這支也是「依序執行整批期間（包含等瀏覽器委託確認視窗那段）
+        鎖住整個設定面板」的入口，見 _order_locked 的說明。呼叫端除了原本的
+        _apply_busy_state（Excel 忙碌旗標變動），現在還多了
+        ui_order_exec._update_order_exec_ui——那支在每一筆下單狀態變化
+        （送出、等視窗、視窗關閉、換下一筆、停止……）都會呼叫，而
+        order_exec_queue 這種「整批還沒跑完」的狀態不一定伴隨著
+        _excel_in_use() 或 self.busy 的變動，不能只靠 _apply_busy_state
+        觸發的那幾次。
         """
         busy = self._excel_in_use()
+        locked = self._order_locked()
         # 「讀取ＯＯ持股」還要 Excel 真的開著才亮：這顆做的事整個就是讀那份
         # 活頁簿，沒開著根本無事可做——跟更新分頁的「更新全部帳戶」同一個規矩
         # （見 ui_sync._sync_buttons）。2026/08/31 之前這裡只看忙碌旗標，所以
@@ -1039,9 +1070,13 @@ class UiOrderMixin:
         # 根本不會碰 COM，跟以前「盤前完全不碰 COM，沒有理由跟著變灰」是同一個
         # 判斷，只是條件換成勾選狀態。它也不跟著 excel_open 走：Excel 沒開的話
         # refresh_order_plans 自己會被 _require_excel() 擋下，不必特地在這裡
-        # 先擋一次。
-        add_busy = busy and bool(self._order_sheets())
+        # 先擋一次。依序執行整批期間（locked）不管有沒有勾帳戶都一併灰掉：
+        # add_order_stock 一按下去除了可能讀 Excel，還會直接改 self.order_rows、
+        # 重畫執行預覽（見 _order_locked 的說明），跟正在跑的那批凍結資料
+        # 對不上，不是只有動 COM 那一半需要擋。
+        add_busy = (busy and bool(self._order_sheets())) or locked
         self.order_add_button.configure(state="disabled" if add_busy else "normal")
+        self.order_stock_pick.configure(state="disabled" if locked else "normal")
         # 「執行帳戶」在有事情在跑的時候鎖住。改勾選會把持股、試算整批清掉
         # （見 _on_order_account_toggled），而背景那一趟讀回來的是**改之前**
         # 那批人的資料，兩件事撞在一起的結果是清單上勾著 B、手上的試算卻是 A
@@ -1053,7 +1088,35 @@ class UiOrderMixin:
         # 而且**擋不住 <Button-1>**（那是綁在元件上的事件，不是內建的選取行為）
         # ——它只負責「看得出來現在不能動」，真正擋下來的是
         # _on_order_account_toggled 開頭那道 _order_locked()。
-        self.order_accounts.state(["disabled"] if self._order_locked() else ["!disabled"])
+        self.order_accounts.state(["disabled"] if locked else ["!disabled"])
+
+        # 「作業」三選一：切下去自己另外用 self.busy 擋（彈窗還原，見
+        # _on_order_job_changed），這裡只負責把它畫成灰的——不然人只看得到
+        # 「按了沒反應」，看不出「現在為什麼不能按」。
+        for radio in self.order_job_radios:
+            radio.configure(state="disabled" if locked else "normal")
+        # 「單位」兩組：ready 是這個作業底下這個單位有沒有接上（開機當下就
+        # 定案，不隨 locked 變），跟 locked 疊起來算，不能讓其中一個蓋掉另一個
+        # （見 ui_layout._build_order_unit 存 (radio, ready) 的理由）。
+        for radio, ready in self.order_unit_radios:
+            radio.configure(state="normal" if (ready and not locked) else "disabled")
+        # 「時機」「追價檔數」跟 odd/chase 疊起來算，併在 _sync_order_clear_controls
+        # 裡做，不在這裡重複寫一次同樣的邏輯。
+        self._sync_order_clear_controls()
+
+        # 股票清單每一列：比重／價格輸入框、移除按鈕。出清零股／盤中沒有
+        # weight_entry／price_entry（見 add_order_stock 那幾個 row.pop），
+        # 用 .get() 就自然跳過，不必另外判斷作業種類。
+        for row in self.order_rows:
+            entry = row.get("weight_entry")
+            if entry is not None:
+                entry.configure(state="disabled" if locked else "normal")
+            entry = row.get("price_entry")
+            if entry is not None:
+                entry.configure(state="disabled" if locked else "normal")
+            remove_button = row.get("remove_button")
+            if remove_button is not None:
+                remove_button.configure(state="disabled" if locked else "normal")
 
     def _order_ticks_setting(self):
         """
@@ -1222,10 +1285,11 @@ class UiOrderMixin:
             # 那張表已經是唯一的答案，這裡再摘要一次只是同一件事講兩次。
             # 這個模式沒有比重／價格，「移除」緊接在股票後面就好，不必為了
             # 對齊硬跳到最後一欄。
-            ttk.Button(block, text="移除", bootstyle="danger-outline",
-                      command=lambda: self.remove_order_stock(row)).grid(
-                row=0, column=2, sticky="w", padx=(6, 0))
+            remove_button = ttk.Button(block, text="移除", bootstyle="danger-outline",
+                      command=lambda: self.remove_order_stock(row))
+            remove_button.grid(row=0, column=2, sticky="w", padx=(6, 0))
             row["frame"] = block
+            row["remove_button"] = remove_button
             return
 
         # 比重、價格各自包一個小 Frame 再放進格子裡：label＋entry＋單位是一組
@@ -1244,9 +1308,11 @@ class UiOrderMixin:
             # 送出一張比帳上還多的委託——按鍵層級擋掉範圍外的輸入，不是送出前才報錯。
             if not hasattr(self, "_order_weight_vcmd"):
                 self._order_weight_vcmd = (self.root.register(self._order_weight_key_ok), "%P")
-            ttk.Entry(weight_box, textvariable=row["weight"], width=6,
+            weight_entry = ttk.Entry(weight_box, textvariable=row["weight"], width=6,
                      font=(self.family, FONT_SIZE),
-                     validate="key", validatecommand=self._order_weight_vcmd).pack(side="left", padx=(4, 0))
+                     validate="key", validatecommand=self._order_weight_vcmd)
+            weight_entry.pack(side="left", padx=(4, 0))
+            row["weight_entry"] = weight_entry
             ttk.Label(weight_box, text="%").pack(side="left", padx=(2, 0))
         else:
             # 出清零股：量是算出來的（持股的零股那一段，1~999 股），不是人填的。
@@ -1260,9 +1326,11 @@ class UiOrderMixin:
             ttk.Label(price_box, text="價格").pack(side="left")
             if not hasattr(self, "_order_price_vcmd"):
                 self._order_price_vcmd = (self.root.register(self._order_price_key_ok), "%P")
-            ttk.Entry(price_box, textvariable=row["price"], width=8,
+            price_entry = ttk.Entry(price_box, textvariable=row["price"], width=8,
                      font=(self.family, FONT_SIZE),
-                     validate="key", validatecommand=self._order_price_vcmd).pack(side="left", padx=(4, 0))
+                     validate="key", validatecommand=self._order_price_vcmd)
+            price_entry.pack(side="left", padx=(4, 0))
+            row["price_entry"] = price_entry
             ttk.Label(price_box, text="元").pack(side="left", padx=(2, 0))
         else:
             excel_price = self.order_prices.get(row["code"])
@@ -1271,9 +1339,10 @@ class UiOrderMixin:
             label.pack(side="left")
             row["price_label"] = label
 
-        ttk.Button(block, text="移除", bootstyle="danger-outline",
-                  command=lambda: self.remove_order_stock(row)).grid(
-            row=0, column=4, sticky="w", padx=(12, 0))
+        remove_button = ttk.Button(block, text="移除", bootstyle="danger-outline",
+                  command=lambda: self.remove_order_stock(row))
+        remove_button.grid(row=0, column=4, sticky="w", padx=(12, 0))
+        row["remove_button"] = remove_button
         row["frame"] = block
 
     def remove_order_stock(self, row):

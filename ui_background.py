@@ -1219,8 +1219,18 @@ class UiBackgroundMixin:
             self.progress.pack_forget()
         self._apply_busy_state()
 
-    def _say(self, message):
-        self.status.configure(text=message)
+    def _say(self, message, danger=False):
+        """
+        跨分頁常駐狀態列。danger=True 染成跟 ui_order._on_order_stock_list
+        那個「讀不到股票代號」同一種紅字（self.colors.danger）——目前只有
+        「委託確認視窗已開啟，去瀏覽器確認或取消」這句在用（2026/09/05 使用者
+        要求：這句話是在叫人去做一件事，混在一堆黑字狀態列裡容易被滑過去）。
+        跟那邊同一個理由：ttk.Label 換 text 不會自動把 foreground 還原，
+        每次呼叫都要自己重設，不能只在染紅那一支寫，不然下一句黑字狀態
+        會沿用上一句沒清掉的紅色。
+        """
+        self.status.configure(text=message,
+                              foreground=self.colors.danger if danger else "")
 
     def _macro_stuck_notifier(self, macro, sheet_name):
         """

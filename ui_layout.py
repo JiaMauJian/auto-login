@@ -814,10 +814,17 @@ class UiLayoutMixin:
         # 再讀第二次；出清・盤中那種更隱性，讀是讀到了，只是 I4:I13 停在上次
         # 巨集留下的舊價，不會報錯。
         ttk.Label(top, text="作業").pack(side="left")
+        # 存成屬性給 _order_excel_buttons 用：依序執行期間（order_exec_queue
+        # 非空）這一列要整組灰掉，理由跟帳戶清單同一條（見 _order_locked）——
+        # 切作業會把股票清單整批清空重選，跟正在跑的那一批凍結資料對不起來，
+        # 畫面看起來像「跑到一半突然變了」。
+        self.order_job_radios = []
         for value in (orders.JOB_TRADE, orders.JOB_CLEAR, orders.JOB_FULL):
-            ttk.Radiobutton(top, text=orders.JOB_NAMES[value], variable=self.order_job,
+            radio = ttk.Radiobutton(top, text=orders.JOB_NAMES[value], variable=self.order_job,
                             value=value, style="Choice.TRadiobutton",
-                            command=self._on_order_job_changed).pack(side="left", padx=(8, 0))
+                            command=self._on_order_job_changed)
+            radio.pack(side="left", padx=(8, 0))
+            self.order_job_radios.append(radio)
 
         ttk.Separator(frame, orient="horizontal").grid(row=1, column=0, sticky="ew")
 
@@ -826,6 +833,12 @@ class UiLayoutMixin:
         # 新的，不是每次重建——grid_remove 記得住格子位置，放回來會回到原位。
         job_bar = ttk.Frame(frame, padding=(0, 6, 0, 8))
         job_bar.grid(row=2, column=0, sticky="ew")
+        # 「單位」兩組（買賣股票／出清股票各一組，見 _build_order_unit）共用
+        # 這一份清單，跟 order_job_radios 一樣給 _order_excel_buttons 鎖。存
+        # (radio, ready) 而不是只存 radio：ready 是建立當下 orders.unit_ready
+        # 算出來、本來就該長期灰著的那一半（例如全持股交易還沒接零股），跟
+        # 「依序執行中」這個暫時性的灰要疊在一起算，不能讓後者把前者蓋掉。
+        self.order_unit_radios = []
         self.order_job_frames = {
             orders.JOB_TRADE: self._build_order_job_trade(job_bar),
             orders.JOB_CLEAR: self._build_order_job_clear(job_bar),
@@ -893,10 +906,13 @@ class UiLayoutMixin:
         """
         ttk.Label(parent, text="單位").pack(side="left")
         for value in (orders.UNIT_LOT, orders.UNIT_ODD):
-            ttk.Radiobutton(parent, text=orders.UNIT_NAMES[value], variable=self.order_unit,
+            ready = orders.unit_ready(job, value)
+            radio = ttk.Radiobutton(parent, text=orders.UNIT_NAMES[value], variable=self.order_unit,
                             value=value, style="Choice.TRadiobutton",
-                            state="normal" if orders.unit_ready(job, value) else "disabled",
-                            command=self._on_order_unit_changed).pack(side="left", padx=(8, 0))
+                            state="normal" if ready else "disabled",
+                            command=self._on_order_unit_changed)
+            radio.pack(side="left", padx=(8, 0))
+            self.order_unit_radios.append((radio, ready))
 
     def _build_order_job_trade(self, parent):
         """
