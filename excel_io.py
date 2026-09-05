@@ -336,18 +336,19 @@ def list_account_sheets(book):
 
 def first_visible_sheet(book):
     """
-    活頁簿由左到右第一個「看得見、而且不是範本／測試用分頁」的分頁
-    （xlSheetVisible，且名字不在 EXCLUDED_ACCOUNT_SHEET_NAMES 裡）。藏起來的、
-    或名字剛好是範本頁的都不算；找不到（全部都藏起來，或活頁簿裡只有範本頁）
-    回 None。
+    活頁簿由左到右第一個「算數的交易人分頁」——條件跟 list_account_sheets
+    完全一樣（看得見、名字不在 EXCLUDED_ACCOUNT_SHEET_NAMES、錨點對得上，見
+    anchor_ok）。找不到（全部都藏起來、全部被排除、或全部錨點不對）回 None。
 
-    2026/09/05 補上排除判斷：「虛擬帳戶」範本頁習慣放在活頁簿最前面（就是
-    因為它是範本才會放第一個），改之前這裡只看 Visible，會把它當成「第一個
-    分頁」讀出它的 D4~D13 當股票候選——範本頁不是真的持股，讀到的要嘛是空的
-    要嘛是舊的示範資料，「指定股票」下拉因此看不到任何一位真交易人手上實際
-    持有的股票（表現成「讀取ＯＯ持股」讀得到分頁卻抓不到股票代號）。跟
-    list_account_sheets 用同一份排除清單，兩邊對「哪些分頁不算數」的認定才不會
-    兜不起來。
+    2026/09/05 補上錨點檢查：一開始只排除了「虛擬帳戶」這個特定名字，但實測
+    發現活頁簿裡還會有別的看得見、名字也不是範本、卻不是持股管理表的分頁
+    （例如某交易人自己另外開的「OOO資產」總覽頁，A22 不是「今年報酬率」）。
+    這種分頁一樣會被 list_account_sheets 排除在「執行帳戶」之外，但改之前
+    這裡只看 Visible 跟名字，還是會把它當成「第一個分頁」，讀出它的
+    D4~D13（形狀對不上，通常是空的）當股票候選——「讀取ＯＯ持股」因此讀到
+    一個聽起來不像交易人、股票代號也是空的分頁。用錨點取代單純的名字排除，
+    才是真正跟 list_account_sheets 同一個判斷：「這個分頁算不算一位交易人」，
+    不是「這個分頁的名字認不認識」——名字沒辦法窮舉，錨點才是結構上的答案。
 
     獨立成一支是因為下單分頁「讀取ＯＯ持股」那顆按鈕要在畫面上講出這個分頁
     的名字（見 ui_order.refresh_order_stock_list），不能只跟 read_stock_list
@@ -355,7 +356,8 @@ def first_visible_sheet(book):
     `book.Worksheets(1)`——理由同 read_stock_list 那段說明。
     """
     return next((s for s in book.Worksheets
-                 if s.Visible == -1 and s.Name.strip() not in EXCLUDED_ACCOUNT_SHEET_NAMES),
+                 if s.Visible == -1 and s.Name.strip() not in EXCLUDED_ACCOUNT_SHEET_NAMES
+                 and anchor_ok(s)),
                 None)
 
 
