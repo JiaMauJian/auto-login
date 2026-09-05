@@ -450,7 +450,13 @@ def read_page(page):
     即時從頁面上的輸入格算出來，所以看到什麼就讀到什麼。
     """
     data = page.evaluate("() => (typeof window.__SIM__ === 'function') ? window.__SIM__() : null")
-    if not data:
+    # 不能寫成 `if not data:`——build() 的 A2「查詢整支失敗」把三支全選的時候會
+    # 合法地回一個空字典 `{}`，那是「三支都查詢失敗」的正常結果，不是「這個分頁
+    # 不是模擬頁面」。空字典在 Python 裡跟 None 一樣是假值，`not data` 分不出這
+    # 兩種情況，會把前者也印成「可能被導去別的網址了」這種誤導的訊息。JS 那邊只
+    # 有真的找不到 window.__SIM__ 這個函式時才會回 null，两種情況要用 `is None`
+    # 分清楚，不能共用同一句判斷。
+    if data is None:
         raise RuntimeError("這個分頁不是模擬頁面（找不到 window.__SIM__），可能被導去別的網址了")
     return data
 
@@ -517,6 +523,17 @@ def render_html(account, data):
   button {{ font: inherit; padding: 5px 12px; margin-right: 8px; cursor: pointer;
            border: 1px solid #c4c7c5; border-radius: 4px; background: #fff; }}
   .hint {{ color: #5f6368; font-size: 12px; margin-top: 8px; line-height: 1.7; }}
+  section.faults {{ border: 1px dashed #b3261e; background: #fff8f0; }}
+  .faults h3 {{ font-size: 13px; margin: 14px 0 6px; color: #3c4043; }}
+  .faults h3:first-of-type {{ margin-top: 0; }}
+  .fault-table {{ width: auto; }}
+  .fault-table td {{ padding: 4px 10px 4px 0; text-align: left; border: none; }}
+  .fault-table .stk {{ font-weight: bold; white-space: nowrap; }}
+  .faults select {{ font: inherit; padding: 4px; margin-right: 6px; }}
+  .faults .row {{ display: flex; align-items: center; gap: 10px; margin: 6px 0; }}
+  input.fcode {{ width: 64px; }}
+  input.fmsg {{ width: 160px; }}
+  input.fmsg.wide {{ width: 320px; }}
 </style></head><body>
 
 <div class="banner">模擬資料<small>這一頁不是券商網站，是程式自己畫出來的假頁面，只用來測試多帳號流程</small></div>
@@ -528,6 +545,92 @@ def render_html(account, data):
     日期 <span id="today"></span>
     交割日 <span id="settle"></span></div>
 </header>
+
+<section class="faults">
+  <h2>異常注入（測試用途，全部預設關閉，關著時行為跟現在完全一樣）</h2>
+  <div class="hint">
+    這一區跟這個帳號本身的持股／成交資料無關，是給程式測試用的。勾了就每次都發生，
+    不是像 IOC_FILL_CHANCE／ROD_FILL_CHANCE 那樣用機率決定要不要發生——取消勾選
+    立刻恢復，跟上面幾格輸入格同一個原則，沒有「套用」按鈕、也沒有「改了忘記按」
+    的陷阱。
+  </div>
+
+  <h3>A. 查詢層（fetch.collect 讀到的三支查詢）</h3>
+  <table class="fault-table">
+    <tr>
+      <td class="stk">未實現損益</td>
+      <td><select id="faultPnlMode">
+        <option value="ok">正常</option>
+        <option value="retcode">retcode 異常</option>
+        <option value="missing">查詢失敗（回應裡沒有這個 key）</option>
+        <option value="identity">身分被頂掉（bhno/cseq 換成別人）</option>
+      </select></td>
+      <td>retcode <input id="faultPnlCode" class="fcode" value="000004"></td>
+      <td>retmsg <input id="faultPnlMsg" class="fmsg" value="帳號錯誤"></td>
+    </tr>
+    <tr>
+      <td class="stk">交割金額</td>
+      <td><select id="faultDueMode">
+        <option value="ok">正常</option>
+        <option value="retcode">retcode 異常</option>
+        <option value="missing">查詢失敗（回應裡沒有這個 key）</option>
+        <option value="drop_today">缺今天那一列（trade=今天）</option>
+      </select></td>
+      <td>retcode <input id="faultDueCode" class="fcode" value="000004"></td>
+      <td>retmsg <input id="faultDueMsg" class="fmsg" value="帳號錯誤"></td>
+    </tr>
+    <tr>
+      <td class="stk">銀行餘額</td>
+      <td><select id="faultBankMode">
+        <option value="ok">正常</option>
+        <option value="retcode">retcode 異常</option>
+        <option value="missing">查詢失敗（回應裡沒有這個 key）</option>
+      </select></td>
+      <td>retcode <input id="faultBankCode" class="fcode" value="000004"></td>
+      <td>retmsg <input id="faultBankMsg" class="fmsg" value="帳號錯誤"></td>
+    </tr>
+  </table>
+  <div class="hint">
+    retcode/retmsg 的預設值（000004／帳號錯誤）是真的查得到的一組——2026/08/21
+    偵察 `queryCustInfo` 查無此帳號時券商原樣回的，不是自己編的代碼，六位數格式
+    跟真的一樣。「身分被頂掉」「缺今天那一列」只對前面各自那一支有意義，其餘
+    查詢沒有那個選項（未實現損益以外的兩支回應裡本來就沒有 bhno/cseq，見
+    fetch.py 的說明，硬加只會讓假網頁跟真網站形狀不一樣）。
+  </div>
+
+  <h3>B／D. 下單與撤單層（__SIM_ORDER__，供 dev_tools/simulate_orders.py 呼叫）</h3>
+  <div class="row">
+    <label><input type="checkbox" id="faultOrderReject"> 委託一律被拒（送出前就擋下來，委託查詢裡不會出現這一筆）</label>
+    <input id="faultOrderRejectMsg" class="fmsg wide" value="IOC. FOK 委託未能成交，委託失敗">
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="faultFillGhost"> 成交了但持股不變（回報 matched&gt;0，但 #pnl 的股數不會跟著動）</label>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="faultCancelReject"> 撤單一律失敗（單子還原封不動掛在外面，跟「網站不讓刪」不一樣）</label>
+    <input id="faultCancelRejectMsg" class="fmsg wide" value="刪單失敗，委託狀態已變更">
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="faultCancelMissing"> 撤單時查無此單（撤單當下這幾筆已經從委託查詢裡消失）</label>
+  </div>
+  <div class="hint">
+    委託被拒的預設訊息不是編的：`order_fill.confirm_order` 的 message 就是網站
+    `#result0` 的原文，偵察資料\20260828_1055_..._委託查詢.json 那筆 IOC 完全
+    沒吃到價的 errmsg 正是這句「IOC. FOK 委託未能成交，委託失敗」——現有假網頁
+    C1 那條路本來就是照這句抄的，這裡借同一句，不是自己編。委託被「送出前就
+    擋下來」跟「送出去、IOC 沒吃到價」是不同情境，但目前沒有真的看過前者的
+    券商原文，兩種情境共用這句已知是真的訊息，總比自己編一句要接近真實。<br>
+    撤單失敗（D1）沒有這種真實樣本可以借——`order_cancel.py` 卡在 TWCA 憑證
+    簽章之前，撤單被拒這個情境從沒被真的觸發過，那句只是照著「刪單成功」的
+    語氣寫的，不是抄來的數值。<br>
+    兩個訊息輸入格都接上跟真帳號同一套判讀：ok 是從訊息文字反推的（委託那句
+    看有沒有「委託成功」四個字，撤單那句看有沒有「刪單成功」——分別對應
+    `order_fill.confirm_order`／`order_cancel.py` 自己的判斷式），不是各自存一個
+    獨立的布林值。這樣輸入格打的字跟 ok 選項就不可能兜出真實世界不會出現的
+    組合（例如訊息寫「委託成功」卻勾著「委託一律被拒」）——真的要測這種矛盾
+    訊息，改訊息文字本身就好，ok 自然會跟著變。
+  </div>
+</section>
 
 <section>
   <h2>銀行餘額</h2>
@@ -681,6 +784,36 @@ function trades() {{
   }}).filter(t => t.code && t.qty > 0);
 }}
 
+// ---- 異常注入：讀「異常注入」那個 section 現在勾了什麼 ----
+//
+// 跟 holdings()／trades() 同一個做法：不存狀態，每次要用就直接讀 DOM，
+// 這樣「改完立刻生效」不必額外接 change 事件去同步一份影子狀態。
+
+function faults() {{
+  const val = (id) => {{ const el = document.getElementById(id); return el ? el.value : ''; }};
+  const checked = (id) => {{ const el = document.getElementById(id); return el ? el.checked : false; }};
+  return {{
+    pnlMode: val('faultPnlMode'), pnlCode: val('faultPnlCode'), pnlMsg: val('faultPnlMsg'),
+    dueMode: val('faultDueMode'), dueCode: val('faultDueCode'), dueMsg: val('faultDueMsg'),
+    bankMode: val('faultBankMode'), bankCode: val('faultBankCode'), bankMsg: val('faultBankMsg'),
+    orderReject: checked('faultOrderReject'), orderRejectMsg: val('faultOrderRejectMsg'),
+    fillGhost: checked('faultFillGhost'),
+    cancelReject: checked('faultCancelReject'), cancelRejectMsg: val('faultCancelRejectMsg'),
+    cancelMissing: checked('faultCancelMissing'),
+  }};
+}}
+
+// A3「身分被頂掉」換成的那個人。只換 cseq 就夠讓 fetch.collect 的核對認定
+// 「跟登入的不符」，bhno 照抄 META.bhno（含開頭那個 1，格式要跟真的一樣，
+// 否則會被判成「格式錯」而不是「換了個人」，見 render_html 開頭的說明）。
+const OTHER_IDENTITY = {{ bhno: META.bhno, cseq: '000001' }};
+
+function swapIdentity(item) {{
+  const swapped = Object.assign({{}}, item, OTHER_IDENTITY);
+  swapped.stkdat = (item.stkdat || []).map((d) => Object.assign({{}}, d, OTHER_IDENTITY));
+  return swapped;
+}}
+
 // ---- 組成跟真 API 一樣形狀的回應 ----
 
 // 交割日是方法二的關鍵：cdate 比今天晚才代表這筆錢還沒離開銀行帳戶。
@@ -746,15 +879,33 @@ function build() {{
     {{ trade: STAMP, cdate: SETTLE, pay_amt: String(sumOf('0')) }},
   ];
 
-  return {{
-    '未實現損益': Object.assign({{ arrays: pnl }}, ok),
-    '交割金額': Object.assign({{ data: due }}, ok),
-    '銀行餘額': Object.assign({{ data: [{{
+  // ---- 異常注入（A1~A4，見「異常注入」那個 section）----
+  // 全部關著（f.xxxMode === 'ok'）的時候，下面這幾段每一個 if 都不成立，
+  // 組出來的東西跟改動前逐行一樣——這是「預設關閉、行為不變」那條硬規則
+  // 落到程式碼的樣子，不是靠額外的總開關擋一層。
+  const f = faults();
+
+  const pnlRows = f.pnlMode === 'identity' ? pnl.map(swapIdentity) : pnl;
+  const pnlResp = Object.assign({{ arrays: pnlRows }},
+      f.pnlMode === 'retcode' ? {{ retcode: f.pnlCode, retmsg: f.pnlMsg }} : ok);
+
+  const dueRows = f.dueMode === 'drop_today' ? due.filter((row) => row.trade !== STAMP) : due;
+  const dueResp = Object.assign({{ data: dueRows }},
+      f.dueMode === 'retcode' ? {{ retcode: f.dueCode, retmsg: f.dueMsg }} : ok);
+
+  const bankResp = Object.assign({{ data: [{{
       qry_date: STAMP, qry_times: '090000',
       bnkno: '050', bnkacc: META.bnkacc,
       Amount: cents,
-    }}] }}, ok),
-  }};
+    }}] }}, f.bankMode === 'retcode' ? {{ retcode: f.bankCode, retmsg: f.bankMsg }} : ok);
+
+  const result = {{}};
+  // A2「查詢整支失敗」就是這裡：那個 key 直接不放進去，跟 fetch.collect
+  // 讀不到那個 key 時走的「查詢失敗」分支對上（見 fetch.py `data is None` 那段）。
+  if (f.pnlMode !== 'missing') result['未實現損益'] = pnlResp;
+  if (f.dueMode !== 'missing') result['交割金額'] = dueResp;
+  if (f.bankMode !== 'missing') result['銀行餘額'] = bankResp;
+  return result;
 }}
 
 window.__SIM__ = build;
@@ -845,6 +996,18 @@ function genOrdno() {{
 // （#mat）多一筆——後者才是「未實現損益」「交割金額查詢」算現金與股數的唯一
 // 資料來源（見 build() 與檔案開頭的說明），只改 qty 不會反映到那兩支查詢上。
 function applyFill(code, side, qty, price) {{
+  if (faults().fillGhost) {{
+    // B2：模擬「委託回報成交了，但持股快照沒有跟著更新」——2026/09/04 那個
+    // 「多輪出清重複賣同一批部位」的臭蟲，成因正是這種回報跟持股對不上；
+    // 假帳號原本每次成交一定會呼叫到這裡把 #pnl 的股數改掉，順便讓
+    // order_exec_round_all_zero_fill 被打成 False、confirmed_harmless 那個
+    // 例外跟著失效，逼下面「沒有進展就停」那道保險真的擋一次——不這樣注入的
+    // 話，那道保險在純假帳號的情境下永遠測不到（見 ui_order_exec.py 1259~
+    // 1285 行）。這裡故意整個不做：連成交明細（#mat）也不留一筆，因為要驗的
+    // 是「回報跟持股本身對不上」，留一筆成交明細卻不影響股數，是另一種真實
+    // 世界不會出現的組合（錢動了、股數沒動）。
+    return;
+  }}
   const row = [...document.querySelectorAll('#pnl tbody tr')]
       .find((tr) => tr.dataset.code === code);
   if (row) {{
@@ -854,6 +1017,20 @@ function applyFill(code, side, qty, price) {{
   }}
   tradeRow({{ code, bs: side, qty, price, settled: '0' }});
   refresh();
+}}
+
+// 真帳號那條路的 ok 不是網站另外給的欄位，是從結果訊息反推的——
+// order_fill.confirm_order 就是拿 "委託成功" in message 判斷（見該函式
+// docstring），order_cancel.py 判斷「刪單成功」是同一招。假帳號如果自己維護
+// 一個獨立的布林值，遇到 B1／D1 那兩格可以自由改字的輸入格，就有機會湊出
+// 「訊息說成功、旗標說失敗」這種真實世界不會出現的組合。這裡跟真帳號共用同一套
+// 判讀，讓 ok 永遠是訊息文字的忠實反映，不是另一個可能兜不起來的來源。
+function orderOk(message) {{
+  return message.includes('委託成功');
+}}
+
+function cancelOk(message) {{
+  return message.includes('刪單成功');
 }}
 
 // orgqty 的單位跟真的網站一樣看盤別：整股（apcode '1'）填的是「張」，零股
@@ -868,6 +1045,15 @@ function sharesOf(order) {{
 }}
 
 function placeOrder(opts) {{
+  // B1：委託一律被拒。真實情境是券商在委託送出前就擋下來（額度、資格…），
+  // 從來不會有委託書號，所以這裡在 genOrdno()／ORDERS.push 之前就回頭，委託
+  // 查詢頁自然看不到這一筆——跟 IOC 送出去、當場沒吃到價那種「已經是一張單、
+  // 只是沒成交」是完全不同的兩件事，不能共用下面 errcode=LOT0048 那條路。
+  if (faults().orderReject) {{
+    const message = faults().orderRejectMsg;
+    return {{ ok: orderOk(message), message, matched: 0 }};
+  }}
+
   const ordno = genOrdno();
   const order = {{
     ordno, stockno: opts.code, buysell: opts.side, apcode: opts.apcode, trade: '0',
@@ -875,6 +1061,14 @@ function placeOrder(opts) {{
     orgqty: String(opts.qty), matqty: '0', celqty: '0',
     ordstatus: '2', act: 'O', bs_flag: opts.bsFlag,
     orddate: STAMP, ordtime: '090000000', workdate: STAMP,
+    // errcode/errmsg 存在訂單物件上（不是 snapshotOrder 現算的），因為它不是
+    // matqty/celqty 推得出來的衍生值——IOC 完全沒吃到價時是券商決定的失敗
+    // 原因，跟成交量無關。settled 是這筆訂單「還會不會再變」的旗標，見
+    // resolvePending／cancelOrders 為什麼不能繼續靠 matqty/celqty 是不是
+    // 都是 '0' 來推：C1 修正之後，IOC 失敗單的 matqty/celqty 也都是 '0'，
+    // 跟「ROD 剛掛上去、還沒有結果」在數字上長得一模一樣，會被 resolvePending
+    // 誤認成還沒定案、之後平白擲骰子擲出一筆本來已經失敗的委託成交。
+    errcode: '00000000', errmsg: '', settled: false,
   }};
   ORDERS.push(order);
 
@@ -890,42 +1084,65 @@ function placeOrder(opts) {{
       filledLots = Math.max(1, Math.round(totalLots * (0.2 + Math.random() * 0.8)));
     }}
     order.matqty = String(filledLots);
-    order.celqty = String(totalLots - filledLots);
-    order.act = 'C';   // 沒吃到的部份，IOC 這一刻交易所就自動取消了
+    // IOC 送出去那一刻結果就定案了，不管有沒有吃到價——跟 ROD 掛著要等之後
+    // 查詢才知道結果是兩回事，settled 要在這裡就設成 true。
+    order.settled = true;
 
     if (filledLots === 0) {{
-      return {{ ok: false, message: 'IOC. FOK 委託未能成交，委託失敗', ordno, matched: 0 }};
+      // C1：完全沒吃到價，改成真實形狀（偵察資料\20260828_1055_..._委託查詢.json
+      // 那一列：errcode LOT0048、errmsg 原句、celqty 是 '0'、act 仍是 'O' 不是
+      // 'C'——真實案例裡這一列完全沒被交易所標記過「取消」，是「這張單從沒
+      // 成交過」，跟下面「部分成交、剩下那截被自動取消」是不同的兩件事，
+      // celqty／act 不能套同一套算法。舊版這裡會把 celqty 塞成 totalLots
+      // （當成「沒吃到的部份被自動取消」），跟真實回應對不上。
+      order.celqty = '0';
+      order.errcode = 'LOT0048';
+      order.errmsg = 'IOC. FOK 委託未能成交，委託失敗';
+      return {{ ok: orderOk(order.errmsg), message: order.errmsg, ordno, matched: 0 }};
     }}
+    order.celqty = String(totalLots - filledLots);
+    order.act = 'C';   // 有吃到量的這種才是「沒吃到的部份被自動取消」
     applyFill(opts.code, opts.side, filledLots * SHARES_PER_LOT, opts.price);
     const note = filledLots < totalLots
         ? `（部分成交 ${{filledLots}}/${{totalLots}} 張，其餘 IOC 自動取消）` : '';
+    const fillMessage = '委託成功, 委託書編號: ' + ordno + note;
     // matched 是這一次呼叫「當場」確定成交的股數（IOC 沒有懸而未決這回事，
     // 送出去那一刻結果就確定了）——呼叫端（ui_order_exec._order_fill_job）
     // 拿它來判斷「這一輪是不是真的什麼都沒發生」，不是靠事後比對持股猜的，
-    // 見那邊「沒有進展就停」那道保險怎麼用這個欄位。
-    return {{ ok: true, message: '委託成功, 委託書編號: ' + ordno + note, ordno,
+    // 見那邊「沒有進展就停」那道保險怎麼用這個欄位。B2 開著的時候 matched 一樣
+    // 照實回報（這一格是券商回的成交量，不是我們自己有沒有記帳），持股沒跟著
+    // 動是 applyFill 那一層的事，兩者刻意分開。
+    return {{ ok: orderOk(fillMessage), message: fillMessage, ordno,
              matched: filledLots * SHARES_PER_LOT }};
   }}
   // ROD：先掛著，成不成交留到之後查詢那一刻才決定（見 resolvePending），
   // 下單當下 matched 一律是 0——不是「還不知道」，是「這一刻確定還沒有」。
-  return {{ ok: true, message: '委託成功, 委託書編號: ' + ordno, ordno, matched: 0 }};
+  const rodMessage = '委託成功, 委託書編號: ' + ordno;
+  return {{ ok: orderOk(rodMessage), message: rodMessage, ordno, matched: 0 }};
 }}
 
 function resolvePending() {{
   ORDERS.forEach((order) => {{
-    if (order.matqty !== '0' || order.celqty !== '0') return;   // 已經有結果了，不重算
+    if (order.settled) return;   // 已經定案了，不重算（見 placeOrder 為什麼要存這個旗標）
     if (Math.random() < ROD_FILL_CHANCE) {{
       order.matqty = order.orgqty;
+      order.settled = true;
       applyFill(order.stockno, order.buysell, sharesOf(order), Number(order.odprice));
     }}
   }});
 }}
 
 function snapshotOrder(order) {{
-  // celable／errcode 不存進 ORDERS，是每次查詢當下依 matqty/celqty 現算的
-  // 衍生欄位——省得兩處分別維護，改一個忘了改另一個。
-  const open = order.matqty === '0' && order.celqty === '0';
-  return Object.assign({{}}, order, {{ errcode: '00000000', celable: open ? '1' : '0' }});
+  // celable 是每次查詢當下依 matqty/celqty/errcode 現算的衍生欄位，跟
+  // order_query.normalize() 算「有效數量」(left) 用同一個算式（orgqty 減掉
+  // 已成交、已取消），確保這裡的「還有沒有剩」跟畫面那邊看到的是同一個數字：
+  //   left > 0（還有委託沒被交易所結案）且沒有錯誤 -> '1'（開放，可撤）
+  //   left <= 0（不管是全部成交、全部取消、還是部分成交+部分取消都算數）-> '0'
+  //   errcode 不是 '00000000' -> '2'（失敗，這是真實回應裡看到的值，覆蓋上面兩種）
+  // errcode 本身不在這裡覆蓋——它是下單當下就決定的，不是查詢時現算的。
+  const left = Number(order.orgqty) - Number(order.matqty) - Number(order.celqty);
+  const celable = order.errcode !== '00000000' ? '2' : (left > 0 ? '1' : '0');
+  return Object.assign({{}}, order, {{ celable }});
 }}
 
 function queryOrders() {{
@@ -934,17 +1151,43 @@ function queryOrders() {{
 }}
 
 function cancelOrders(ordnos) {{
+  const f = faults();
   const wanted = new Set(ordnos);
+
+  if (f.cancelMissing) {{
+    // D2：撤單當下這幾筆已經「查無此單」——直接從 ORDERS 拿掉，底下的
+    // results／locked 就都不會提到它。呼叫端（simulate_orders.cancel_orders）
+    // 本來就是拿 wanted 減掉「results ∪ locked」的差集當 missing，這裡不用
+    // 另外組一份 missing 清單出來，重複那段已經在 Python 那邊寫好的邏輯。
+    ORDERS = ORDERS.filter((order) => !wanted.has(order.ordno));
+  }}
+
   const results = [];
   const locked = [];
   ORDERS.forEach((order) => {{
     if (!wanted.has(order.ordno)) return;
-    if (order.matqty !== '0' || order.celqty !== '0') {{ locked.push(order.ordno); return; }}
+    if (order.settled) {{ locked.push(order.ordno); return; }}   // 已經有結果了，撤不動
+    if (f.cancelReject) {{
+      // D1：撤單請求網站真的收到了，但被拒絕——訂單原封不動留在外面（不
+      // 改 celqty/act/settled），跟上面 locked 那種「網站根本不讓你勾選」
+      // 是兩種不同的失敗，畫面上要分得出來（一個在 results 裡 ok:false，
+      // 一個在 locked 裡），所以擺在 results，不要塞進 locked。ok 一樣是從
+      // 訊息文字反推（見 cancelOk），不是獨立存的旗標。
+      const message = f.cancelRejectMsg;
+      results.push({{
+        ordno: order.ordno, code: order.stockno,
+        side: order.buysell === 'B' ? '買進' : '賣出',
+        ok: cancelOk(message), message,
+      }});
+      return;
+    }}
     order.celqty = order.orgqty;
     order.act = 'C';
+    order.settled = true;
+    const message = '刪單成功';
     results.push({{
       ordno: order.ordno, code: order.stockno,
-      side: order.buysell === 'B' ? '買進' : '賣出', ok: true, message: '刪單成功',
+      side: order.buysell === 'B' ? '買進' : '賣出', ok: cancelOk(message), message,
     }});
   }});
   return {{ results, locked }};
